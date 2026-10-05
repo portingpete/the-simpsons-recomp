@@ -31,7 +31,7 @@ a.log=a.log.resolve()
 if not a.log.is_relative_to((ROOT/'build').resolve()) or a.log.suffix.lower()!='.log':
     p.error('--log must be a .log file beneath this workspace build directory')
 a.log.parent.mkdir(parents=True,exist_ok=True)
-command=[str(a.executable),'--image',str(ROOT/'analysis/simpsons.pe')]
+command=[str(a.executable),'--image',str(ROOT/'analysis/simpsons.pe'),'--mute-audio']
 if a.hold_on_failure: command.append('--hold-on-failure')
 if a.profile_store: command += ['--profile-store',str(a.profile_store)]
 if a.content_store: command += ['--content-store',str(a.content_store)]

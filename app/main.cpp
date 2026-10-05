@@ -22,6 +22,7 @@ struct Options {
     bool firstMissionCompletion=false;
     bool bartmanBegins=false;
     bool auditStagePlayIntro=false;
+    bool muteAudio=false;
     bool vsync=false;
     bool autoDefeatLocEnemies=false;
     bool inputRecordingAutoStart=false,inputPlaybackFromFirstPoll=false,inputPlaybackContinueLive=false;
@@ -77,6 +78,7 @@ Options parse(int argc,char** argv) {
         }
         else if(arg=="--resource-audit" && out.resourceAudit.empty()) out.resourceAudit=value();
         else if(arg=="--play-stage-intro" && !out.auditStagePlayIntro) out.auditStagePlayIntro=true;
+        else if(arg=="--mute-audio" && !out.muteAudio) out.muteAudio=true;
         else if(arg=="--auto-defeat-loc-enemies" && !out.autoDefeatLocEnemies) out.autoDefeatLocEnemies=true;
         else if(arg=="--local-profile") {
             const auto selection=value();
@@ -115,6 +117,7 @@ Options parse(int argc,char** argv) {
         if(out.frameRate)throw std::runtime_error("Frame rate is a game launch option");
         if(out.uncappedFrameRate)throw std::runtime_error("Uncapped frame rate is a game launch option");
         if(out.vsync)throw std::runtime_error("Vsync is a game launch option");
+        if(out.muteAudio)throw std::runtime_error("Audio muting is a game launch option");
         if((out.create && out.list) || out.store.empty() || !out.image.empty() || !out.content.empty() || !out.captures.empty() || !out.controllerInput.empty() || !out.frameTiming.empty() || out.hold || anyProfile)
             throw std::runtime_error("Profile management requires --profile-store and exactly one create/list operation");
     } else if(out.image.empty()) throw std::runtime_error("A game launch requires --image");
@@ -148,9 +151,10 @@ int main(int argc,char** argv) {
             "       Add --bartman-begins to open the original Bartman Begins stage directly.\n"
             "       Add --stage <packaged-map-stem> for an original direct stage audit; --play-stage-intro retains opening movies; --resource-audit <jsonl> saves encounter receipts.\n"
             "       Add --auto-defeat-loc-enemies to defeat NPC enemies in Land of Chocolate.\n"
+            "       Sound is enabled by default; add --mute-audio for silent diagnostic runs.\n"
             "       SimpsonsNative --profile-store <directory> --create-local-profile <name>\n"
             "       SimpsonsNative --profile-store <directory> --list-local-profiles\n"
-            "Diagnostic bootstrap; launches are muted. Local profiles provide offline session state; game selection and saves remain under development.\n",e.what());
+            "Native development build. Local profiles provide offline session state; gameplay coverage remains incomplete.\n",e.what());
         return 2;
     }
     std::unique_ptr<Simpsons::Runtime> runtime;
@@ -176,6 +180,7 @@ int main(int argc,char** argv) {
         }
         StackSampler::startFromEnvironment();
         runtime=std::make_unique<Simpsons::Runtime>();
+        runtime->audioMuted=options.muteAudio;
         runtime->resourceAudit.configure(options.resourceAudit);
         runtime->auditStage=options.auditStage;
         runtime->auditStagePlayIntro=options.auditStagePlayIntro;
@@ -220,7 +225,7 @@ int main(int argc,char** argv) {
                 slot,options.profiles[slot]->c_str());
         }
         runtime->initialize(ctx);
-        fprintf(stderr,"[BOOT] original entry=0x82432280; audio muted; gameplay has not been verified\n");
+        fprintf(stderr,"[BOOT] original entry=0x82432280; audio %s; gameplay coverage remains incomplete\n",options.muteAudio?"muted":"enabled");
         std::set_terminate([]{
             try { if(auto error=std::current_exception()) std::rethrow_exception(error); }
             catch(const std::exception& e) { fprintf(stderr,"[TERMINATE] uncaught %s\n",e.what()); }

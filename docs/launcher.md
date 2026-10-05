@@ -9,6 +9,11 @@ The `.cmd` version remains available and may briefly show a command window.
 This is a **native development build**. Gameplay coverage is incomplete, and
 unqualified engine paths can still stop the game.
 
+Sound is enabled on normal launches and follows the default Windows audio
+device. For silent diagnostics, add `--mute-audio` when running
+`SimpsonsNative.exe` directly. The bounded `tools/run_native.py` diagnostic
+helper supplies that option automatically.
+
 For the first mission's completion transition, double-click **Play First Mission -
 Completion.lnk**. This shortcut dispatches the game directly with
 `--first-mission-completion`. Each launch copies the selected

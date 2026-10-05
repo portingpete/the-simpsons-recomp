@@ -11,11 +11,14 @@ art, and vendored translator dependencies.
 
 ## Current development state
 
-The existing local build has reached initial gameplay. Project reports cover
-movement and jumping, native mouse and keyboard input, native video settings,
-first-mission completion, and rendering and crash fixes. The port is still in
-development; level traversal, stability, visual fidelity, and performance remain
-unfinished. See [STATUS.md](STATUS.md) for recorded verification and limitations.
+The existing local build loads all levels. Full gameplay testing across those
+levels is still incomplete. Project reports cover movement and jumping, native
+mouse and keyboard input, native video settings, first-mission completion, and
+rendering and crash fixes. The port is still in development; progression,
+stability, visual fidelity, and performance need further testing and refinement.
+See [STATUS.md](STATUS.md) for current coverage and historical verification.
+
+Sound is enabled by default. Use `--mute-audio` for muted diagnostic runs.
 
 ## Getting started
 

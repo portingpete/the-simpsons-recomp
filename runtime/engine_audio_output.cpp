@@ -237,7 +237,7 @@ void EngineAudioOutput::acquire(PPCContext& ctx,uint8_t* base) {
     const HRESULT hr=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
     if(FAILED(hr)) throw Audio::OutputError("Initialize Dac0 output MTA",hr);
     s.apartment=true;
-    try {s.native=std::make_unique<Audio::NativeAudioOutput>(Audio::NativeAudioOutput::Options{.capacity=4,.muted=true,.deviceId={}});}
+    try {s.native=std::make_unique<Audio::NativeAudioOutput>(Audio::NativeAudioOutput::Options{.capacity=4,.muted=s.runtime.audioMuted,.deviceId={}});}
     catch(...) {CoUninitialize();s.apartment=false;throw;}
     const auto endpoint=s.native->endpoint();
     std::fprintf(stderr,"[NATIVE AUDIO] Dac0 engine acquired owner=%08X root=%08X mixer=%08X generation=%llu endpoint_channels=%u mask=%08X muted=%u; source not configured\n",
@@ -266,7 +266,7 @@ void EngineAudioOutput::source(PPCContext& ctx,uint8_t* base) {
     // This typed identity names real native ownership. It is deliberately not
     // mapped memory and must never reach a console SDK dereference.
     PPC_STORE_U32(c.owner+0x40,c.id);ctx.r3.u64=0;ctx.lr=0x82345920;
-    std::fprintf(stderr,"[NATIVE AUDIO] Dac0 native source owner=%08X identity=%08X; Windows standard 5.1 adaptation, source_slots=2 downstream_slots=4, muted\n",c.owner,c.id);
+    std::fprintf(stderr,"[NATIVE AUDIO] Dac0 native source owner=%08X identity=%08X; Windows standard 5.1 adaptation, source_slots=2 downstream_slots=4, muted=%u\n",c.owner,c.id,s.native->endpoint().muted);
 }
 void EngineAudioOutput::activate(PPCContext& ctx,uint8_t* base) {
     auto& s=*state;std::lock_guard lock(s.mutex);auto& c=s.frame(ctx,base);

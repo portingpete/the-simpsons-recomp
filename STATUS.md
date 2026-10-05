@@ -1,3 +1,16 @@
+# Current development status - 2026-10-05
+
+The existing local build loads all levels. Full gameplay testing across all
+levels is still incomplete; loading a level does not establish that its
+progression, transitions, rendering, audio, and extended stability have all been
+verified. The port remains in development.
+
+Sound is enabled by default. Use `--mute-audio` for muted diagnostic runs.
+
+The reports below are historical checkpoints. Their bounded verification and
+limitations describe those earlier builds, rather than the current level-loading
+coverage.
+
 # Goal achieved - reach gameplay without crashing (2026-09-19)
 
 Run315d reaches the level and visibly completes two A-triggered jumps and

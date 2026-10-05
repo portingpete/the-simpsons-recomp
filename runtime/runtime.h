@@ -147,6 +147,9 @@ public:
     std::shared_ptr<EngineAudioOwners> engineAudio;
     std::shared_ptr<EngineAudioReader> engineAudioReader;
     std::shared_ptr<EngineAudioOutput> engineAudioOutput;
+    // Standalone runtime fixtures stay silent; the game entry point enables
+    // sound unless its diagnostic --mute-audio option is selected.
+    bool audioMuted=true;
     // Optional synchronous diagnostic observer at verified main-thread audio
     // boundaries. Production leaves it empty. A fixture may stop by throwing;
     // returning never substitutes any original/native operation or result.
