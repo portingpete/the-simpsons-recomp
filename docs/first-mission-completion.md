@@ -1,7 +1,12 @@
-# First-mission completion launcher
+# First-mission completion diagnostic
 
-Double-click **Play First Mission - Completion.lnk**. The shortcut launches
-directly without a startup window or an extra Play click. It loads Land of Chocolate through the
+For development testing, run the native helper from PowerShell:
+
+```powershell
+& .\build\native\SimpsonsLauncher.exe --first-mission-completion
+```
+
+This diagnostic mode loads Land of Chocolate through the
 original developer stream route, waits for its map initialization to finish,
 and invokes the original mission-complete handler once. Bootstrap movies are
 skipped; the completion outro and results remain enabled.
@@ -80,4 +85,4 @@ preference hashes remained unchanged; the hashes are recorded in
 `build/mission-completion-launcher/source-store-hashes.json`.
 
 The follow-up manual run reached the completion movie, then exposed an ordinary
-dual-texture fallback guard defect. See [the new crash repair and direct startup](dualtextured-completion-crash.md).
+dual-texture fallback guard defect. See the new crash repair and direct startup (local development record).

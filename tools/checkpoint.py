@@ -18,7 +18,7 @@ out=ROOT/'checkpoints'/f'{a.name}.zip'
 out.parent.mkdir(exist_ok=True)
 files=[f for d in ('app','runtime','renderer','audio','tools','config','tests','docs','third_party') for f in (ROOT/d).rglob('*')
        if f.is_file() and '__pycache__' not in f.parts]
-files += [ROOT/'CMakeLists.txt',ROOT/'.gitignore',ROOT/'README.md',ROOT/'STATUS.md',ROOT/'Play The Simpsons Game.cmd']
+files += [ROOT/'CMakeLists.txt',ROOT/'.gitignore',ROOT/'README.md',ROOT/'Play The Simpsons Game.cmd']
 authored=set(files)
 files += [f for f in (ROOT/'analysis').glob('*.json')]
 files += [f for f in (ROOT/'analysis/ida').rglob('*') if f.is_file() and f.suffix in ('.json','.txt')]

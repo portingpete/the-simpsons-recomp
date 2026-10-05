@@ -12,11 +12,10 @@ art, and vendored translator dependencies.
 ## Current development state
 
 The existing local build loads all levels. Full gameplay testing across those
-levels is still incomplete. Project reports cover movement and jumping, native
+levels is still incomplete. The port includes movement and jumping, native
 mouse and keyboard input, native video settings, first-mission completion, and
 rendering and crash fixes. The port is still in development; progression,
 stability, visual fidelity, and performance need further testing and refinement.
-See [STATUS.md](STATUS.md) for current coverage and historical verification.
 
 Sound is enabled by default. Use `--mute-audio` for muted diagnostic runs.
 
@@ -34,7 +33,6 @@ For an existing configured workstation build, use
 [Play The Simpsons Game.cmd](Play%20The%20Simpsons%20Game.cmd).
 See [launcher help](docs/launcher.md), [native input prompts](docs/native-input-prompts.md),
 [architecture](docs/architecture.md), and [development checklist](docs/checklist.md).
-Historical evidence documents may link to local files that are absent from Git.
 
 ## Dependencies and credits
 

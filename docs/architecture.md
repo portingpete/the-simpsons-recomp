@@ -1,10 +1,11 @@
 # The Simpsons Game native Windows port
 
-Target: the US Xbox 360 retail files in `Simpsons Game, The (USA)`. The original
-folder and `K:\DarkRecomp` / `K:\Simpsons` are read-only references. No release or
-playable gameplay has yet been verified in this new workspace.
+Target: the US Xbox 360 retail files in `Simpsons Game, The (USA)`. This is a
+development port. The source snapshot does not include the original game,
+generated game translation, or a ready-to-play executable. Complete gameplay,
+progression and stability coverage remain unverified.
 
-## Verified starting evidence (2026-09-09)
+## Supported executable identity
 
 - Original `default.xex`: SHA-256
   `71d99dad06be1b512fc3058123b84fdad71339205a7e9249058ac5e34a82a231`,
@@ -14,8 +15,9 @@ playable gameplay has yet been verified in this new workspace.
   image size `0x00ec0000`, stack `0x40000`, TLS 64 slots / 12 bytes of raw data.
 - Xbox imports: `xam.xex`, `xboxkrnl.exe`; statically linked D3D9/D3DX9,
   XGRAPHC, XAUD and platform libraries. These are **not** native host services.
-- Loose Lua game flow and `.str` level/character/frontend streams survive.
-  Resource structure and renderer boundary require independent investigation.
+- Loose Lua game flow and `.str` level/character/frontend streams supply the
+  original content. Resource and renderer integration follow original code/data
+  contracts.
 
 ## Architecture decisions
 
@@ -31,12 +33,13 @@ playable gameplay has yet been verified in this new workspace.
    translation must stop with address/name diagnostics. No pretend successes.
 4. Use the verified original engine driver/resource boundaries with native
    D3D11 ownership. Current integration covers startup state, textures, targets,
-   buffer/declaration/pipeline lifetimes and front copy/presentation. Original
-   mesh/material draw contracts and visible game rendering remain unverified. No
+   buffer/declaration/pipeline lifetimes, mesh/material drawing and front
+   copy/presentation. Coverage of all materials and effects remains incomplete. No
    PM4/ring-buffer processor, Xenos register renderer or console GPU emulator.
    Cross-thread draw snapshots must own their referenced data until completion.
 5. Preserve guest simulation timing; report newly rendered frames separately from
-   repeated presentation. Automated executable launches remain muted by default.
+   repeated presentation. Normal launches enable sound; diagnostic tools can use
+   `--mute-audio`.
 6. Packaging must derive assets from the player's files and exclude proprietary
    binaries, generated game translation, reference emulators and game data from
    any public source release until packaging rights/strategy are addressed.
@@ -64,12 +67,14 @@ now connect to native Windows output through owned PCM/DSP queues. The actual
 original worker drives CPU callbacks; private DSP and device callbacks never
 access guest memory. Source consumption and downstream playback completion have
 separate receipts. Windows speaker routing, volume and buffering are explicit
-platform adaptations. See `native-dac-integration.md` and current `STATUS.md`.
+platform adaptations. See [native Dac integration](native-dac-integration.md).
 The independent native XMA decoder is qualified separately; original EXm0 input,
 trimming, full-quota decode staging and numerical conversion remain guarded.
 
-Further reached imports, engine mesh/material draw contracts, remaining media
-integration, native user interaction and complete gameplay/progression remain
-unverified. The built AOT output passes its semantic/hash gate; this does not
-prove all future original control-flow paths or platform consumers are covered.
-No fundamental architectural impossibility has been demonstrated.
+Further original control-flow paths, platform consumers, materials and effects
+can still expose unsupported operations. Full mission progression, save/load,
+audio lifecycle, rendering fidelity, performance and extended stability need
+continued testing. Passing the AOT semantic/hash gate or isolated fixtures does
+not establish full-game compatibility. See [repository setup](repository-setup.md)
+for regeneration commands and fresh-clone limitations, and the
+[development checklist](checklist.md) for validation requirements.

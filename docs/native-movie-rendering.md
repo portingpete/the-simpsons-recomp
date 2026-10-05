@@ -61,4 +61,4 @@ display acceptance recorded; occluded presentation is not desktop scanout.
 Original evidence: [draw and metadata](native-movie-draw.md),
 [shader](movie-shader.md), [geometry](native-movie-geometry.md), and
 [plane lifetime](native-movie-plane-lifecycle.md). Exact build, actual-run and
-checkpoint results are recorded in `STATUS.md`.
+checkpoint results are recorded in local development logs.

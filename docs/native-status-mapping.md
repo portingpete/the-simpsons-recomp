@@ -32,4 +32,4 @@ File-open diagnostics now record the checked original ASCII request, native
 status, access/share/options and caller before propagating the same failure.
 They neither rewrite the path nor change file-open results. The runtime's
 existing read-only asset containment and create/overwrite rejection remain.
-Build, test and actual-boot results are recorded in `STATUS.md` after execution.
+Build, test and actual-boot results are recorded in local development logs after execution.

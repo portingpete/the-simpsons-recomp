@@ -154,5 +154,5 @@ Build076 passed all 23 CTest suites with the complete scalar pass. The subsequen
 full sampler bridge is described in
 [native-application-sampler-bridge.md](native-application-sampler-bridge.md).
 Current native run: `build/boot-047.log`. Latest aggregate validation and exact
-counts are kept in `STATUS.md`. Next implementation boundary: camera clear
+counts are kept in local development logs. Next implementation boundary: camera clear
 `823EE940`, using the existing pinned camera-pass evidence and native targets.

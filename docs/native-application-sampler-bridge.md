@@ -77,4 +77,4 @@ two-bit filter. This test memory is never used as the live graphics context.
 Build074 passed all 23 test suites with the initial dispatcher tests. Boot047
 now executes the complete original scalar/sampler passes and reaches the
 camera-clear guard `823EE940` from `823F1BA8`. Latest aggregate validation is
-recorded in `STATUS.md`; no original frame has been rendered.
+recorded in local development logs; no original frame has been rendered.

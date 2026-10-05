@@ -1,17 +1,27 @@
-# Temporary first-mission rendering shortcut
+# First-mission rendering diagnostic
 
-Double-click **Render Test - First Mission.cmd** to load Land of Chocolate
-directly for rendering work. The shortcut opts into
+Run from the repository root to load Land of Chocolate directly for rendering
+work:
+
+```powershell
+python -B tools/render_test_native.py
+```
+
+The helper opts into
 `SimpsonsNative.exe --render-test-first-mission`; it also automatically skips
 movies through their original stop/completion path. Normal Play and automatic
 startup retain their existing behavior.
 
 Each launch records its command and PID in `build/render-tests/<timestamp>/launch.json`
 and game output in `game.log` alongside it. The game stays open until you close it.
-To have the Land of Chocolate melee rabbits die as they spawn, double-click
-**Play Land of Chocolate - Auto Defeat.cmd**. This launcher adds
-`--auto-defeat-loc-enemies`. It sends damage through the game's normal NPC
-damage handler only while `loc/loc.str` is the active map. The white rabbit
+To have the Land of Chocolate melee rabbits die as they spawn, run:
+
+```powershell
+python -B tools/render_test_native.py --auto-defeat-enemies
+```
+
+This adds `--auto-defeat-loc-enemies` to the game command. It sends damage through
+the game's normal NPC damage handler only while `loc/loc.str` is the active map. The white rabbit
 used by the story is excluded. Launch without that flag for ordinary combat.
 For on-request renderer captures, run:
 
@@ -20,13 +30,13 @@ python -B tools/render_test_native.py --capture-frames
 ```
 
 Create an empty `captures/capture.request` in that run folder to capture the next
-completed frame. This shortcut loads the initial map instead of resuming a save.
+completed frame. This diagnostic loads the initial map instead of resuming a save.
 
 The temporary hook at original startup parser `8285F928` supplies the game's
 existing `-stream loc loc.str` arguments using its borrowed-argument setter
 `828759B8`. Original gameflow, player setup, resource loading and rendering run
 normally. No original assets or generated C++ are edited. Omit the launch flag
-to disable the shortcut. Remove the hook, native source
+to disable the direct rendering route. Remove the hook, native source
 and launch flag when rendering work no longer needs this route.
 
 ## Validation (2026-09-21)
@@ -36,7 +46,7 @@ commands. Three completed 1280x720 renderer readbacks span six seconds in
 `build/render-tests/20260921-210229-394774/captures`; the last image visibly shows
 Homer, the chocolate shop and the pretzel fence in the opening plaza. Movie draw
 count is zero. `render-test-verification.json` records the observation timings.
-The shortcut itself retains the original player input and gameflow. A full mission play-through has not been qualified.
+The diagnostic retains the original player input and gameflow. A full mission play-through has not been qualified.
 
 The native build and AOT gate pass (311 generated files, zero semantic
 diagnostics). All 18 existing automatic-startup tests, five post-filter GPU/

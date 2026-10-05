@@ -5,6 +5,7 @@
 #include "r16_index_validation.h"
 #include "r16_strip_chunks.h"
 #include "VSSkin.h"
+#include "VSSkinDraw.h"
 #include "PSSkinDraw.h"
 #include "PSSkinAlphaDraw.h"
 #include "renderer/skin_input.h"
@@ -114,6 +115,7 @@ void samplerProfile(const D3D11_SAMPLER_DESC& sampler,bool base) {
 class ScopedSkinDrawBindings {
     ID3D11DeviceContext* context;
     ComPtr<ID3D11PixelShader> pixel;
+    ComPtr<ID3D11VertexShader> vertex;
     ComPtr<ID3D11Buffer> constants;
     ComPtr<ID3D11DepthStencilState> depth;
     ComPtr<ID3D11BlendState> blend;
@@ -127,6 +129,7 @@ class ScopedSkinDrawBindings {
     UINT viewportCount=UINT(viewports.size()),scissorCount=UINT(scissors.size());
 public:
     explicit ScopedSkinDrawBindings(ID3D11DeviceContext* c):context(c) {
+        context->VSGetShader(&vertex,nullptr,nullptr);
         context->PSGetShader(&pixel,nullptr,nullptr);context->PSGetConstantBuffers(1,1,&constants);
         context->OMGetDepthStencilState(&depth,&stencil);context->OMGetBlendState(&blend,factors,&sampleMask);
         context->RSGetState(&raster);context->RSGetViewports(&viewportCount,viewports.data());
@@ -136,6 +139,7 @@ public:
     ScopedSkinDrawBindings(const ScopedSkinDrawBindings&)=delete;
     ScopedSkinDrawBindings& operator=(const ScopedSkinDrawBindings&)=delete;
     ~ScopedSkinDrawBindings() {
+        context->VSSetShader(vertex.Get(),nullptr,0);
         context->PSSetShader(pixel.Get(),nullptr,0);auto* cb=constants.Get();context->PSSetConstantBuffers(1,1,&cb);
         context->OMSetDepthStencilState(depth.Get(),stencil);context->OMSetBlendState(blend.Get(),factors,sampleMask);
         context->RSSetState(raster.Get());context->RSSetViewports(viewportCount,viewports.data());
@@ -157,11 +161,12 @@ void requireSkinDrawStages(ID3D11DeviceContext* context) {
 struct NativeSkinMesh::State {
     const NativeBackend* owner{};DWORD thread{};ComPtr<ID3D11Device> device;
     ComPtr<ID3D11Buffer> vertices,indices;ComPtr<ID3D11InputLayout> layout;ComPtr<ID3D11PixelShader> pixel,alphaPixel;
+    ComPtr<ID3D11VertexShader> drawVertex;
     uint32_t vertexCount{},vertexAddress{};R16Indices indexValues;
     DepthConstantsCache depthConstants;
     void validate(const NativeBackend* backend,ID3D11Device* expected) const {
         need(owner==backend&&thread==GetCurrentThreadId()&&device.Get()==expected&&vertices&&indices&&layout&&pixel&&
-             alphaPixel,
+             alphaPixel&&((vertexAddress==0x82007C1C)==bool(drawVertex)),
              "Native skin mesh is missing, stale or belongs to another backend");
     }
     void requireBindings(ID3D11DeviceContext* context) const {
@@ -231,6 +236,8 @@ std::shared_ptr<NativeSkinMesh> NativeBackend::uploadSkinMesh(std::span<const Sk
         profile.layout.data(),profile.layout.size(),&result->layout),"skin input layout creation");
     check(device->CreatePixelShader(profile.opaqueDraw.data(),profile.opaqueDraw.size(),nullptr,&result->pixel),"skin depth/color adapter creation");
     check(device->CreatePixelShader(profile.alphaDraw.data(),profile.alphaDraw.size(),nullptr,&result->alphaPixel),"skin alpha depth/color adapter creation");
+    if(profile.cache==0)
+        check(device->CreateVertexShader(kVSSkinDraw,sizeof(kVSSkinDraw),nullptr,&result->drawVertex),"skin rim control adapter creation");
     result->validate(this,device.Get());requireOwner();
     auto shared = std::shared_ptr<NativeSkinMesh>(new NativeSkinMesh(std::move(result)));
     // Snapshot exact bytes so later caller mutation cannot corrupt the cache.
@@ -424,6 +431,7 @@ void NativeBackend::drawSkinMesh(const std::shared_ptr<RenderTarget>& target,con
     flushIm2D();bindings();
     {
         ScopedSkinDrawBindings restore(context.Get());
+        if(m.drawVertex)context->VSSetShader(m.drawVertex.Get(),nullptr,0);
         const auto viewport=renderViewport(target,{0,0,float(target->width),float(target->height),0,1});context->RSSetViewports(1,&viewport);
         const D3D11_RECT scissor=renderScissor(target,d.scissorEnable?D3D11_RECT{LONG(d.scissor[0]),LONG(d.scissor[1]),LONG(d.scissor[2]),LONG(d.scissor[3])}:
             D3D11_RECT{0,0,LONG(target->width),LONG(target->height)});
@@ -499,6 +507,7 @@ void NativeBackend::recordSkinMesh(const std::shared_ptr<NativeRecordingPayload>
                            "Native skin scissor exceeds the explicit target");
     auto draw=std::make_shared<RecordedSkinDraw>();draw->owner=this;draw->thread=owner;draw->device=device;
     skinShaderObjects(vertex,pixel,draw->vertex,draw->originalPixel);
+    if(m.drawVertex)draw->vertex=m.drawVertex;
     draw->mesh=mesh;draw->live=live;draw->colorOwner=target;draw->depthOwner=depth;
     if(shadowed) {
         draw->shadowOwner=d.characterShadow;draw->baseOwner=d.baseTexture;

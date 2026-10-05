@@ -1,7 +1,7 @@
 # Screen-effect passes — September 27, 2026
 
 The subsequent charged-burp nonfinite-constant repair and its verification
-limits are documented in [charged-burp-dof-crash.md](charged-burp-dof-crash.md).
+limits are documented in charged-burp-dof-crash.md (local development record).
 
 The render-test run in `build/render-tests/20260927-173415-470133/game.log`
 stopped after special attack was released:
@@ -10,7 +10,7 @@ stopped after special attack was released:
 Unimplemented native engine graphics boundary 0x82455570, caller 0x827543C0
 ```
 
-The [luma layer fix](luma-layer-crash.md) was active: eight
+The luma layer fix (local development record) was active: eight
 `[NATIVE LUMA DRAW]` passes rendered before the failure. The new failure is
 the original depth-of-field pass `82754288`. It is called after every viewport
 depth copy (`82751700`) and returns early until an effect activates it.

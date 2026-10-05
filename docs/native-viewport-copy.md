@@ -34,7 +34,7 @@ all hook byte pins, the explicit leaf extents, and reference-header hashes.
 `original-chain.txt` is the final checked disassembly; `initial-disassembly.txt`
 is an earlier exploratory listing with incomplete leaf extents and is not the
 contract authority. The existing ReAgent/Ghidra trial remains documented in
-`docs/reagent-ghidra-probe.md`; no generated replacement candidate is used here.
+the local alternative-generator probe report; no generated replacement candidate is used here.
 
 ## Native behavior and limits
 

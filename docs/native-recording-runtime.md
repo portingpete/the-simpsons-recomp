@@ -100,6 +100,6 @@ original cleanup need separate integration after the first real replay is verifi
 Terminal host release is reported as incomplete original guest cleanup.
 
 Work is now frozen at the user's requested
-[LIVE027 checkpoint](session-checkpoint-2026-09-13-live027.md). Multiple-record
+LIVE027 checkpoint (local development record). Multiple-record
 source changes, six observation hooks, per-payload effect retention and captures
 are saved but unbuilt. The CPU graph fixture header remains unwired.

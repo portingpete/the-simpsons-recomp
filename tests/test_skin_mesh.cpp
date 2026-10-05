@@ -99,6 +99,90 @@ void uploadCacheReuse(bool hardware) {
     probe.join();
     require(ownerRejected, "Skin cross-thread upload bypassed owner checks");
 }
+void opaqueEyeRimControl(const std::vector<uint8_t>& image,bool hardware) {
+    NativeBackend backend(!hardware);NativeMaterialCompiler compiler(backend);MaterialRegistry registry;
+    const CompiledMaterial *vs=nullptr,*ps=nullptr;
+    constexpr uint32_t vertexAddress=0x82007C1C,pixelAddress=0x8200A02C,extent=64;
+    for(const auto& r:originalMaterialIdentities())if(r.originalAddress==vertexAddress||r.originalAddress==pixelAddress) {
+        const auto id=registry.create(r.originalAddress,std::span<const uint8_t>(image).subspan(r.originalAddress-0x82000000,r.recordBytes));
+        const auto& shader=registry.prepareForBind(id,compiler);
+        if(r.stage==MaterialStage::Vertex)vs=&shader;else ps=&shader;
+    }
+    require(vs&&ps,"Missing original opaque skin shaders for eye rim control");
+    auto color=backend.createTarget(extent,extent,TargetFormat::RGB10A2);auto depth=backend.createDepthTarget(extent,extent);
+    SkinMeshDraw draw{};draw.primitiveType=6;draw.indexCount=3;draw.viewport={0,0,extent,extent,0x3F800000,0};
+    draw.depthEnable=draw.depthWrite=1;draw.depthCompare=7;draw.colorMask=15;draw.halfPixelOffset=1;
+    draw.primitiveReset=draw.viewportEnable=draw.multisampleAntialias=1;draw.primitiveResetIndex=0xFFFF;draw.multisampleMask=0xFFFFFFFF;
+    draw.depthPolicy=ShadowMeshDepthPolicy::Reference20e4Rne;draw.blendWord=0x00010001;draw.expandedBlend=1;
+    SkinVertexConstants vc{};SkinPixelConstants pc{};
+    vc[0][0]=vc[1][1]=1;vc[2][2]=.5f;vc[3][2]=1;
+    for(size_t i=0;i<4;++i)vc[12+i][i]=1;
+    for(size_t i=0;i<3;++i)vc[55+i][i]=1;
+    // Clip W is the vertex Z (3/5/7), with a constant .5 depth. The camera
+    // faces these -Z normals, so the original opaque formula emits .125 rim
+    // shadow whenever floor(color.x)==0. Zero fake-light is authored input.
+    pc[4]={17,-9,200,1};pc[40]={0,.34f,-.2f,1};pc[47]={1,0,0,1};pc[49][2]=7;
+    constexpr std::array<float,3> w{3,5,7};
+    constexpr std::array<std::array<float,2>,3> ndc{{{-.8f,.8f},{-.8f,-.8f},{.8f,.8f}}};
+    const std::array<uint16_t,3> indices{0,1,2};
+    std::array<SkinVertex,3> vertices{};
+    for(size_t i=0;i<vertices.size();++i) {
+        auto& v=vertices[i];v.position={ndc[i][0]*w[i],ndc[i][1]*w[i],w[i]};
+        v.normal={0,0,-1};v.indices={1,0,0,0};v.weights={1,0,0,0};
+        // White-eye palette code32, deliberately away from a packed-UV floor.
+        v.uv={.0111f,.5217f};v.color={1,0,0,1};
+    }
+    auto* context=NativeRecordingProbe::context(backend);
+    backend.bindTargets({color,nullptr,nullptr,nullptr},depth);backend.bindSkinShaders(*vs,*ps);
+    auto commit=backend.commitSkin(*vs,*ps,vc,pc);
+    auto recording=backend.createRecordingContext();auto live=backend.createSkinReplayConstants(vc,pc);NativeRecordingMask mask{};
+    size_t checked=0;
+    for(unsigned control=0;control<3;++control) {
+        for(size_t i=0;i<vertices.size();++i)vertices[i].color[0]=control==0?1.0f:control==1?0.0f:float(i!=0);
+        const auto mesh=backend.uploadSkinMesh(vertices,indices,vertexAddress);
+        backend.bindSkinMeshVertices(mesh);backend.bindSkinMeshDeclaration(mesh);backend.bindSkinMeshIndices(mesh);
+        auto payload=backend.allocateRecordingPayload(recording,0x3000);backend.beginRecordingPayload(payload,4,mask,mask);
+        const EngineBindingResetProbe::Snapshot beforeRecord(context);
+        backend.recordSkinMesh(payload,color,depth,mesh,*vs,*ps,vc,pc,live,draw);backend.finishRecordingPayload(payload);
+        require(EngineBindingResetProbe::Snapshot(context)==beforeRecord,"Eye rim recording changed immediate bindings");
+        std::vector<uint8_t> immediate,immediateDepth;
+        for(bool deferred:{false,true}) {
+            backend.clearTarget(color,{1,0,1,1});backend.clearDepthTarget(depth,0,0x67);
+            const EngineBindingResetProbe::Snapshot before(context);
+            if(deferred)backend.executeRecordingPayload(payload);else backend.drawSkinMesh(color,depth,mesh,*vs,*ps,commit,draw);
+            backend.waitIdle();
+            require(EngineBindingResetProbe::Snapshot(context)==before,"Eye rim draw changed retained bindings");
+            const auto pixels=backend.readbackTarget(color),depths=backend.readbackDepthTarget(depth);
+            size_t covered=0,interior=0;
+            for(unsigned y=0;y<extent;++y)for(unsigned x=0;x<extent;++x) {
+                const size_t i=size_t(y)*extent+x;const auto packed=word(pixels,4*i);
+                if(packed>>30)continue; // untouched magenta has alpha3; skin exports alpha0.
+                ++covered;
+                require((packed&1023)==7&&((packed>>10)&1023)==32,"Eye rim fixture changed material or palette code");
+                require(word(depths,8*i)==std::bit_cast<uint32_t>(.5f)&&depths[8*i+4]==0x67,"Eye rim fixture changed mapped depth or stencil");
+                // A mixed0/1 control stays strictly between0 and1 away from
+                // the opposite edge, under either perspective convention.
+                const float nx=2*(float(x)+.5f)/extent-1,ny=1-2*(float(y)+.5f)/extent;
+                const float b=(.8f-ny)/1.6f,c=(nx+.8f)/1.6f,a=1-b-c;
+                if(control==2&&std::min({a,b,c})<=.05f)continue;
+                ++interior;
+                const uint32_t expectedBlue=control==0?256u:384u;
+                if(((packed>>20)&1023)!=expectedBlue) {
+                    char why[220];std::snprintf(why,sizeof(why),"Opaque eye rim control%u %s pixel%u,%u: blue%u expected%u (vertex color.x is %s)",
+                        control,deferred?"recorded":"direct",x,y,(packed>>20)&1023,expectedBlue,control==0?"uniform1":control==1?"uniform0":"mixed0/1");throw Error(why);
+                }
+                ++checked;
+            }
+            require(covered>500&&interior>400,"Eye rim fixture lacks oblique triangle/interior coverage");
+            if(!deferred){immediate=pixels;immediateDepth=depths;}
+            else require(pixels==immediate&&depths==immediateDepth,"Eye rim direct/recorded pixels differ");
+        }
+        backend.releaseRecordingPayload(payload);
+    }
+    backend.releaseSkinReplayConstants(live);backend.releaseRecordingContext(recording);
+    std::printf("PASS opaque eye rim control %s: %zu pixels; varying clipW, uniform1 suppresses rim, uniform0/mixed0-1 retain rim, direct/recorded parity\n",
+        hardware?"hardware":"WARP",checked);
+}
 void run(const std::vector<uint8_t>& image,bool hardware,bool textured=false) {
     NativeBackend backend(!hardware);NativeMaterialCompiler compiler(backend);MaterialRegistry registry;
     const CompiledMaterial *vs=nullptr,*ps=nullptr,*oldVS=nullptr;
@@ -429,5 +513,5 @@ int main(int argc,char** argv)try {
     SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);
     require(argc==2||(argc==3&&std::string(argv[2])=="--hardware"),"Supply original image and optional --hardware");
     std::ifstream input(argv[1],std::ios::binary);std::vector<uint8_t> image((std::istreambuf_iterator<char>(input)),{});
-    require(image.size()==15466496,"Original image size differs");run(image,argc==3);run(image,argc==3,true);for(unsigned profile=0;profile<3;++profile)alphaBlend(image,argc==3,profile);uploadCacheReuse(argc==3);requireMeshGpuRetirements([](bool value,const char* message){require(value,message);});return 0;
+    require(image.size()==15466496,"Original image size differs");opaqueEyeRimControl(image,argc==3);run(image,argc==3);run(image,argc==3,true);for(unsigned profile=0;profile<3;++profile)alphaBlend(image,argc==3,profile);uploadCacheReuse(argc==3);requireMeshGpuRetirements([](bool value,const char* message){require(value,message);});return 0;
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL skin mesh: %s\n",e.what());return 1;}

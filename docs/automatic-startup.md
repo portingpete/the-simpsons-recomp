@@ -10,7 +10,7 @@ creation; neither helper removes another helper's pending request. Fourteen
 route tests and seventeen gameplay-evidence tests pass. The rendering verifier
 requires captured scene frames over ten seconds, but that result alone does
 not establish character control or later crash-free operation. See
-[current live evidence](reach-game-315.md).
+current live evidence (local development record).
 
 Historical built replay: `reach-game-034`. The menu, existing save and movie skip
 complete. Both shadow cameras finish31 draws; the static depth prepass finishes
@@ -19,7 +19,7 @@ the original immediate fallback completes27 draws across18 packets. The
 textured rigid shader activates and uploads15 original mipmapped textures.
 The next material, `simpsons_rigid_dualtextured`8202AD78, stops at82740680.
 No gameplay frame or control was verified in that run. See
-[LIVE034](session-checkpoint-2026-09-13-live034.md) for its build and tests.
+LIVE034 (local development record) for its build and tests.
 The LIVE027 and earlier descriptions below are historical.
 
 September13 rendering update: `reach-game-027` finishes both shadow cameras
@@ -51,9 +51,14 @@ the opening cutscene skip at 24.20 seconds in `movie-skip-002`. All four videos
 skipped with real decoder cleanup. The existing character rendering failure
 then occurred; entering playable gameplay remains unfinished.
 
-Double-click **Play The Simpsons Game Automatically.cmd** in the game folder.
-It launches the existing normal native build with the recorded Player profile
-and existing save folder, then sends Start and the A presses for the storage
+For the developer diagnostic replay, run from the repository root:
+
+```powershell
+python -B tools/auto_start_native.py
+```
+
+The helper launches the existing normal native build with the recorded Player
+profile and existing save folder, then sends Start and the A presses for the storage
 notice, folder selection, autosave notice, save-slot selection, load confirmation,
 and Continue Game. It now skips the three launch videos and the opening movie
 with Start, after each movie player reports a neutral controller poll. Manual

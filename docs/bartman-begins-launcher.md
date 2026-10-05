@@ -1,12 +1,13 @@
-# Bartman Begins launcher
+# Bartman Begins diagnostic
 
-The dedicated entry is **Play Bartman Begins.lnk** in the workspace folder.
-It launches Bartman Begins directly, with no launcher window or extra Play
-click. The shortcut and actual GUI dispatch have been verified.
+For development testing, run the native helper from PowerShell:
 
-The shortcut targets `build/native/SimpsonsLauncher.exe` with
-`--bartman-begins`. The existing ordinary and first-mission-completion shortcuts
-keep their current routes. Direct stage modes cannot be combined.
+```powershell
+& .\build\native\SimpsonsLauncher.exe --bartman-begins
+```
+
+This diagnostic mode launches Bartman Begins directly, using private stores.
+Direct stage modes cannot be combined.
 
 ## Private saves and logs
 

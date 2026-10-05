@@ -87,7 +87,7 @@ the native snapshot and original constructor. Boot108's improved diagnostic
 identifies the next unsupported private camera raster:1280x720, flags5,
 callback LR824081C0. The current camera bridge has separately qualified square
 16/256/1024 profiles; its rectangular camera/depth lifetime needs qualification.
-Frozen results are in build/crossfade-texture/build164-summary.json and STATUS.md.
+Frozen results are in build/crossfade-texture/build164-summary.json and local development logs.
 
 The original crossfade message handler82702180 first captures through826B0BB0,
 which remains explicitly guarded. Subsequent composition uses original state
