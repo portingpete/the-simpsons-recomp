@@ -13,6 +13,31 @@ sys.path.insert(0, str(ROOT / "tools"))
 import compile_prompt_icons as prompts
 
 
+# Pin the existing runtime values independently of the compiler's source lists.
+ORIGINAL_NAMES = (
+    "Space", "Enter", "Esc", "Tab", "MouseLeft", "MouseRight", "MouseMiddle", "MouseMove",
+    "Shift", "Ctrl", "Q", "E", "R", "F", "G", "W", "A", "S", "D",
+    "Up", "Down", "Left", "Right", "One", "Two", "Three", "Four", "Question",
+    "Move", "Directions", "Z", "X", "C", "V", "Five", "Six",
+)
+
+# Each physical key on a full-size ANSI keyboard has its own prompt. In
+# particular, side-specific modifiers and numpad keys must not collapse onto
+# their generic/main-row counterparts when a player chooses a new binding.
+STANDARD_ANSI_KEYS = {
+    "Esc", *(f"F{number}" for number in range(1, 13)), "PrintScreen", "ScrollLock", "Pause",
+    "Grave", "Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine",
+    "Minus", "Equals", "Backspace", "Tab", *"QWERTYUIOP", "LeftBracket", "RightBracket", "Backslash",
+    "CapsLock", *"ASDFGHJKL", "Semicolon", "Apostrophe", "Enter",
+    "LeftShift", *"ZXCVBNM", "Comma", "Period", "Slash", "RightShift",
+    "LeftCtrl", "LeftWin", "LeftAlt", "Space", "RightAlt", "RightWin", "Menu", "RightCtrl",
+    "Insert", "Home", "PageUp", "Delete", "End", "PageDown", "Up", "Down", "Left", "Right",
+    "NumLock", *(f"Numpad{number}" for number in range(10)),
+    "NumpadDivide", "NumpadMultiply", "NumpadSubtract", "NumpadAdd", "NumpadEnter", "NumpadDecimal",
+}
+OTHER_SINGLE_PROMPTS = {"Shift", "Ctrl", "Question", "MouseLeft", "MouseRight", "MouseMiddle", "MouseMove"}
+
+
 class PromptIconTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -21,17 +46,27 @@ class PromptIconTests(unittest.TestCase):
         cls.by_name = {icon.name: icon.image() for icon in cls.icons}
 
     def test_all_supplied_and_supplementary_sprites_are_used(self):
-        self.assertEqual(len(self.sources.artworks), 34)
-        self.assertEqual(len(self.icons), 36)
+        self.assertEqual(len(self.sources.artworks), 111)
+        self.assertEqual(len(self.icons), 113)
         self.assertEqual(len(self.icons), len(self.by_name))
         self.assertEqual(set(self.sources.artworks) | {name for name, _ in prompts.GROUPS}, set(self.by_name))
-        for sheet, expected in zip(prompts.SHEETS, (27, 7), strict=True):
+        for sheet, expected in zip(prompts.SHEETS, (27, 7, 17, 12, 20, 28), strict=True):
             self.assertEqual(sum(crop["source"] == sheet.path for crop in self.sources.manifest["icons"].values()), expected)
 
     def test_existing_enumeration_order_is_stable(self):
-        original_names = [name for name, _ in prompts.SOURCES] + [name for name, _ in prompts.GROUPS]
-        self.assertEqual([icon.name for icon in self.icons[:30]], original_names)
-        self.assertEqual([icon.name for icon in self.icons[30:]], list(prompts.EXTRA_NAMES))
+        self.assertEqual(tuple(icon.name for icon in self.icons[:36]), ORIGINAL_NAMES)
+        self.assertEqual([icon.name for icon in self.icons[36:]], list(prompts.EXTRA_NAMES[6:]))
+
+    def test_standard_104_key_keyboard_is_complete(self):
+        self.assertEqual(len(STANDARD_ANSI_KEYS), 104)
+        self.assertTrue(STANDARD_ANSI_KEYS.isdisjoint(OTHER_SINGLE_PROMPTS))
+        self.assertEqual(set(self.sources.artworks), STANDARD_ANSI_KEYS | OTHER_SINGLE_PROMPTS)
+
+    def test_source_sheet_mappings_are_unique_and_complete(self):
+        names = [name for sheet in prompts.SHEETS for row in sheet.rows for name in row]
+        self.assertEqual(len(names), len(set(names)), "A sprite name is assigned to more than one source crop")
+        self.assertEqual(set(names), set(self.sources.artworks))
+        self.assertEqual(set(names), {name for name, _ in prompts.SOURCES} | set(prompts.EXTRA_NAMES))
 
     def test_source_provenance_and_crop_identity(self):
         sheets = {}
@@ -123,7 +158,7 @@ class PromptIconTests(unittest.TestCase):
         header = prompts.render_header(icons, theme="xelu")
         self.assertIn(b"namespace Simpsons::Graphics::NativePromptIcons", header)
         self.assertIn(b"CC0", header)
-        self.assertEqual([icon.name for icon in icons], [icon.name for icon in self.icons[:30]])
+        self.assertEqual(tuple(icon.name for icon in icons), ORIGINAL_NAMES[:30])
         self.assertNotEqual(icons[0].rgba, self.icons[0].rgba)
 
 

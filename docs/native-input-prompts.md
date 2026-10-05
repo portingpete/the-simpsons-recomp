@@ -47,12 +47,25 @@ cached texture bindings retain their original owners when input sources change.
 user-supplied transparent sprite sheet with hand-drawn lettering and its matching
 supplementary icons.
 The original source sheet is preserved. The supplement supplies arrow keys,
-mouse movement, G and a question mark in the same yellow style; its generation
-prompt is saved with the assets. The executable needs no external PNG loader.
+mouse movement, G and a question mark with revised hand-drawn strokes. Four
+additional sheets complete the standard 104-key US ANSI keyboard, including
+distinct left/right modifiers and numpad labels. The embedded library has 113
+icons; all existing enum values remain stable. Generation requests are saved
+with the assets. This prepares the artwork for rebinding; current bindings stay
+fixed. The executable needs no external PNG loader.
 See [asset details and regeneration](../assets/native-input-prompts/README.md).
 The earlier Xelu artwork and its original license remain in `assets/xelu-light`.
 
 ## Verification
+
+Verified October 5, 2026: the complete keyboard artwork passes all 11 Python
+asset checks, including independent 104-key coverage, stable original enum
+values, source/crop hashes, transparency, proportions and exact regeneration.
+The game and recorder build in native and release; both configurations pass
+hardware/WARP rendering and the original atlas lifecycle checks. The original
+user sheet is unchanged. The [full preview](../assets/native-input-prompts/yellow-full-keyboard-preview.png)
+shows the compiled artwork; build/test receipts are in
+`build/native-input-prompts/full-keyboard-20261005`.
 
 Mouse menu fixtures exercise the original Apt point bounds, parent transforms,
 visibility, typed movie ownership, slot-zero event mapping and original event

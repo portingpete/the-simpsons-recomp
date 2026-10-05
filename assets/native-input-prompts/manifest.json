@@ -2,7 +2,7 @@
   "version": 1,
   "theme": "yellow",
   "icon_size": 64,
-  "provenance": "User-supplied yellow sheet with a matching generated supplement; no CC0 license is asserted.",
+  "provenance": "User-supplied yellow sheet with matching generated supplemental keyboard sheets; no CC0 license is asserted.",
   "extraction": {
     "component_alpha_minimum": 32,
     "minimum_component_pixels": 1000,
@@ -23,10 +23,46 @@
     {
       "path": "assets/native-input-prompts/yellow-supplement.png",
       "origin": "generated-supplement",
-      "sha256": "d2ec270bd8d0880439abe0778c87e4b76afc081e129074a089561f525aa3c028",
+      "sha256": "4b746acb3ac3fef61e4f3b969c94548a95501c98f3337f196e01140e983e7ce4",
       "size": [
         1774,
         887
+      ]
+    },
+    {
+      "path": "assets/native-input-prompts/yellow-alphanumeric.png",
+      "origin": "generated-matching-keyboard-expansion",
+      "sha256": "dd728a5411520b37420c1e70a03ee3aae2d865aeddeb7548d153587139bfa77c",
+      "size": [
+        1122,
+        1402
+      ]
+    },
+    {
+      "path": "assets/native-input-prompts/yellow-function-keys.png",
+      "origin": "generated-matching-keyboard-expansion",
+      "sha256": "d6419205351ae4836d26a3c236cff4b92ae43ee5907bb6ec475e56e125bb3ab9",
+      "size": [
+        1448,
+        1086
+      ]
+    },
+    {
+      "path": "assets/native-input-prompts/yellow-special-keys.png",
+      "origin": "generated-matching-keyboard-expansion",
+      "sha256": "8ebfab3b81d826bc8c3145aedd4b5f00bd34568f0bc2d0d8e3f20a7e49de7dc8",
+      "size": [
+        1122,
+        1402
+      ]
+    },
+    {
+      "path": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "origin": "generated-matching-keyboard-expansion",
+      "sha256": "0f876dee67bc46457eadfded3a0cf7eb662f3812a084102127ea357e146a5eda",
+      "size": [
+        948,
+        1659
       ]
     }
   ],
@@ -493,121 +529,1430 @@
     "Up": {
       "source": "assets/native-input-prompts/yellow-supplement.png",
       "core_bounds": [
-        91,
-        89,
-        418,
-        396
-      ],
-      "bounds": [
         87,
         86,
-        421,
-        400
+        419,
+        395
       ],
-      "core_pixels": 95199,
-      "rgba_sha256": "64ffa57313a9e95d2ed1be8e0d62437c554e94ac66be2c12357a2bbfc85e0770"
+      "bounds": [
+        84,
+        83,
+        422,
+        399
+      ],
+      "core_pixels": 97014,
+      "rgba_sha256": "5c26fab6c50fb8c3c98f5752b360561ab239817a11772a8f56c7a63011a1094c"
     },
     "Left": {
       "source": "assets/native-input-prompts/yellow-supplement.png",
       "core_bounds": [
-        514,
-        89,
-        844,
-        395
-      ],
-      "bounds": [
-        510,
+        511,
         86,
         847,
-        399
+        394
       ],
-      "core_pixels": 96076,
-      "rgba_sha256": "15a3394b44124130335b103191aa4392725b668154809cf7d4feb6bd3f05c33b"
+      "bounds": [
+        507,
+        83,
+        851,
+        398
+      ],
+      "core_pixels": 98583,
+      "rgba_sha256": "6e0a9b0c9dde5c08be551103e3ceacc748f7d00c47aaf1e9d6789ea9088a47a2"
     },
     "Down": {
       "source": "assets/native-input-prompts/yellow-supplement.png",
       "core_bounds": [
-        933,
-        89,
-        1263,
+        929,
+        86,
+        1264,
         395
       ],
       "bounds": [
-        931,
-        85,
-        1266,
+        925,
+        83,
+        1267,
         399
       ],
-      "core_pixels": 96235,
-      "rgba_sha256": "9ba36a7ff1b74c71c0d8587ea2f0922118ec99c1b4118bad3f313e6646f166bf"
+      "core_pixels": 98144,
+      "rgba_sha256": "e2c425e1b9325dfce163fc0e6a6d9fb86321d0e2199f1785fba7575415b3c3e0"
     },
     "Right": {
       "source": "assets/native-input-prompts/yellow-supplement.png",
       "core_bounds": [
-        1357,
-        88,
-        1686,
-        396
-      ],
-      "bounds": [
         1355,
         86,
-        1690,
-        400
+        1689,
+        394
       ],
-      "core_pixels": 96126,
-      "rgba_sha256": "c907668c2d730a88ac4d7ae7894f3774754cadc0179f69a05abf7c6542c2ddf6"
+      "bounds": [
+        1352,
+        83,
+        1693,
+        398
+      ],
+      "core_pixels": 97798,
+      "rgba_sha256": "f0a8c3d890516dd7f9b94d053619dfd2e114a50aac189fb7a5c93d82de0d5fa1"
     },
     "MouseMove": {
       "source": "assets/native-input-prompts/yellow-supplement.png",
       "core_bounds": [
-        105,
-        445,
-        398,
-        819
+        103,
+        446,
+        400,
+        820
       ],
       "bounds": [
-        103,
-        442,
-        401,
-        823
+        101,
+        443,
+        403,
+        824
       ],
-      "core_pixels": 90664,
-      "rgba_sha256": "658374ff04ece76fa1cf07d579512fda74cc681d84ecf862fa934e5ca9403d8e"
+      "core_pixels": 91885,
+      "rgba_sha256": "9e0db4c6878036860d93f06cc758e62b538733fe1bb2c97b67397ba1d260a0dd"
     },
     "G": {
       "source": "assets/native-input-prompts/yellow-supplement.png",
       "core_bounds": [
-        513,
-        492,
-        842,
-        799
+        510,
+        491,
+        844,
+        800
       ],
       "bounds": [
-        510,
-        490,
-        845,
-        803
+        506,
+        487,
+        848,
+        804
       ],
-      "core_pixels": 96084,
-      "rgba_sha256": "37578217784fafe90d35bd63875a725887ae33593942d33395d57d76ed6196ab"
+      "core_pixels": 98412,
+      "rgba_sha256": "b2f3b18d5e47595eaa043f5fdbf224bc6b897524a7f4ca6fae1296305be5ec38"
     },
     "Question": {
       "source": "assets/native-input-prompts/yellow-supplement.png",
       "core_bounds": [
-        932,
-        492,
-        1263,
-        799
+        930,
+        489,
+        1267,
+        800
       ],
       "bounds": [
-        929,
-        489,
-        1265,
-        802
+        926,
+        485,
+        1271,
+        804
       ],
-      "core_pixels": 96828,
-      "rgba_sha256": "0fb72ffc4bb3428266924b807df64454238997366d3e582108f23b253d420e8e"
+      "core_pixels": 99411,
+      "rgba_sha256": "c9b626679a1028749ac29dfed2b1e292103be8859ef6bdbc5d4026ab3d31ac57"
+    },
+    "B": {
+      "source": "assets/native-input-prompts/yellow-alphanumeric.png",
+      "core_bounds": [
+        43,
+        77,
+        273,
+        298
+      ],
+      "bounds": [
+        39,
+        75,
+        276,
+        302
+      ],
+      "core_pixels": 48281,
+      "rgba_sha256": "73a98b9acdb82734275471dd073d5eec8708e8b6c981294264d0d4d388f025fd"
+    },
+    "H": {
+      "source": "assets/native-input-prompts/yellow-alphanumeric.png",
+      "core_bounds": [
+        310,
+        78,
+        543,
+        298
+      ],
+      "bounds": [
+        306,
+        75,
+        546,
+        302
+      ],
+      "core_pixels": 48882,
+      "rgba_sha256": "09e0ce4be5d883bb0788abf929bf9314d9685e41a28be0bfd71d0ed004b6d8b5"
+    },
+    "I": {
+      "source": "assets/native-input-prompts/yellow-alphanumeric.png",
+      "core_bounds": [
+        579,
+        77,
+        813,
+        298
+      ],
+      "bounds": [
+        576,
+        75,
+        817,
+        302
+      ],
+      "core_pixels": 49090,
+      "rgba_sha256": "51034a452b5bb50f65e2294925a071d18a20ddd24fe06ba91832180153414658"
+    },
+    "J": {
+      "source": "assets/native-input-prompts/yellow-alphanumeric.png",
+      "core_bounds": [
+        848,
+        77,
+        1080,
+        298
+      ],
+      "bounds": [
+        845,
+        75,
+        1083,
+        302
+      ],
+      "core_pixels": 48641,
+      "rgba_sha256": "d8ca8945dea9bd2907c32ff87c7d13dbe77a459a8b03936e9e002c5e1aea1c0d"
+    },
+    "K": {
+      "source": "assets/native-input-prompts/yellow-alphanumeric.png",
+      "core_bounds": [
+        43,
+        328,
+        274,
+        549
+      ],
+      "bounds": [
+        40,
+        324,
+        276,
+        551
+      ],
+      "core_pixels": 48509,
+      "rgba_sha256": "7d5ea67c204157e37004fbe31f91a7b5dc27b59d8663d84d70ca92a04f5d8a97"
+    },
+    "L": {
+      "source": "assets/native-input-prompts/yellow-alphanumeric.png",
+      "core_bounds": [
+        311,
+        328,
+        543,
+        549
+      ],
+      "bounds": [
+        307,
+        324,
+        546,
+        551
+      ],
+      "core_pixels": 48830,
+      "rgba_sha256": "071f9229e9e1f2cd8cb635b7bbe80b30d2881fb6ac5d0d6086a20ccf5459e251"
+    },
+    "M": {
+      "source": "assets/native-input-prompts/yellow-alphanumeric.png",
+      "core_bounds": [
+        579,
+        328,
+        812,
+        549
+      ],
+      "bounds": [
+        575,
+        324,
+        816,
+        551
+      ],
+      "core_pixels": 49019,
+      "rgba_sha256": "3e52e9ee088d53c074701ac4c5701080ca1774a23ea175de99670772c5ad31e2"
+    },
+    "N": {
+      "source": "assets/native-input-prompts/yellow-alphanumeric.png",
+      "core_bounds": [
+        849,
+        328,
+        1080,
+        549
+      ],
+      "bounds": [
+        847,
+        325,
+        1084,
+        551
+      ],
+      "core_pixels": 48541,
+      "rgba_sha256": "37f9b478306d741cb7ca85a8ea302d46b0ff4471b378aea94d2f566f8a7934ca"
+    },
+    "O": {
+      "source": "assets/native-input-prompts/yellow-alphanumeric.png",
+      "core_bounds": [
+        44,
+        579,
+        272,
+        800
+      ],
+      "bounds": [
+        40,
+        577,
+        274,
+        804
+      ],
+      "core_pixels": 48005,
+      "rgba_sha256": "4d3a40bd8c51bc2acda5f12b2c5fa544342fa4bd16da45371ac3a38be16293f9"
+    },
+    "P": {
+      "source": "assets/native-input-prompts/yellow-alphanumeric.png",
+      "core_bounds": [
+        310,
+        579,
+        543,
+        800
+      ],
+      "bounds": [
+        306,
+        577,
+        546,
+        804
+      ],
+      "core_pixels": 49057,
+      "rgba_sha256": "68c73b7d324d94078b7049cb1c716a3cc747d9b2fb36d6cbc5359112edc188fa"
+    },
+    "T": {
+      "source": "assets/native-input-prompts/yellow-alphanumeric.png",
+      "core_bounds": [
+        578,
+        579,
+        813,
+        800
+      ],
+      "bounds": [
+        575,
+        576,
+        817,
+        804
+      ],
+      "core_pixels": 49407,
+      "rgba_sha256": "d936b9afdff16bc00a14a6c989c3cd7223908e7c175edfa986b8bdc1b1e2c0b9"
+    },
+    "U": {
+      "source": "assets/native-input-prompts/yellow-alphanumeric.png",
+      "core_bounds": [
+        849,
+        579,
+        1080,
+        800
+      ],
+      "bounds": [
+        847,
+        577,
+        1084,
+        804
+      ],
+      "core_pixels": 48611,
+      "rgba_sha256": "90473c39412de27f6472c427bb366149d5a9a6e0c59aa9020753be55a5055db7"
+    },
+    "Y": {
+      "source": "assets/native-input-prompts/yellow-alphanumeric.png",
+      "core_bounds": [
+        44,
+        829,
+        273,
+        1050
+      ],
+      "bounds": [
+        42,
+        827,
+        276,
+        1053
+      ],
+      "core_pixels": 48186,
+      "rgba_sha256": "92264cb251a0d18325bf6bb20b5c863d8c89b115ed707e97f00cf7250cb730a6"
+    },
+    "Zero": {
+      "source": "assets/native-input-prompts/yellow-alphanumeric.png",
+      "core_bounds": [
+        311,
+        829,
+        542,
+        1050
+      ],
+      "bounds": [
+        307,
+        827,
+        545,
+        1052
+      ],
+      "core_pixels": 48285,
+      "rgba_sha256": "ed8478bfee0f778277ff54d45a538f31809a2694d527624b9dcdfc4127b918c0"
+    },
+    "Seven": {
+      "source": "assets/native-input-prompts/yellow-alphanumeric.png",
+      "core_bounds": [
+        580,
+        830,
+        811,
+        1050
+      ],
+      "bounds": [
+        576,
+        827,
+        815,
+        1053
+      ],
+      "core_pixels": 48579,
+      "rgba_sha256": "b4d1d4c3af9034c39b096b441c09cf88bc171184938ab0c330dcd3a28985c0b6"
+    },
+    "Eight": {
+      "source": "assets/native-input-prompts/yellow-alphanumeric.png",
+      "core_bounds": [
+        849,
+        829,
+        1079,
+        1051
+      ],
+      "bounds": [
+        847,
+        825,
+        1082,
+        1053
+      ],
+      "core_pixels": 48394,
+      "rgba_sha256": "78deee441addf296d3a156257900bd9b9331f035b2e94b736af70c6e2414863f"
+    },
+    "Nine": {
+      "source": "assets/native-input-prompts/yellow-alphanumeric.png",
+      "core_bounds": [
+        45,
+        1079,
+        273,
+        1301
+      ],
+      "bounds": [
+        42,
+        1076,
+        275,
+        1305
+      ],
+      "core_pixels": 48264,
+      "rgba_sha256": "888ad69868c8c7884b4ea55606fa4ef49e8c060f522749bb73d870a1e562ed89"
+    },
+    "F1": {
+      "source": "assets/native-input-prompts/yellow-function-keys.png",
+      "core_bounds": [
+        84,
+        104,
+        367,
+        370
+      ],
+      "bounds": [
+        80,
+        101,
+        370,
+        373
+      ],
+      "core_pixels": 71887,
+      "rgba_sha256": "6ba122ec458aa3c29efae6e4769d56ed282e67ee2f68922d0462de5ee3f66e98"
+    },
+    "F2": {
+      "source": "assets/native-input-prompts/yellow-function-keys.png",
+      "core_bounds": [
+        416,
+        102,
+        698,
+        370
+      ],
+      "bounds": [
+        413,
+        100,
+        702,
+        373
+      ],
+      "core_pixels": 71990,
+      "rgba_sha256": "e30ae6632a674956e2822fbb0c41484cd520305765d27ae856f2611c37328087"
+    },
+    "F3": {
+      "source": "assets/native-input-prompts/yellow-function-keys.png",
+      "core_bounds": [
+        747,
+        102,
+        1030,
+        370
+      ],
+      "bounds": [
+        743,
+        100,
+        1033,
+        373
+      ],
+      "core_pixels": 72363,
+      "rgba_sha256": "b5aee13ce9b44c12bfb20f4ea27297b5f5bdf6a2bbb3023aa8e2a94ee571f3eb"
+    },
+    "F4": {
+      "source": "assets/native-input-prompts/yellow-function-keys.png",
+      "core_bounds": [
+        1081,
+        101,
+        1361,
+        370
+      ],
+      "bounds": [
+        1078,
+        99,
+        1365,
+        372
+      ],
+      "core_pixels": 71914,
+      "rgba_sha256": "3b4eed3b717475ffd26158696aa5e3681ecfeaa2463be258974932545b65b0bf"
+    },
+    "F5": {
+      "source": "assets/native-input-prompts/yellow-function-keys.png",
+      "core_bounds": [
+        85,
+        408,
+        366,
+        675
+      ],
+      "bounds": [
+        81,
+        405,
+        369,
+        679
+      ],
+      "core_pixels": 71484,
+      "rgba_sha256": "645ff741a45d1ab7ab721f1a43d6a41585efc9d30c481ca7e009eb9eacb3ebd6"
+    },
+    "F6": {
+      "source": "assets/native-input-prompts/yellow-function-keys.png",
+      "core_bounds": [
+        418,
+        408,
+        697,
+        675
+      ],
+      "bounds": [
+        415,
+        405,
+        701,
+        679
+      ],
+      "core_pixels": 71108,
+      "rgba_sha256": "30141630b192476efd08966714c01407cfa8a5e3a98b586496c424195241b216"
+    },
+    "F7": {
+      "source": "assets/native-input-prompts/yellow-function-keys.png",
+      "core_bounds": [
+        747,
+        408,
+        1029,
+        674
+      ],
+      "bounds": [
+        743,
+        405,
+        1032,
+        678
+      ],
+      "core_pixels": 71709,
+      "rgba_sha256": "43a7d90206a660490a7d52526f876d3993b67a4e211f9e026a2bd32a2b05b328"
+    },
+    "F8": {
+      "source": "assets/native-input-prompts/yellow-function-keys.png",
+      "core_bounds": [
+        1080,
+        407,
+        1360,
+        673
+      ],
+      "bounds": [
+        1078,
+        404,
+        1364,
+        677
+      ],
+      "core_pixels": 71355,
+      "rgba_sha256": "8b3665c25f96d011c28514e81b5e02675b9d4183e89df275b8965855ac797a32"
+    },
+    "F9": {
+      "source": "assets/native-input-prompts/yellow-function-keys.png",
+      "core_bounds": [
+        84,
+        709,
+        365,
+        975
+      ],
+      "bounds": [
+        80,
+        707,
+        368,
+        977
+      ],
+      "core_pixels": 71284,
+      "rgba_sha256": "8365d8a7296fb8ce0b14e5567e9292e266f19f9ee047566d9f54e528d1c456ea"
+    },
+    "F10": {
+      "source": "assets/native-input-prompts/yellow-function-keys.png",
+      "core_bounds": [
+        418,
+        709,
+        696,
+        974
+      ],
+      "bounds": [
+        414,
+        707,
+        699,
+        977
+      ],
+      "core_pixels": 70744,
+      "rgba_sha256": "97df33e30abfe644aaa861bf1093b5d2a897cad07fb9e5f160949d46774d9468"
+    },
+    "F11": {
+      "source": "assets/native-input-prompts/yellow-function-keys.png",
+      "core_bounds": [
+        749,
+        709,
+        1029,
+        975
+      ],
+      "bounds": [
+        745,
+        706,
+        1032,
+        977
+      ],
+      "core_pixels": 71314,
+      "rgba_sha256": "832b9ab56651469926b2c05012a62d74a96cfc757cec09f4d7af22ae9f02e47a"
+    },
+    "F12": {
+      "source": "assets/native-input-prompts/yellow-function-keys.png",
+      "core_bounds": [
+        1081,
+        710,
+        1360,
+        975
+      ],
+      "bounds": [
+        1078,
+        707,
+        1364,
+        977
+      ],
+      "core_pixels": 70789,
+      "rgba_sha256": "6daa6f8de82886ef0168ce78c2e1c74076c66d000c0154191c53bd1717df9243"
+    },
+    "Backspace": {
+      "source": "assets/native-input-prompts/yellow-special-keys.png",
+      "core_bounds": [
+        37,
+        57,
+        271,
+        284
+      ],
+      "bounds": [
+        35,
+        54,
+        273,
+        288
+      ],
+      "core_pixels": 50603,
+      "rgba_sha256": "0ac7116e453d040395ea513949fcf9b3a0e9a3b81262308e3152e6ed9f224a71"
+    },
+    "CapsLock": {
+      "source": "assets/native-input-prompts/yellow-special-keys.png",
+      "core_bounds": [
+        304,
+        57,
+        543,
+        284
+      ],
+      "bounds": [
+        301,
+        54,
+        546,
+        288
+      ],
+      "core_pixels": 51820,
+      "rgba_sha256": "adaec28cbdf81878d64c0f71005c11479ba828af3f1975693228f3e5711dd4c6"
+    },
+    "LeftShift": {
+      "source": "assets/native-input-prompts/yellow-special-keys.png",
+      "core_bounds": [
+        576,
+        57,
+        817,
+        284
+      ],
+      "bounds": [
+        574,
+        54,
+        819,
+        288
+      ],
+      "core_pixels": 52294,
+      "rgba_sha256": "4c976cce0d824fe0d595ab0e3f840656246f62752f6a6dd37c6c1502372d88cd"
+    },
+    "RightShift": {
+      "source": "assets/native-input-prompts/yellow-special-keys.png",
+      "core_bounds": [
+        851,
+        57,
+        1084,
+        284
+      ],
+      "bounds": [
+        848,
+        54,
+        1088,
+        288
+      ],
+      "core_pixels": 50594,
+      "rgba_sha256": "e9ba9efd76c4c28407003e0a725d1cd87847976af9063d34e22e68c65cc54f14"
+    },
+    "LeftCtrl": {
+      "source": "assets/native-input-prompts/yellow-special-keys.png",
+      "core_bounds": [
+        36,
+        311,
+        272,
+        538
+      ],
+      "bounds": [
+        34,
+        308,
+        274,
+        542
+      ],
+      "core_pixels": 50768,
+      "rgba_sha256": "43699c36d181c866b59de3470c4841a049140745dd38c8405562397af18ac352"
+    },
+    "RightCtrl": {
+      "source": "assets/native-input-prompts/yellow-special-keys.png",
+      "core_bounds": [
+        305,
+        312,
+        543,
+        538
+      ],
+      "bounds": [
+        302,
+        308,
+        546,
+        542
+      ],
+      "core_pixels": 51505,
+      "rgba_sha256": "6453cdf71bbf9b1cc1d365f4fb150abf9cc6c76b7fbdacbfe68dcde751f75a31"
+    },
+    "LeftAlt": {
+      "source": "assets/native-input-prompts/yellow-special-keys.png",
+      "core_bounds": [
+        576,
+        312,
+        814,
+        539
+      ],
+      "bounds": [
+        573,
+        309,
+        818,
+        543
+      ],
+      "core_pixels": 51643,
+      "rgba_sha256": "3118eaf63a7458e31de77f5e98b9ad3314983eea684bdbd22dbfb74cf0920ca7"
+    },
+    "RightAlt": {
+      "source": "assets/native-input-prompts/yellow-special-keys.png",
+      "core_bounds": [
+        849,
+        312,
+        1085,
+        539
+      ],
+      "bounds": [
+        847,
+        308,
+        1088,
+        543
+      ],
+      "core_pixels": 51044,
+      "rgba_sha256": "488a5c282da45b1ffc13bfd1bfb93e4a322f2695dcf02ce8e6f2487fe1054654"
+    },
+    "LeftWin": {
+      "source": "assets/native-input-prompts/yellow-special-keys.png",
+      "core_bounds": [
+        37,
+        568,
+        270,
+        793
+      ],
+      "bounds": [
+        35,
+        564,
+        273,
+        795
+      ],
+      "core_pixels": 50121,
+      "rgba_sha256": "fed251c775c554cfd0f991c50d646f7ee697c513204b63c9a47176742eb41c3d"
+    },
+    "RightWin": {
+      "source": "assets/native-input-prompts/yellow-special-keys.png",
+      "core_bounds": [
+        305,
+        569,
+        542,
+        793
+      ],
+      "bounds": [
+        302,
+        566,
+        545,
+        796
+      ],
+      "core_pixels": 50654,
+      "rgba_sha256": "4952416e5cee0d6456719a7c4a669ec41d6ccc1740d437e185b7b8cf159c53e9"
+    },
+    "Menu": {
+      "source": "assets/native-input-prompts/yellow-special-keys.png",
+      "core_bounds": [
+        575,
+        568,
+        816,
+        793
+      ],
+      "bounds": [
+        572,
+        566,
+        819,
+        795
+      ],
+      "core_pixels": 51884,
+      "rgba_sha256": "39d02e3709a184b51e79e99fbf0978c33ca9a966a6eb13c61b94775f37e90ed4"
+    },
+    "Insert": {
+      "source": "assets/native-input-prompts/yellow-special-keys.png",
+      "core_bounds": [
+        851,
+        568,
+        1087,
+        793
+      ],
+      "bounds": [
+        849,
+        564,
+        1090,
+        796
+      ],
+      "core_pixels": 50794,
+      "rgba_sha256": "b287b6adb56c5160b3be92f2ec510f6d2629930af01c6c132d55617bad535717"
+    },
+    "Delete": {
+      "source": "assets/native-input-prompts/yellow-special-keys.png",
+      "core_bounds": [
+        36,
+        831,
+        272,
+        1057
+      ],
+      "bounds": [
+        34,
+        828,
+        275,
+        1061
+      ],
+      "core_pixels": 50713,
+      "rgba_sha256": "ddbd0b62ee11d29850a410623e29f628246da9597f63b77a93679f528a7f82c6"
+    },
+    "Home": {
+      "source": "assets/native-input-prompts/yellow-special-keys.png",
+      "core_bounds": [
+        303,
+        831,
+        543,
+        1056
+      ],
+      "bounds": [
+        299,
+        828,
+        546,
+        1060
+      ],
+      "core_pixels": 51735,
+      "rgba_sha256": "dfa26990726249fea831f8a9a46f39b207a07697134a996ae4bfe7288185f351"
+    },
+    "End": {
+      "source": "assets/native-input-prompts/yellow-special-keys.png",
+      "core_bounds": [
+        574,
+        831,
+        816,
+        1057
+      ],
+      "bounds": [
+        572,
+        828,
+        819,
+        1061
+      ],
+      "core_pixels": 52314,
+      "rgba_sha256": "e2b1df9359180400d42c89d31fc9edb90510e3c710a5638fe1d21716c34e6b7e"
+    },
+    "PageUp": {
+      "source": "assets/native-input-prompts/yellow-special-keys.png",
+      "core_bounds": [
+        850,
+        831,
+        1086,
+        1057
+      ],
+      "bounds": [
+        847,
+        828,
+        1089,
+        1061
+      ],
+      "core_pixels": 50925,
+      "rgba_sha256": "77c85e5755e3214d09601fbdb7d717a99d51472dc48e2081a23969c12adcd930"
+    },
+    "PageDown": {
+      "source": "assets/native-input-prompts/yellow-special-keys.png",
+      "core_bounds": [
+        36,
+        1092,
+        272,
+        1318
+      ],
+      "bounds": [
+        34,
+        1090,
+        275,
+        1321
+      ],
+      "core_pixels": 50937,
+      "rgba_sha256": "26280491fdd91787d9f55b7aa9fa1e7eff6b5db492aac29a6000fce47b8740fb"
+    },
+    "PrintScreen": {
+      "source": "assets/native-input-prompts/yellow-special-keys.png",
+      "core_bounds": [
+        306,
+        1091,
+        543,
+        1318
+      ],
+      "bounds": [
+        303,
+        1088,
+        545,
+        1322
+      ],
+      "core_pixels": 51240,
+      "rgba_sha256": "29f90b983a22061e56bda4323e001e6d05c278fb705d42b17d03552d73f8bf4c"
+    },
+    "ScrollLock": {
+      "source": "assets/native-input-prompts/yellow-special-keys.png",
+      "core_bounds": [
+        575,
+        1089,
+        817,
+        1317
+      ],
+      "bounds": [
+        572,
+        1086,
+        820,
+        1321
+      ],
+      "core_pixels": 52726,
+      "rgba_sha256": "ec2c27708d96c0222608074752d5ee77004ec00e19078ce20f9fa40264656701"
+    },
+    "Pause": {
+      "source": "assets/native-input-prompts/yellow-special-keys.png",
+      "core_bounds": [
+        851,
+        1090,
+        1086,
+        1317
+      ],
+      "bounds": [
+        848,
+        1087,
+        1089,
+        1321
+      ],
+      "core_pixels": 51143,
+      "rgba_sha256": "7ad490e1d6f3bb6fe302eff3a9d931d4b96544f061a5b6fb1d61d39e30e629a0"
+    },
+    "Grave": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        27,
+        76,
+        224,
+        265
+      ],
+      "bounds": [
+        24,
+        73,
+        226,
+        269
+      ],
+      "core_pixels": 35385,
+      "rgba_sha256": "78321a6494ea49bf6fcc09a9e5e17ba106ceabfcd638c4ec2f41e189ca209f18"
+    },
+    "Minus": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        254,
+        74,
+        458,
+        265
+      ],
+      "bounds": [
+        252,
+        71,
+        462,
+        269
+      ],
+      "core_pixels": 37096,
+      "rgba_sha256": "30778a73b7526fa498ae5ce2b1cb5f980a8d05d1292b63af9eb07e2b98a71440"
+    },
+    "Equals": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        490,
+        74,
+        694,
+        265
+      ],
+      "bounds": [
+        486,
+        70,
+        696,
+        269
+      ],
+      "core_pixels": 37100,
+      "rgba_sha256": "93211484f081f68d62fa471975ee9b82dff05e7c7740c740cbdb676388d40b61"
+    },
+    "LeftBracket": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        726,
+        74,
+        925,
+        265
+      ],
+      "bounds": [
+        723,
+        72,
+        929,
+        268
+      ],
+      "core_pixels": 36104,
+      "rgba_sha256": "8cba3b9d11a060edf9fb35137032f12d89ea5a9be60d6f48be9bb726c6ec5ed1"
+    },
+    "RightBracket": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        26,
+        284,
+        223,
+        477
+      ],
+      "bounds": [
+        22,
+        282,
+        225,
+        481
+      ],
+      "core_pixels": 36067,
+      "rgba_sha256": "3440925eee520537f3d45f50a85bc3666a9be7e3c312c925ff004afe14ec43fd"
+    },
+    "Backslash": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        253,
+        284,
+        457,
+        477
+      ],
+      "bounds": [
+        251,
+        282,
+        461,
+        479
+      ],
+      "core_pixels": 37514,
+      "rgba_sha256": "4b4b155fb6ef45456983a98be65c9bd14da4aa164c8069b5af757fdc2f45da7d"
+    },
+    "Semicolon": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        490,
+        284,
+        693,
+        477
+      ],
+      "bounds": [
+        486,
+        282,
+        695,
+        481
+      ],
+      "core_pixels": 37405,
+      "rgba_sha256": "cf8be6bc984e0ae647464b1136e0028da62ccdc98c74c5735fbbc62ac7ae6de0"
+    },
+    "Apostrophe": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        725,
+        284,
+        924,
+        477
+      ],
+      "bounds": [
+        723,
+        282,
+        926,
+        479
+      ],
+      "core_pixels": 36489,
+      "rgba_sha256": "fce1b85ab9015fc779a672ad5b91fd2d733bb3ab0440f3c07d4e29a9d6f247b3"
+    },
+    "Comma": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        25,
+        500,
+        223,
+        689
+      ],
+      "bounds": [
+        21,
+        497,
+        226,
+        692
+      ],
+      "core_pixels": 35636,
+      "rgba_sha256": "0add1d314ea16cb43a0809a9f0742af30c2c9e9aba2369b8d4cef8718f4760e9"
+    },
+    "Period": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        254,
+        501,
+        455,
+        689
+      ],
+      "bounds": [
+        252,
+        498,
+        458,
+        692
+      ],
+      "core_pixels": 35973,
+      "rgba_sha256": "de8d33520e0e8fccce38c6df4e6ad657962d308347f401d73f67693e47839af5"
+    },
+    "Slash": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        490,
+        501,
+        692,
+        689
+      ],
+      "bounds": [
+        486,
+        498,
+        694,
+        692
+      ],
+      "core_pixels": 36220,
+      "rgba_sha256": "d324f94ad5bd2212e1dfbf07b986d0165d37c287f885465f3904bf2083ee4489"
+    },
+    "NumLock": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        724,
+        499,
+        923,
+        689
+      ],
+      "bounds": [
+        721,
+        497,
+        925,
+        692
+      ],
+      "core_pixels": 36055,
+      "rgba_sha256": "30a41cc80d3776a3afee66782d639fd4c7e18a95be94b670beabd037a2ecd393"
+    },
+    "Numpad0": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        25,
+        717,
+        226,
+        904
+      ],
+      "bounds": [
+        22,
+        715,
+        228,
+        906
+      ],
+      "core_pixels": 35807,
+      "rgba_sha256": "c5557211fe7478fbbcc4be9320a681356328e4e3b2a3f7358ee2925db1d717b4"
+    },
+    "Numpad1": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        256,
+        718,
+        458,
+        904
+      ],
+      "bounds": [
+        254,
+        715,
+        462,
+        906
+      ],
+      "core_pixels": 35778,
+      "rgba_sha256": "cf3a3861be5d041c6f2c677aa00ff23e99c8e9edb107b0452a558fcfaa4cd57e"
+    },
+    "Numpad2": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        489,
+        717,
+        693,
+        904
+      ],
+      "bounds": [
+        485,
+        714,
+        695,
+        906
+      ],
+      "core_pixels": 36414,
+      "rgba_sha256": "2302762904401f8970398f094f9e2ba31cccb9d6419ecf9381cbea1ed67f29a6"
+    },
+    "Numpad3": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        723,
+        717,
+        923,
+        904
+      ],
+      "bounds": [
+        721,
+        714,
+        927,
+        906
+      ],
+      "core_pixels": 35745,
+      "rgba_sha256": "c845a55c4680da1fe55351ebf23bceae4f5f1b996f38419ae71075afe4abb48f"
+    },
+    "Numpad4": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        27,
+        930,
+        226,
+        1118
+      ],
+      "bounds": [
+        23,
+        927,
+        228,
+        1122
+      ],
+      "core_pixels": 35722,
+      "rgba_sha256": "e97c6c62f0459dec821cdc6ad7ebb8b70b8fefc680e77b6e10c610764f9715c5"
+    },
+    "Numpad5": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        257,
+        930,
+        457,
+        1118
+      ],
+      "bounds": [
+        255,
+        926,
+        461,
+        1121
+      ],
+      "core_pixels": 35677,
+      "rgba_sha256": "227cd3fddde1dc7ed4307be2e3ed1909575b134940f77d49eaf95fb288055c73"
+    },
+    "Numpad6": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        492,
+        931,
+        694,
+        1119
+      ],
+      "bounds": [
+        488,
+        928,
+        696,
+        1123
+      ],
+      "core_pixels": 36268,
+      "rgba_sha256": "1adecba92b04b6c4296467d434fa4ac321fc80dae7307f5183b58133b2b282d2"
+    },
+    "Numpad7": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        721,
+        930,
+        920,
+        1119
+      ],
+      "bounds": [
+        719,
+        928,
+        923,
+        1123
+      ],
+      "core_pixels": 35937,
+      "rgba_sha256": "f6836c594f18d192dc10b7537f046cfdfb22bb78ea44c80c53f618d747c8a1ec"
+    },
+    "Numpad8": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        25,
+        1146,
+        226,
+        1337
+      ],
+      "bounds": [
+        22,
+        1143,
+        228,
+        1339
+      ],
+      "core_pixels": 36575,
+      "rgba_sha256": "befb354d9f08aa0ac6dacc58f5b3847c8d3a209d5cf9f2eca05fa03ac0d81dfa"
+    },
+    "Numpad9": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        255,
+        1146,
+        457,
+        1337
+      ],
+      "bounds": [
+        253,
+        1143,
+        460,
+        1339
+      ],
+      "core_pixels": 36760,
+      "rgba_sha256": "bc1aa318df9edfd218dd2ed79c4032bdf8db08b09b6638d2da7df0ed86ccc0c7"
+    },
+    "NumpadDecimal": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        490,
+        1146,
+        693,
+        1337
+      ],
+      "bounds": [
+        486,
+        1143,
+        695,
+        1339
+      ],
+      "core_pixels": 36902,
+      "rgba_sha256": "ee28d9d39f3477d8ab6a1a90572ff168e25eab1da164bb09815e9801468e0199"
+    },
+    "NumpadEnter": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        722,
+        1146,
+        923,
+        1337
+      ],
+      "bounds": [
+        720,
+        1143,
+        927,
+        1339
+      ],
+      "core_pixels": 36605,
+      "rgba_sha256": "5d4cbc54a6d37dfb01988a687febf311b0862897980d41e1d0a1738bb386b52c"
+    },
+    "NumpadAdd": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        25,
+        1361,
+        227,
+        1551
+      ],
+      "bounds": [
+        21,
+        1359,
+        229,
+        1555
+      ],
+      "core_pixels": 36513,
+      "rgba_sha256": "502dcc8b1c7c1141023a676b7f74c88b8bd8b2170ea8a887a8cfe25c7af52855"
+    },
+    "NumpadSubtract": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        257,
+        1361,
+        457,
+        1551
+      ],
+      "bounds": [
+        254,
+        1358,
+        461,
+        1555
+      ],
+      "core_pixels": 36408,
+      "rgba_sha256": "b01f1fed4cdcd65551f49bf81d9f3082f02ed87a93e0fbab41ea3da7f4dd4ce1"
+    },
+    "NumpadMultiply": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        490,
+        1361,
+        694,
+        1551
+      ],
+      "bounds": [
+        486,
+        1358,
+        697,
+        1554
+      ],
+      "core_pixels": 36984,
+      "rgba_sha256": "70d87b7b25b81f7238a18d4835e605d3f73e712d82b302b585812a7208ee63c1"
+    },
+    "NumpadDivide": {
+      "source": "assets/native-input-prompts/yellow-punctuation-numpad.png",
+      "core_bounds": [
+        725,
+        1361,
+        924,
+        1551
+      ],
+      "bounds": [
+        722,
+        1358,
+        928,
+        1555
+      ],
+      "core_pixels": 36078,
+      "rgba_sha256": "8204920fa75f996db9902ac11077dc111fa9dc3b435d9387d7bc5e892bbe20c8"
     }
   },
   "groups": {
