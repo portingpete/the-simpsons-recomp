@@ -1,0 +1,23 @@
+Continue implementation of The Simpsons Game native port in K:\SimpsonsNativeCopy. You are a sequential background worker authorized by the user to continue until verified gameplay and responsive character control, or a genuine blocker requiring user input. Do not start other workers or modify this loop's controller/prompt. Work only on this project; no publishing, destructive cleanup, credential/configuration changes or unrelated system changes. Preserve pre-existing work. This workspace has no Git repository; do not initialize one or claim commits.
+
+Read project instructions and these checkpoints first:
+K:\SimpsonsNativeCopy\docs\reach-game-056.md
+K:\SimpsonsNativeCopy\docs\multitone-transcription-progress.md
+Read the latest *-result.json in K:\SimpsonsNativeCopy\build\native-continuation-loop to continue the preceding iteration. Ignore a stale completion claim unless its evidence actually proves the goal. Check for a STOP file in that directory before edits and long commands; if present, stop safely and report blocked.
+
+Baseline: multitone executes in replay056; tangent storage/decode is implemented (runtime/rigid_vertices.cpp opt-in consumeTangent with packed 002A2187 XYZ/high-bits-dead validation, renderer/rigid_mesh.h 68-byte RigidVertex with tangent at 56 plus finite upload check, tests/test_rigid_vertices.cpp 49265 checks). Normalmap82057E08 remains unadmitted. Normalmap opaque pair VS8205855C/PS82058CBC. Shared ALU emission now covers VS37/37 and PS102/102; this does NOT qualify shader execution. Focused suite passes (RigidVertex/RigidMesh/MaterialConstants/NormalmapInventory). Missing: tangent GPU input layout/interface, eight interpolators, predicate and five forward-jump scheduling, full native shader artifacts and independent GPU VS/PS oracles, 624-byte material staging, slot3 texture ownership, depth adapter, admission and fresh replay.
+
+FIRST ITERATION: implement tangent GPU input layout and shader input interface with targeted WARP/hardware tests, grounded in original declaration/fetch semantics and the existing dualtextured 5-element layout precedent. Inspect K:\SimpsonsNativeCopy\renderer\rigid_mesh.h and .cpp, K:\SimpsonsNativeCopy\renderer\rigid_dualtextured_shader.hlsl, K:\SimpsonsNativeCopy\runtime\rigid_vertices.cpp and .h, K:\SimpsonsNativeCopy\tests\test_rigid_mesh.cpp, and normalmap VS fetch destinations/semantic associations. Preserve all non-tangent callers and existing 5-element consumers; gate tangent layout behind explicit normalmap use rather than changing every rigid draw. If evidence blocks that implementation, implement the next independently justified prerequisite rather than running another admission probe.
+
+SUBSEQUENT ITERATIONS: implement the next concrete missing prerequisite, not documentation-only or repeated diagnostic checks. Finish a coherent, tested increment each iteration. Never use shader aliases, skipped draws, invented attributes or premature admission as a fix. Preserve strict rejects until their actual paths are qualified. Do not equate emitted ALU text with correct predicates, floating-point semantics, resource binding or pixels. Broader legacy multiplication handling still needs review. Use existing frameworks and build patterns. Run mandatory tools\recompile.py regeneration/verification after runtime edits and before compiling. Build affected targets and run focused tests (WARP and hardware where applicable). Confirm exit codes. Read back edited files. Do not claim results not observed.
+
+Keep the checkpoint accurate with changed files, exact tests and next implementation step. On admission, run a fresh numbered replay (059 or next unused). Fix subsequent blockers with real implementations. Completion requires evidence of presented gameplay AND responsive character control, not just normalmap rendering or test success. If that cannot be objectively observed with available tools, report blocked; do not invent verification.
+
+At the end write JSON to the exact result path supplied below with keys:
+status: continue, complete, or blocked;
+summary: factual progress;
+changed_files: array of absolute implementation/test paths;
+tests_passed: boolean true only after relevant verification succeeds;
+evidence: array of absolute log paths or precise test results;
+next: concrete next implementation step.
+Use continue only after verified implementation progress. Use blocked on failing tests, missing credentials/assets, unresolved safety/semantic questions, or inability to progress without user input. The controller stops on failures or blocked; do not conceal them. No infinite diagnostic retries. A successful CLI exit alone is not task completion.

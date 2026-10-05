@@ -1,0 +1,52 @@
+[
+  {
+    "capture_after": false,
+    "lx": 0,
+    "ms": 50,
+    "ly": 0,
+    "buttons": 0,
+    "wait_after_ms": 30000,
+    "rt": 0,
+    "name": "original-natural-startup-wait-1"
+  },
+  {
+    "capture_after": false,
+    "lx": 0,
+    "ms": 50,
+    "ly": 0,
+    "buttons": 0,
+    "wait_after_ms": 30000,
+    "rt": 0,
+    "name": "original-natural-startup-wait-2"
+  },
+  {
+    "capture_after": false,
+    "lx": 0,
+    "ms": 50,
+    "ly": 0,
+    "buttons": 0,
+    "wait_after_ms": 30000,
+    "rt": 0,
+    "name": "original-natural-startup-wait-3"
+  },
+  {
+    "capture_after": false,
+    "lx": 0,
+    "ms": 50,
+    "ly": 0,
+    "buttons": 0,
+    "wait_after_ms": 30000,
+    "rt": 0,
+    "name": "original-natural-startup-wait-4"
+  },
+  {
+    "capture_after": true,
+    "lx": 0,
+    "ms": 50,
+    "ly": 0,
+    "buttons": 0,
+    "wait_after_ms": 30000,
+    "rt": 0,
+    "name": "original-natural-startup-wait-5"
+  }
+]

@@ -1,0 +1,8 @@
+[
+  {"name":"opening-confirm-0","command":"A"},
+  {"name":"opening-confirm-1","command":"A"},
+  {"name":"opening-confirm-2","command":"A"},
+  {"name":"opening-confirm-3","command":"A"},
+  {"name":"pause-menu","command":"START","capture_after":true,"wait_after_ms":1500},
+  {"name":"resume-game","command":"START","capture_after":true,"wait_after_ms":2000}
+]

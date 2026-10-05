@@ -1,0 +1,6082 @@
+# Addresses verified by unique multi-instruction signatures in this retail image.
+[main]
+file_path = "../analysis/simpsons.unencrypted.xex"
+switch_table_file_path = "../analysis/switch_tables.toml"
+skip_lr = false
+skip_msr = false
+ctr_as_local = false
+xer_as_local = false
+reserved_as_local = false
+cr_as_local = false
+non_argument_as_local = false
+non_volatile_as_local = false
+savegprlr_14_address = 0x82a3c390
+restgprlr_14_address = 0x82a3c3e0
+savefpr_14_address = 0x82a3c5a0
+restfpr_14_address = 0x82a3c5ec
+savevmx_14_address = 0x82a44310
+restvmx_14_address = 0x82a445a8
+savevmx_64_address = 0x82a443a4
+restvmx_64_address = 0x82a4463c
+nonlocal_setjmp_address = 0x82A43E50
+functions = [{ address = 0x82242e48, size = 0xec }]
+
+# Publish the main camera's native window before original frustum rebuilding.
+# Scene visibility copies these planes before render begin, so widened FOV
+# must already be present here to keep objects in the additional visible area.
+[[midasm_hook]]
+address = 0x823F1790
+name = "SimpsonsNativeUltrawideCameraSync"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbe1fff0"
+
+# Keyboard WASD uses the original Apt dispatcher's digital press/hold repeat
+# route for menus, retaining continuous left-stick movement for gameplay.
+[[midasm_hook]]
+address = 0x823A1EC8
+name = "SimpsonsNativeMenuMouse"
+registers = ["ctx", "base"]
+evidence_hex = "897a00082b0b0000419a0430"
+
+# Xbox Apt's MovieClip.hitTest callback is an undefined-returning placeholder.
+# Native point tests use the original display bounds and ancestor transforms.
+[[midasm_hook]]
+address = 0x827E39B8
+name = "SimpsonsNativeAptHitTest"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "3d6082e0806b1c7c4e800020"
+
+[[midasm_hook]]
+address = 0x823A206C
+name = "SimpsonsNativeMenuKeyboardPressed"
+registers = ["ctx", "base"]
+evidence_hex = "2f030000409a008c897f000d2b0b0001"
+
+[[midasm_hook]]
+address = 0x823A2090
+name = "SimpsonsNativeMenuKeyboardHeld"
+registers = ["ctx", "base"]
+evidence_hex = "2f030000419a0054895f0018817972b0"
+
+# Suppress only the keyboard left vector at the two menu analog consumers.
+# The original right stick, physical controllers and command/replay input stay
+# on their ordinary routes. Each vector contains exactly two float words.
+[[midasm_hook]]
+address = 0x823A21E0
+name = "SimpsonsNativeMenuKeyboardDirection"
+registers = ["ctx", "base"]
+evidence_hex = "c01f0000fda00210ff0de00040990124"
+
+[[midasm_hook]]
+address = 0x823A2298
+name = "SimpsonsNativeMenuKeyboardStick"
+registers = ["ctx", "base"]
+evidence_hex = "c01f0000ff00f000409a0010c01d0000"
+
+# The original Options Video callback owns navigation and the Apt timeline.
+# Add native labels after its brightness population, and handle the existing
+# SaveVideoSettings callback through the original Apt string/CPU bridge.
+[[midasm_hook]]
+address = 0x823A5488
+name = "SimpsonsNativeVideoPopulate"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6"
+
+[[midasm_hook]]
+address = 0x823A54C8
+name = "SimpsonsNativeVideoSave"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6"
+
+# Original Options event dispatcher, Video state: r30 is accept (6) or
+# cancel (7). Preserve its brightness save/rollback and screen transition.
+[[midasm_hook]]
+address = 0x823A599C
+name = "SimpsonsNativeVideoLeave"
+registers = ["ctx", "base"]
+evidence_hex = "2f1e0006"
+
+# Observe the original Apt input gate after its boolean result is computed.
+# Retain the gate and epilogue; this diagnoses a blocked menu after Video.
+[[midasm_hook]]
+address = 0x823AC2E4
+name = "SimpsonsNativeAptInputGateTrace"
+registers = ["ctx", "base"]
+evidence_hex = "382100708181fff87d8803a6ebe1fff0"
+
+# Temporary opt-in rendering shortcut: provide the original startup parser
+# with its existing developer arguments, -stream loc loc.str. Default is inert.
+[[midasm_hook]]
+address = 0x8285F928
+name = "SimpsonsNativeRenderTestStartup"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6481dca699421ff203de082d13d608200"
+
+# Opt-in first-mission completion: arm after real map streaming and the
+# original gameflow startup callback, retaining the complete CPU epilogue.
+[[midasm_hook]]
+address = 0x823BB5D8
+name = "SimpsonsNativeFirstMissionCompletionReady"
+registers = ["ctx", "base"]
+evidence_hex = "382100608181fff87d8803a6ebe1fff04e800020"
+
+# Observation after original derived gameplay cleanup, before optional free.
+# Identity comes from that owner's actual map-ready receipt, never a successor.
+[[midasm_hook]]
+address = 0x823BBCE0
+name = "SimpsonsNativeGameplayOwnerRetired"
+registers = ["ctx", "base"]
+evidence_hex = "57cb07fe7fe3fb782b0b0000419a000c"
+
+# Original queued map callback entry, before package publication/stream work.
+# Read-only unknown snapshots cannot change mission attribution or admission.
+[[midasm_hook]]
+address = 0x8289ADF8
+name = "SimpsonsNativeMapLoadRequestAudit"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6481a15c59421ff307c7f1b78"
+
+# Observe original frontend selector requests before their state publication.
+[[midasm_hook]]
+address = 0x8239E140
+name = "SimpsonsNativeFrontendStateAudit"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbc1ffe8fbe1fff0"
+
+# Observe the original failure producer before its busy check or state writes.
+# A request is not death/reload completion; cached owner and successor receipts
+# remain necessary. All original branches and CPU state are retained.
+[[midasm_hook]]
+address = 0x8289DEE0
+name = "SimpsonsNativeEpisodeFailureAudit"
+registers = ["ctx", "base"]
+evidence_hex = "816304b0556ba7fe2b0b00004c9a0020"
+
+# User-requested Start/Enter movie skip. Successful start owns an input latch;
+# a fresh press invokes original stop826B9290 and completion826B8AD8. Original
+# decoder shutdown8282D998 (including its real thread-exit wait) stays intact.
+[[midasm_hook]]
+address = 0x826B926C
+name = "SimpsonsNativeMovieInputBegin"
+registers = ["ctx", "base"]
+evidence_hex = "38210070483831ac"
+
+[[midasm_hook]]
+address = 0x8282D998
+name = "SimpsonsNativeMovieInputEnd"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbc1ffe8fbe1fff09421ff90"
+
+[[midasm_hook]]
+address = 0x826B92F0
+name = "SimpsonsNativeMovieSkip"
+registers = ["ctx", "base"]
+return_on_true = true
+evidence_hex = "7d8802a6483830d9dbe1ffd89421ff707c7f1b78"
+
+# Native Windows timezone at the original public platform wrapper. Original
+# save timestamp conversion and game-side date formatting remain AOT.
+[[midasm_hook]]
+address = 0x82432A10
+name = "SimpsonsNativeGetTimeZoneInformation"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff8fbc1ffe8fbe1fff09421ff70388100507c7f1b783bc0000048001fc9"
+
+# Observe save-load callbacks without replacing original validation or I/O.
+[[midasm_hook]]
+address = 0x82C9C3D8
+name = "SimpsonsNativeSaveLoadEvent"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a64bd9ffed9421ff80"
+
+[[midasm_hook]]
+address = 0x8285BF78
+name = "SimpsonsNativeSaveMetadataBegin"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6481e04419421fe50"
+
+[[midasm_hook]]
+address = 0x82CA4690
+name = "SimpsonsNativeSaveMetadataResult"
+registers = ["ctx", "base"]
+evidence_hex = "7c7d1b782f1d0002419a0068"
+
+# Gameplay time uses elapsed high-resolution time. Keep the original enabled,
+# pause, time-scale, scaled-clock and timestamp publication paths intact.
+[[midasm_hook]]
+address = 0x82690D3C
+name = "SimpsonsNativeGameplayClockInitialize"
+registers = ["ctx", "base"]
+evidence_hex = "7c6b1b787fe3fb78917f000c38210060"
+
+[[midasm_hook]]
+address = 0x82690D7C
+name = "SimpsonsNativeGameplayClockSample"
+registers = ["ctx", "base"]
+evidence_hex = "7c7d1b7848000a212f030000419a01fc"
+
+[[midasm_hook]]
+address = 0x82690D8C
+name = "SimpsonsNativeGameplayClockAdvance"
+registers = ["ctx", "base"]
+jump_address = 0x82690EC0
+evidence_hex = "817e000c3f8082d73d2082d57d6be850"
+
+[[midasm_hook]]
+address = 0x826910A0
+name = "SimpsonsNativeGameplayClockReset"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff89421ffa03d2082d5"
+
+# Keep world contacts in sync with fractional gameplay updates. The original
+# small-frame branch otherwise integrates ahead in fixed 33.3667ms steps.
+[[midasm_hook]]
+address = 0x827A5664
+name = "SimpsonsNativeWorldCollisionStep"
+registers = ["ctx", "base"]
+evidence_hex = "482fca0d4800004cff1fe80040980010"
+
+# Observe the original frame deadline without changing its scheduling body.
+[[midasm_hook]]
+address = 0x82718D48
+name = "SimpsonsNativeFrameSchedulerConfigure"
+registers = ["ctx", "base"]
+evidence_hex = "3d6082153d2082d5394be8d8"
+
+[[midasm_hook]]
+address = 0x8271878C
+name = "SimpsonsNativeFrameSchedulerStamp"
+registers = ["ctx", "base"]
+evidence_hex = "916300884e800020"
+
+[[midasm_hook]]
+address = 0x826B7B70
+name = "SimpsonsNativeFrameWaitBegin"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbc1ffe8"
+
+[[midasm_hook]]
+address = 0x826B7CC0
+name = "SimpsonsNativeFrameWaitEnd"
+registers = ["ctx", "base"]
+evidence_hex = "382100808181fff87d8803a6"
+
+# Original type-zero register save/restore is retained. Native unwinding resumes
+# the statically known caller continuation instead of returning to longjmp's caller.
+[[midasm_hook]]
+address = 0x82A43D30
+name = "SimpsonsNonlocalJumpValidate"
+registers = ["ctx", "base"]
+evidence_hex = "7c0802a69421ffb090010008"
+
+[[midasm_hook]]
+address = 0x82A43E18
+name = "SimpsonsNonlocalJumpTransfer"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "4e800020"
+
+# Proven platform request entry; no original instructions have executed yet.
+# Observes the registry; request 2 enters native resource allocation and stops
+# explicitly until the remaining CPU initialization/services are implemented.
+[[midasm_hook]]
+address = 0x823F0630
+name = "SimpsonsNativeDriverRequest"
+registers = ["ctx", "base"]
+return_on_true = true
+evidence_hex = "7d8802a69181fff8fbc1ffe8fbe1fff09421fb407c9f2378"
+
+[[midasm_hook]]
+address = 0x82409B0C
+name = "SimpsonsNativeScratchIndexCreate"
+registers = ["ctx", "base"]
+jump_address = 0x82409B10
+evidence_hex = "48037efd907f0010"
+
+[[midasm_hook]]
+address = 0x82408E90
+name = "SimpsonsNativeScratchIndexRelease"
+registers = ["ctx", "base"]
+jump_address = 0x82408E94
+evidence_hex = "4803887939600000"
+
+[[midasm_hook]]
+address = 0x823EF838
+name = "SimpsonsNativeDeclarationCreate"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6"
+
+[[midasm_hook]]
+address = 0x823EFA18
+name = "SimpsonsNativeDeclarationRelease"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6"
+
+[[midasm_hook]]
+address = 0x824008E0
+name = "SimpsonsNativeStateInitialize"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a64863bac59421ff40"
+
+[[midasm_hook]]
+address = 0x82400040
+name = "SimpsonsNativeStateCommit"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a64863c3759421ff60"
+
+[[midasm_hook]]
+address = 0x82400278
+name = "SimpsonsNativeSamplerSet"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff89421ffa0"
+
+[[midasm_hook]]
+address = 0x823EFB78
+name = "SimpsonsNativePixelMaterialCreate"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff8fbe1fff0"
+
+[[midasm_hook]]
+address = 0x823EFBD0
+name = "SimpsonsNativePixelMaterialRelease"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "48051b38"
+
+[[midasm_hook]]
+address = 0x823EFAA8
+name = "SimpsonsNativeVertexMaterialCreate"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff8fbe1fff0"
+
+[[midasm_hook]]
+address = 0x823EFB10
+name = "SimpsonsNativeVertexMaterialRelease"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "48051bf8"
+
+# Explicit guards until their callers use native engine binding services.
+[[midasm_hook]]
+address = 0x8276BF20
+name = "SimpsonsNativeCoronaDeclarationCreate"
+registers = ["ctx", "base"]
+evidence_hex = "4bcd99c13d4082e03d608215"
+jump_address = 0x8276BF24
+
+[[midasm_hook]]
+address = 0x8276C068
+name = "SimpsonsNativeCoronaDeclarationRelease"
+registers = ["ctx", "base"]
+evidence_hex = "4bcd56a139600000807f0000"
+jump_address = 0x8276C06C
+
+[[midasm_hook]]
+address = 0x8276A848
+name = "SimpsonsNativeCoronaQueriesBegin"
+registers = ["ctx", "base"]
+evidence_hex = "3fe082d138800001807fcaf8"
+jump_address = 0x8276A9C4
+
+[[midasm_hook]]
+address = 0x8276AA60
+name = "SimpsonsNativeCoronaQueriesFinish"
+registers = ["ctx", "base"]
+evidence_hex = "807fcaf84bce1e8d39400000"
+jump_address = 0x8276AC04
+
+[[midasm_hook]]
+address = 0x8276B250
+name = "SimpsonsNativeDirectSpriteExpandedEnd"
+registers = ["ctx", "base"]
+evidence_hex = "38800000807fcaf84bcd0159"
+jump_address = 0x8276B25C
+
+[[midasm_hook]]
+address = 0x8276B6D8
+name = "SimpsonsNativeDirectSpriteEmitterEnd"
+registers = ["ctx", "base"]
+evidence_hex = "3fe082d138800000807fcaf8"
+jump_address = 0x8276B724
+
+[[midasm_hook]]
+address = 0x82772D0C
+name = "SimpsonsNativeParticleExpandedBegin"
+registers = ["ctx", "base"]
+evidence_hex = "4bcc86a53d408200396100b4"
+jump_address = 0x82772D10
+
+[[midasm_hook]]
+address = 0x827736A4
+name = "SimpsonsNativeParticleExpandedEnd"
+registers = ["ctx", "base"]
+evidence_hex = "38800000807fcaf84bcc7d05"
+jump_address = 0x827736B0
+
+[[midasm_hook]]
+address = 0x8276B750
+name = "SimpsonsNativeDirectSpriteBatchBegin"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbc1ffe8fbe1fff0"
+return = true
+
+[[midasm_hook]]
+address = 0x8276B898
+name = "SimpsonsNativeDirectSpriteBatchEnd"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbe1fff09421ffa0"
+return = true
+
+[[midasm_hook]]
+address = 0x8276AFCC
+name = "SimpsonsNativeDirectSpriteBegin"
+registers = ["ctx", "base"]
+evidence_hex = "4bcd591538a00001807fcaf8"
+jump_address_on_true = 0x8276B24C
+jump_address_on_false = 0x8276B25C
+
+[[midasm_hook]]
+address = 0x8276AD24
+name = "SimpsonsNativeDirectSpriteLock"
+registers = ["ctx", "base"]
+evidence_hex = "4bce172d3ce082003d008200"
+jump_address = 0x8276AD28
+
+[[midasm_hook]]
+address = 0x8276ADE8
+name = "SimpsonsNativeDirectSpriteFinish"
+registers = ["ctx", "base"]
+evidence_hex = "4bce1b09382100a03981fff0"
+jump_address = 0x8276ADEC
+
+[[midasm_hook]]
+address = 0x82772D98
+name = "SimpsonsNativeParticlePreflight"
+registers = ["ctx", "base"]
+evidence_hex = "817e0118807fcaf8896b0100"
+jump_address = 0x82773394
+
+[[midasm_hook]]
+address = 0x8277365C
+name = "SimpsonsNativeParticleFinish"
+registers = ["ctx", "base"]
+evidence_hex = "38800000807fcaf84bcc69ad"
+jump_address = 0x827736A4
+
+[[midasm_hook]]
+address = 0x82445278
+name = "SimpsonsRejectConsoleMaterialBinding"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6485f714d9421ff80"
+
+[[midasm_hook]]
+address = 0x82445578
+name = "SimpsonsRejectConsoleMaterialBinding"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6485f6e4d9421ff80"
+
+[[midasm_hook]]
+address = 0x82445798
+name = "SimpsonsRejectConsoleMaterialBinding"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "90832e24e9630010656b0008"
+
+[[midasm_hook]]
+address = 0x82416CA0
+name = "SimpsonsNativePipelineIndexCreate"
+registers = ["ctx", "base"]
+jump_address = 0x82416CA4
+evidence_hex = "4802ad69907bfff4"
+
+[[midasm_hook]]
+address = 0x82416BEC
+name = "SimpsonsNativePipelineIndexRelease"
+registers = ["ctx", "base"]
+jump_address = 0x82416BF0
+evidence_hex = "4802ab1d39600000"
+
+# Unported engine consumers must fail before native IDs reach an SDK object path.
+
+[[midasm_hook]]
+address = 0x82704600
+name = "SimpsonsNativeShadowWorld"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a648337dc13921ff5011a028c33b8000108143010c"
+
+[[midasm_hook]]
+address = 0x827072A4
+name = "SimpsonsNativeShadowScissor"
+registers = ["ctx", "base"]
+jump_address = 0x827072A8
+evidence_hex = "4bd3518d4801b309"
+
+[[midasm_hook]]
+address = 0x8243C430
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff8fbe1fff09421ff9039210054c0033160"
+
+[[midasm_hook]]
+address = 0x823EE8F8
+name = "SimpsonsNativeContextQuery"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff89421ffa0"
+
+[[midasm_hook]]
+address = 0x823EE6C8
+name = "SimpsonsNativeCameraSelect"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a64864dcfd9421ff70"
+
+[[midasm_hook]]
+address = 0x823F00C0
+name = "SimpsonsNativeCameraPassPreflight"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbc1ffe8"
+
+# Apply the selected FOV and frozen internal aspect to the original main world
+# camera before dirty-frame sync, so culling and native projection agree.
+[[midasm_hook]]
+address = 0x823F1870
+name = "SimpsonsNativeUltrawideCameraBegin"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbc1ffe8"
+
+# Observe authored projection writes, including one that exactly equals our
+# last published override. Native publication is guarded by runtime state.
+[[midasm_hook]]
+address = 0x823F1C98
+name = "SimpsonsNativeCameraViewWindowSource"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbe1fff0"
+
+[[midasm_hook]]
+address = 0x823F7070
+name = "SimpsonsNativeRasterCreate"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6486453599421ff80"
+
+[[midasm_hook]]
+address = 0x823F62A0
+name = "SimpsonsNativeRasterDestroy"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6486461259421ff80"
+
+# Validate ownership before the original plugin-destructor traversal, then keep
+# every original wrapper instruction, callback and allocation free.
+[[midasm_hook]]
+address = 0x82407DC0
+name = "SimpsonsNativeRasterDestroyPreflight"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6486346099421ff90"
+
+# Crossfade's original helper/parent stay AOT. Its flags580 CPU-only raster
+# allocation gains native RGBA8 storage at the existing82440578 factory cut.
+[[midasm_hook]]
+address = 0x823F7278
+name = "SimpsonsNativeSnapshotBegin"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6486451419421ff70"
+
+[[midasm_hook]]
+address = 0x823F7494
+name = "SimpsonsNativeSnapshotFinish"
+registers = ["ctx", "base"]
+evidence_hex = "7fe3fb7838210090"
+
+[[midasm_hook]]
+address = 0x827020DC
+name = "SimpsonsNativeCrossfadeCommit"
+registers = ["ctx", "base"]
+evidence_hex = "7fe3fb7838210060"
+
+[[midasm_hook]]
+address = 0x8240A278
+name = "SimpsonsNativeTextureStreamRead"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a64863211d9421feb0"
+
+# The original public lock/unlock wrappers remain AOT. Only original movie
+# plane callers receive stable CPU storage; other raster profiles fail.
+[[midasm_hook]]
+address = 0x82408208
+name = "SimpsonsNativeMovieLockPreflight"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff89421ffa0"
+
+[[midasm_hook]]
+address = 0x82407BA8
+name = "SimpsonsNativeMovieUnlockPreflight"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbe1fff0"
+
+[[midasm_hook]]
+address = 0x82408234
+name = "SimpsonsNativeMovieLock"
+registers = ["ctx", "base"]
+jump_address = 0x82408238
+evidence_hex = "4e800421"
+
+[[midasm_hook]]
+address = 0x82407BD8
+name = "SimpsonsNativeMovieUnlock"
+registers = ["ctx", "base"]
+jump_address = 0x82407BDC
+evidence_hex = "4e800421"
+
+[[midasm_hook]]
+address = 0x8282EA44
+name = "SimpsonsNativeMovieFrameCommit"
+registers = ["ctx", "base"]
+evidence_hex = "382100d04820d9ac"
+
+[[midasm_hook]]
+address = 0x82723D80
+name = "SimpsonsNativeApplicationScalarPreflight"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6483186459421ff80"
+
+[[midasm_hook]]
+address = 0x82723DC4
+name = "SimpsonsNativeApplicationScalarApply"
+registers = ["ctx", "base"]
+jump_address = 0x82723DEC
+evidence_hex = "3d4082153d2082d7394a05807fa4eb788069d8907d6b502e7d635a14816b00407d6903a64e800421"
+
+[[midasm_hook]]
+address = 0x823EE7F0
+name = "SimpsonsNativeCameraPassPreflight"
+registers = ["ctx", "base"]
+evidence_hex = "3d6082d1814bcb1c2f0a0000"
+
+# Original application sampler cache/dirty-stack CPU path remains AOT.
+[[midasm_hook]]
+address = 0x82723C80
+name = "SimpsonsNativeApplicationSamplerPreflight"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a64831873d9421ff70"
+
+[[midasm_hook]]
+address = 0x82723CD8
+name = "SimpsonsNativeApplicationSamplerApply"
+registers = ["ctx", "base"]
+jump_address = 0x82723D08
+evidence_hex = "3d4082153d2082d7394a06e07fa5eb787fe4fb788069d8907d6b502e7d635a1490610050816b01d47d6903a64e800421"
+
+# These alternate paths access SDK getters, descriptors or grouped setters.
+[[midasm_hook]]
+address = 0x827238B8
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff89421ffa0"
+
+[[midasm_hook]]
+address = 0x82723858
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff8fbe1fff0"
+
+[[midasm_hook]]
+address = 0x82723AB0
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6483189199421ff90"
+
+[[midasm_hook]]
+address = 0x82723B40
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6483188599421ff30"
+
+[[midasm_hook]]
+address = 0x82724038
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6483183753d6082d7"
+
+[[midasm_hook]]
+address = 0x82724230
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a64831816d9421ff30"
+
+[[midasm_hook]]
+address = 0x823EE820
+name = "SimpsonsNativePresent"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff8fbc1ffe8"
+
+# Optional SDK timing callbacks have no native implementation.
+[[midasm_hook]]
+address = 0x82454BE8
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "908340884e800020"
+
+[[midasm_hook]]
+address = 0x82454BF0
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "908340844e800020"
+
+[[midasm_hook]]
+address = 0x823EE940
+name = "SimpsonsNativeCameraClear"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a64864da89dbe1ffd8"
+
+[[midasm_hook]]
+address = 0x824025A8
+name = "SimpsonsNativeRenderWareStatePreflight"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbc1ffe8"
+
+# Engine reset owns the complete CPU reconstruction and native unbinding.
+[[midasm_hook]]
+address = 0x823EFDA0
+name = "SimpsonsNativeBindingReset"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a64864c6099421ff50"
+
+[[midasm_hook]]
+address = 0x82401AF0
+name = "SimpsonsNativeResetNullTexturePreflight"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a64863a8c19421ff60"
+
+[[midasm_hook]]
+address = 0x82401940
+name = "SimpsonsNativeNullRasterPreflight"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a64863aa859421ff80"
+
+# Typed texture adapter: checked reset scope or original raster helper call.
+[[midasm_hook]]
+address = 0x824408E0
+name = "SimpsonsNativeResetTextureSet"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6485fbad99421ff60"
+
+# Original copied ITXD CPU load/index/refcount/free flow; native ownership
+# observes verified cuts. Only destructor lock/unlock pointer recovery changes.
+[[midasm_hook]]
+address = 0x826F24D8
+name = "SimpsonsNativeITXDBeginLoad"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a648349ee19421ff70"
+
+[[midasm_hook]]
+address = 0x826F2654
+name = "SimpsonsNativeITXDEndLoad"
+registers = ["ctx", "base"]
+evidence_hex = "7f63db783821009048349db0"
+
+[[midasm_hook]]
+address = 0x82736F58
+name = "SimpsonsNativeITXDBeginCopy"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6483054619421ff60"
+
+[[midasm_hook]]
+address = 0x82736FE4
+name = "SimpsonsNativeITXDMetadataAllocation"
+registers = ["ctx", "base"]
+evidence_hex = "4e80042138a001007f24cb78"
+
+[[midasm_hook]]
+address = 0x8273703C
+name = "SimpsonsNativeITXDPayloadAllocation"
+registers = ["ctx", "base"]
+evidence_hex = "4e8004217f85e3787f64db78"
+
+[[midasm_hook]]
+address = 0x82737050
+name = "SimpsonsNativeITXDFinishCopy"
+registers = ["ctx", "base"]
+evidence_hex = "7d7ff0507fe3fb78917d0014"
+
+[[midasm_hook]]
+address = 0x82736F3C
+name = "SimpsonsNativeITXDFinishRelocate"
+registers = ["ctx", "base"]
+evidence_hex = "7fe3fb78382100608181fff8"
+
+[[midasm_hook]]
+address = 0x826F80C0
+name = "SimpsonsNativeITXDPreflightRelease"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6483443059421ff70"
+
+[[midasm_hook]]
+address = 0x82736D50
+name = "SimpsonsNativeITXDPreflightRelease"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6483056799421ff80"
+
+[[midasm_hook]]
+address = 0x82736DA0
+name = "SimpsonsNativeITXDRecoverReleasePayload"
+registers = ["ctx", "base"]
+jump_address = 0x82736DB0
+evidence_hex = "4bd09499388000007fc3f3784bd07295"
+
+[[midasm_hook]]
+address = 0x82736DE4
+name = "SimpsonsNativeITXDFinishRelease"
+registers = ["ctx", "base"]
+evidence_hex = "3821008048305634"
+
+# Original pipeline-mode stack stays AOT; only its direct SDK setters change.
+[[midasm_hook]]
+address = 0x826B09D4
+name = "SimpsonsNativePipelinePixelCenterEnter"
+registers = ["ctx", "base"]
+jump_address = 0x826B09D8
+evidence_hex = "4bd8ad45"
+
+[[midasm_hook]]
+address = 0x826B0A0C
+name = "SimpsonsNativePipelinePixelCenterExit"
+registers = ["ctx", "base"]
+jump_address = 0x826B0A10
+evidence_hex = "4bd8ad0d"
+
+[[midasm_hook]]
+address = 0x823F4618
+name = "SimpsonsNativePipelineResetPreflight"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a648647db19421ff90"
+
+[[midasm_hook]]
+address = 0x823F4648
+name = "SimpsonsNativePipelineResetApply"
+registers = ["ctx", "base"]
+jump_address = 0x823F4658
+evidence_hex = "7d635214816b00407d6903a64e800421"
+
+[[midasm_hook]]
+address = 0x82756480
+name = "SimpsonsNativeScreenPreflight"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6482e5f413981ffd0"
+
+[[midasm_hook]]
+address = 0x82408EB0
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6486335119421ff60"
+
+[[midasm_hook]]
+address = 0x824090A8
+name = "SimpsonsNativeIm2DTrianglePreflight"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6486333159421ff60"
+
+# The original single-triangle callback selects/copies its three vertices.
+# It shares the dynamic allocator and setup with 82409308; only SDK unlock
+# and submission are replaced, preserving the CPU cursor/Boolean epilogue.
+[[midasm_hook]]
+address = 0x824092A4
+name = "SimpsonsNativeIm2DUnlock"
+registers = ["ctx", "base"]
+jump_address = 0x824092A8
+evidence_hex = "480386fd"
+
+[[midasm_hook]]
+address = 0x824092CC
+name = "SimpsonsNativeIm2DDraw"
+registers = ["ctx", "base"]
+jump_address = 0x824092D0
+evidence_hex = "4bfeb895"
+
+[[midasm_hook]]
+address = 0x82409308
+name = "SimpsonsNativeIm2DUploadPreflight"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6486330b59421ff60"
+
+# Original four-buffer selection, alignment, copying and CPU publications run.
+# Only these owned dynamic locks and the Im2D unlock use native storage.
+[[midasm_hook]]
+address = 0x823FC9C8
+name = "SimpsonsNativeIm2DLock"
+registers = ["ctx", "base"]
+jump_address = 0x823FC9CC
+evidence_hex = "48044ed9"
+
+[[midasm_hook]]
+address = 0x823FC9EC
+name = "SimpsonsNativeIm2DLock"
+registers = ["ctx", "base"]
+jump_address = 0x823FC9F0
+evidence_hex = "48044eb5"
+
+[[midasm_hook]]
+address = 0x82409504
+name = "SimpsonsNativeIm2DUnlock"
+registers = ["ctx", "base"]
+jump_address = 0x82409508
+evidence_hex = "4803849d"
+
+# Original CPU setup executes. Only scoped deferred native declaration/stream
+# bindings replace SDK objects; the original stage schedule and commit remain.
+[[midasm_hook]]
+address = 0x82408CC0
+name = "SimpsonsNativeIm2DSetup"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbc1ffe8"
+
+[[midasm_hook]]
+address = 0x82408D08
+name = "SimpsonsNativeIm2DDeclaration"
+registers = ["ctx", "base"]
+jump_address = 0x82408D0C
+evidence_hex = "4803ca91"
+
+[[midasm_hook]]
+address = 0x823EEC6C
+name = "SimpsonsNativeIm2DStream"
+registers = ["ctx", "base"]
+jump_address = 0x823EEC70
+evidence_hex = "4804d955"
+
+# Native engine draw owns fixed-function shaders and performs real submission.
+# Original Im2D override reset, cursor publication and return follow unchanged.
+[[midasm_hook]]
+address = 0x82409538
+name = "SimpsonsNativeIm2DDraw"
+registers = ["ctx", "base"]
+jump_address = 0x8240953C
+evidence_hex = "4bfeb629"
+
+[[midasm_hook]]
+address = 0x82409570
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a648632e3d9421ff40"
+
+# Console submission configuration remains unported.
+[[midasm_hook]]
+address = 0x82458260
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6485e41559421fec0"
+
+# Preflight native recording ownership before the original CPU constructor.
+[[midasm_hook]]
+address = 0x826F4988
+name = "SimpsonsNativeRecordingCreateBegin"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a648347a3d9421ff80"
+
+# Preserve all original CPU construction; replace only its SDK allocation BL.
+[[midasm_hook]]
+address = 0x826F4AD0
+name = "SimpsonsNativeRecordingCreateCommit"
+registers = ["ctx", "base"]
+jump_address = 0x826F4AD4
+evidence_hex = "4bd5da71"
+
+# Retain original pool/registration cleanup and release native ownership after it.
+[[midasm_hook]]
+address = 0x826F3908
+name = "SimpsonsNativeRecordingDestroyBegin"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbc1ffe8"
+
+[[midasm_hook]]
+address = 0x826F396C
+name = "SimpsonsNativeRecordingDestroyCommit"
+registers = ["ctx", "base"]
+evidence_hex = "916a9784"
+
+[[midasm_hook]]
+address = 0x827374B0
+name = "SimpsonsNativeRecordingPluginDestroyPreflight"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a648304f199421ff90"
+
+[[midasm_hook]]
+address = 0x827374F4
+name = "SimpsonsNativeRecordingPluginDestroyComplete"
+registers = ["ctx", "base"]
+evidence_hex = "7fa3eb783821007048304f20"
+
+# Common fallback includes lazy creation; precedes output clear/allocation and
+# the SDK initializer's console command writes. Never fabricate SDK success.
+[[midasm_hook]]
+address = 0x82452540
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6485e9e819421ff80"
+
+# Native engine registration replaces one console submission-setup call.
+[[midasm_hook]]
+address = 0x82875E20
+name = "SimpsonsNativeSubmissionConfigure"
+registers = ["ctx", "base"]
+jump_address = 0x82875E24
+evidence_hex = "4bbe24413d6082d67fc3f378"
+
+# Edge parameter SDK descriptor cuts. Original conversions/stores continue.
+# The AA sibling retains its independent original setter and private handles.
+[[midasm_hook]]
+address = 0x823C8380
+name = "SimpsonsNativeAAKernel"
+registers = ["ctx", "base"]
+jump_address = 0x823C83FC
+evidence_hex = "5528fbfe552b07fe5507e8fe"
+
+[[midasm_hook]]
+address = 0x823C8404
+name = "SimpsonsNativeAAColorA"
+registers = ["ctx", "base"]
+jump_address = 0x823C8410
+evidence_hex = "80cb010c808b0108806b012c"
+
+[[midasm_hook]]
+address = 0x823C8414
+name = "SimpsonsNativeAAColorB"
+registers = ["ctx", "base"]
+jump_address = 0x823C8450
+evidence_hex = "83ab0100552a07fe80c60000"
+
+[[midasm_hook]]
+address = 0x823C8454
+name = "SimpsonsNativeAAColorC"
+registers = ["ctx", "base"]
+jump_address = 0x823C8484
+evidence_hex = "7c6550785509e8fe7d645a14"
+
+[[midasm_hook]]
+address = 0x823C84C4
+name = "SimpsonsNativeAAWidth"
+registers = ["ctx", "base"]
+jump_address = 0x823C8530
+evidence_hex = "5507e8fe5508077e812a010c"
+
+[[midasm_hook]]
+address = 0x823C8548
+name = "SimpsonsNativeAAHeightA"
+registers = ["ctx", "base"]
+jump_address = 0x823C854C
+evidence_hex = "808b012c7d0807b480eb0108"
+
+[[midasm_hook]]
+address = 0x823C8550
+name = "SimpsonsNativeAAHeightB"
+registers = ["ctx", "base"]
+jump_address = 0x823C855C
+evidence_hex = "80eb0108806b010080ab0128"
+
+[[midasm_hook]]
+address = 0x823C8560
+name = "SimpsonsNativeAAHeightC"
+registers = ["ctx", "base"]
+jump_address = 0x823C8564
+evidence_hex = "83a40000f9010050552a07fe"
+
+[[midasm_hook]]
+address = 0x823C8568
+name = "SimpsonsNativeAAHeightD"
+registers = ["ctx", "base"]
+jump_address = 0x823C85CC
+evidence_hex = "552a07fe810b010c55248bf8"
+
+[[midasm_hook]]
+address = 0x826B4628
+name = "SimpsonsNativeEffectManagerEnd"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff8fbc1ffe8"
+
+[[midasm_hook]]
+address = 0x823C9100
+name = "SimpsonsNativeEdgeLineWidth"
+registers = ["ctx", "base"]
+jump_address = 0x823C9178
+evidence_hex = "5528fbfe552b07fe5507e8fe"
+
+[[midasm_hook]]
+address = 0x823C91A8
+name = "SimpsonsNativeEdgeFadeControl"
+registers = ["ctx", "base"]
+jump_address = 0x823C9220
+evidence_hex = "5528fbfe552b07fe80ca010c"
+
+[[midasm_hook]]
+address = 0x823C9264
+name = "SimpsonsNativeEdgeWidth"
+registers = ["ctx", "base"]
+jump_address = 0x823C92E0
+evidence_hex = "5528fbfe552b07fe5507e8fe"
+
+[[midasm_hook]]
+address = 0x823C92F4
+name = "SimpsonsNativeEdgeHeightA"
+registers = ["ctx", "base"]
+jump_address = 0x823C92F8
+evidence_hex = "80cb010c7d4807b480eb0100"
+
+[[midasm_hook]]
+address = 0x823C92FC
+name = "SimpsonsNativeEdgeHeightB"
+registers = ["ctx", "base"]
+jump_address = 0x823C9314
+evidence_hex = "80eb01003d4082d1806b012c"
+
+[[midasm_hook]]
+address = 0x823C9318
+name = "SimpsonsNativeEdgeHeightC"
+registers = ["ctx", "base"]
+jump_address = 0x823C9358
+evidence_hex = "812a995480630000552a07fe"
+
+[[midasm_hook]]
+address = 0x823C9364
+name = "SimpsonsNativeEdgeHeightD"
+registers = ["ctx", "base"]
+jump_address = 0x823C9384
+evidence_hex = "7d0432147d083a147ce958ae"
+
+[[midasm_hook]]
+address = 0x823C93A4
+name = "SimpsonsNativeEdgePalette"
+registers = ["ctx", "base"]
+jump_address = 0x823C941C
+evidence_hex = "5549fbfe554b07fe55468bf8"
+
+[[midasm_hook]]
+address = 0x823C9448
+name = "SimpsonsNativeEdgeColor"
+registers = ["ctx", "base"]
+jump_address = 0x823C94AC
+evidence_hex = "5528e8fe5529077e808a010c"
+
+[[midasm_hook]]
+address = 0x823C94C0
+name = "SimpsonsNativeEdgeDepth"
+registers = ["ctx", "base"]
+jump_address = 0x823C9538
+evidence_hex = "5549fbfe55468bf8554b07fe"
+
+[[midasm_hook]]
+address = 0x823C8EB0
+name = "SimpsonsNativeEdgeBoolean"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a64867351554a9063e"
+
+[[midasm_hook]]
+address = 0x826B3980
+name = "SimpsonsNativeEdgeCommit"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "8163000c806b00084856a218"
+
+# Original character bone matrices: native descriptor/storage ownership;
+# original826FE7C8 still computes the actual matrices before this setter.
+[[midasm_hook]]
+address = 0x826FDBE0
+name = "SimpsonsNativeShadowBones"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a64833e7ad3980ff5013e161cf9421fc508143010c"
+
+# Original character mesh entry and four native resource/draw operations.
+# The original submesh loop, matrix selection and epilogue still execute.
+[[midasm_hook]]
+address = 0x82706378
+name = "SimpsonsNativeShadowMesh"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6483360319421ff407c7e1b787cbd2b787c9a2378"
+
+[[midasm_hook]]
+address = 0x827063B8
+name = "SimpsonsNativeShadowStream"
+registers = ["ctx", "base"]
+jump_address = 0x827063BC
+evidence_hex = "4bd36209817f0030"
+
+[[midasm_hook]]
+address = 0x827063C8
+name = "SimpsonsNativeShadowDeclaration"
+registers = ["ctx", "base"]
+jump_address = 0x827063CC
+evidence_hex = "4bd3f3d1389f0058"
+
+[[midasm_hook]]
+address = 0x827063D4
+name = "SimpsonsNativeShadowIndices"
+registers = ["ctx", "base"]
+jump_address = 0x827063D8
+evidence_hex = "4bd36395817d0010"
+
+[[midasm_hook]]
+address = 0x82706454
+name = "SimpsonsNativeShadowDraw"
+registers = ["ctx", "base"]
+jump_address = 0x82706458
+evidence_hex = "4bd46f0d3ad6ffff"
+
+[[midasm_hook]]
+address = 0x82706468
+name = "SimpsonsNativeShadowMeshEnd"
+registers = ["ctx", "base"]
+after = false
+evidence_hex = "382100c048335f90"
+
+[[midasm_hook]]
+address = 0x823CA46C
+name = "SimpsonsNativeEdgeDeclaration"
+registers = ["ctx", "base"]
+jump_address = 0x823CA470
+evidence_hex = "4807b32d38c0001038a00003"
+
+[[midasm_hook]]
+address = 0x823CA480
+name = "SimpsonsNativeEdgeVertices"
+registers = ["ctx", "base"]
+jump_address = 0x823CA484
+evidence_hex = "48081fd17c7f1b787fa4eb78"
+
+[[midasm_hook]]
+address = 0x823CA4F0
+name = "SimpsonsNativeEdgeDraw"
+registers = ["ctx", "base"]
+jump_address = 0x823CA4F4
+evidence_hex = "480824013821008048671f24"
+
+# Unported console callback registration or application graphics consumer.
+[[midasm_hook]]
+address = 0x82461500
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6485daec59421ff80"
+
+# Verified engine camera rectangle and shared copy roles; full-size native
+# color/depth copies. Partial viewports remain explicit failures.
+[[midasm_hook]]
+address = 0x826B08B0
+name = "SimpsonsNativeViewportCopy"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a64838bb15dbe1ffd0"
+
+# Unported console callback registration or application graphics consumer.
+[[midasm_hook]]
+address = 0x826B0BB0
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff89421ff60"
+
+# Retain the original CPU graphics-manager constructors. Validate their native
+# context before entry. Native FX ownership accepts the exact 25-row catalog.
+[[midasm_hook]]
+address = 0x826B0DF8
+name = "SimpsonsNativeGraphicsStartupPreflight"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a64838b5c19421ff40"
+
+[[midasm_hook]]
+address = 0x826B4BAC
+name = "SimpsonsNativeEffectCreate"
+registers = ["ctx", "base"]
+jump_address = 0x826B4BB0
+evidence_hex = "48568515387f00144bfffc75"
+
+[[midasm_hook]]
+address = 0x826B4828
+name = "SimpsonsNativeEffectReflect"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a648387b719421ff00"
+
+# Common CPU reflection gateway. The manager/derived rendering paths remain
+# guarded; this replaces the complete raw-FX query closure before its first load.
+[[midasm_hook]]
+address = 0x826B5168
+name = "SimpsonsNativeEffectTypedReflection"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6483872359421ff107c7f1b78817f001c814b02ac"
+
+# Two inline shadow FX sampler writes. Continue with the genuine CPU pool
+# queries/writes and original vector/scalar helpers; preserve r29/r31.
+[[midasm_hook]]
+address = 0x82706BD8
+name = "SimpsonsNativeEffectShadowSamplers"
+registers = ["ctx", "base"]
+jump_address = 0x82706CDC
+evidence_hex = "817e0010578a07fe80ff00f057858bf8394affff810b010c"
+
+[[midasm_hook]]
+address = 0x826B393C
+name = "SimpsonsNativeEffectRelease"
+registers = ["ctx", "base"]
+jump_address = 0x826B3940
+evidence_hex = "48569c2539600000917f0010"
+
+# Preserve original typed lookup/publication; replace only SDK-layout queries.
+[[midasm_hook]]
+address = 0x823C7CA0
+name = "SimpsonsNativeEffectTechnique"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "80a3020c38c000002b050000"
+
+[[midasm_hook]]
+address = 0x823C7B20
+name = "SimpsonsNativeEffectParameter"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "fbe1fff880e3011038a00000"
+
+# Observe successful original CPU pool creation; never substitute allocation.
+[[midasm_hook]]
+address = 0x82C1CEDC
+name = "SimpsonsNativeEffectPoolCreated"
+registers = ["ctx", "base"]
+evidence_hex = "382100804be1f538"
+
+# These preflights continue the complete original release only after leases end.
+# The 82C1D0A0 alias tail-calls the guarded 82C1CF00 entry.
+[[midasm_hook]]
+address = 0x82CC1820
+name = "SimpsonsNativeEffectPoolRetire"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbe1fff0"
+
+[[midasm_hook]]
+address = 0x82722568
+name = "SimpsonsNativeEffectPoolRetire"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbe1fff0"
+
+[[midasm_hook]]
+address = 0x82C1CF00
+name = "SimpsonsNativeEffectPoolRetire"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a64be1f4c99421ff90"
+
+# Metadata readiness does not qualify shader binding, parameter upload or draws.
+# The three shadows resources retain original CPU creation/pixel writes while
+# native owners replace all SDK create/lock/unlock/release header access.
+[[midasm_hook]]
+address = 0x82440578
+name = "SimpsonsNativeEngineTextureCreate"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6485fbe359421ff20"
+
+[[midasm_hook]]
+address = 0x82440238
+name = "SimpsonsNativeShadowTextureLock"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7ce83b787cc733787ca62b78"
+
+[[midasm_hook]]
+address = 0x8243E040
+name = "SimpsonsNativeShadowTextureUnlock"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "816300308143002055650026"
+
+[[midasm_hook]]
+address = 0x82441708
+name = "SimpsonsNativeGraphicsResourceRelease"
+registers = ["ctx", "base"]
+return_on_true = true
+evidence_hex = "7d8802a69181fff8fbe1fff0"
+
+# CPU mesh declarations need only the original type-five header free. The
+# nested original vector/release frames qualify skipping an unused device read.
+[[midasm_hook]]
+address = 0x82441064
+name = "SimpsonsOriginalMeshDeclarationDestroy"
+registers = ["ctx", "base"]
+jump_address_on_true = 0x82441220
+evidence_hex = "814a0710817f0000806a0000"
+
+# Original viewport auxiliary surfaces: native allocation/paired release;
+# original row setup/publication/cleanup remains AOT. Other callers fail closed.
+[[midasm_hook]]
+address = 0x82440698
+name = "SimpsonsNativeViewportSurfaceCreate"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6485fbd259421ff70"
+
+# Quad constructor's original position/position-UV records remain immutable
+# native CPU declarations. Input-layout construction and binding stay guarded.
+[[midasm_hook]]
+address = 0x826B6BCC
+name = "SimpsonsNativeQuadDeclarationCreate"
+registers = ["ctx", "base"]
+jump_address = 0x826B6BD0
+evidence_hex = "4bd8ed157c6a1b78"
+
+[[midasm_hook]]
+address = 0x826B6BE0
+name = "SimpsonsNativeQuadDeclarationCreate"
+registers = ["ctx", "base"]
+jump_address = 0x826B6BE4
+evidence_hex = "4bd8ed01907f00ac"
+
+# The second FX table's five edge/AA types share one original global declaration.
+# Preserve its conditional cache and publication; own only the verified BL.
+[[midasm_hook]]
+address = 0x823CA378
+name = "SimpsonsNativePostDeclarationCreate"
+registers = ["ctx", "base"]
+jump_address = 0x823CA37C
+evidence_hex = "4807b569907e99a0"
+
+# The later shadows depth-copy helpers pass these native texture identities to
+# SDK resolve. Reject before its first device/header read; native resolve is
+# a separate engine-level operation, not enabled by allocation/upload.
+[[midasm_hook]]
+address = 0x82455570
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6485e6e1ddbc1ff58"
+
+# Original manager826B7218 now dispatches all48 qualified typed finalizers.
+# Common reflection and the two shadow FX writes are native; the original
+# manager walk, remaining queries and genuine CPU pool writes stay AOT.
+
+# Original reflection ownership and CPU clear/camera construction stay AOT.
+# Native context leases and real cube/2D backing replace only the SDK calls.
+[[midasm_hook]]
+address = 0x8273C2B8
+name = "SimpsonsNativeReflectionBegin"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6483001099421ff707c7f1b78396000007c9d2378"
+
+[[midasm_hook]]
+address = 0x8273C2F8
+name = "SimpsonsNativeReflectionRetain"
+registers = ["ctx", "base"]
+jump_address = 0x8273C2FC
+evidence_hex = "4bd15bd93d602828"
+
+[[midasm_hook]]
+address = 0x82440310
+name = "SimpsonsNativeReflectionLock"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "4bfff4e0"
+
+[[midasm_hook]]
+address = 0x8243E058
+name = "SimpsonsNativeReflectionUnlock"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "816300308143002055650026"
+
+[[midasm_hook]]
+address = 0x8273C408
+name = "SimpsonsNativeReflectionCommit"
+registers = ["ctx", "base"]
+evidence_hex = "3821009048300008"
+
+[[midasm_hook]]
+address = 0x8273C000
+name = "SimpsonsNativeReflectionDestroyBegin"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbc1ffe8"
+
+[[midasm_hook]]
+address = 0x8273C028
+name = "SimpsonsNativeReflectionReleaseContext"
+registers = ["ctx", "base"]
+jump_address = 0x8273C02C
+evidence_hex = "4bd160c993df0014"
+
+[[midasm_hook]]
+address = 0x8273C07C
+name = "SimpsonsNativeReflectionDestroyCommit"
+registers = ["ctx", "base"]
+evidence_hex = "382100708181fff8"
+
+# Verified826FF0F8 white/black/gray memory-image profiles. Original CPU decode,
+# requirements and filters feed native owned textures with all explicit levels.
+[[midasm_hook]]
+address = 0x82B84838
+name = "SimpsonsNativeBuiltinImageLoad"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff8fbe1fff0"
+
+[[midasm_hook]]
+address = 0x826FF23C
+name = "SimpsonsNativeBuiltinImagesCommit"
+registers = ["ctx", "base"]
+evidence_hex = "382100a04833d1d4"
+
+[[midasm_hook]]
+address = 0x8273B2F8
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "808300b0806300a84bf7ad78"
+
+[[midasm_hook]]
+address = 0x8273B308
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "806300a84bf7980c"
+
+[[midasm_hook]]
+address = 0x8273B310
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6483010b19421ff80"
+
+[[midasm_hook]]
+address = 0x826B5FC0
+name = "SimpsonsNativeEdgeBegin"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6483864099421ff90"
+
+[[midasm_hook]]
+address = 0x826B4B18
+name = "SimpsonsNativeEdgeEnd"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff8fbc1ffe8"
+
+# Unported console callback registration or application graphics consumer.
+[[midasm_hook]]
+address = 0x8273EBA0
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff8fbe1fff0"
+
+# Optional console capture observer registration remains unsupported.
+[[midasm_hook]]
+address = 0x82460D38
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff8fbe1fff0"
+
+# Optional console capture observer registration remains unsupported.
+[[midasm_hook]]
+address = 0x82460DC0
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6485db6019421ff80"
+
+# Retained-state reconstruction inside the native binding reset.
+# Review/merge fragment only. Keep the existing 82400040 commit and 82400278
+# sampler entry hooks. Null 824408E0 stays in the driver's binding-reset scope.
+# 82400D50's entry hook is preflight-only; it MUST continue the original body.
+[[midasm_hook]]
+address = 0x82400D50
+name = "SimpsonsNativeStateRebuildPreflight"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a64863b6559421ff403d6082d1"
+
+[[midasm_hook]]
+address = 0x82400FD8
+name = "SimpsonsNativeStateRebuildMin"
+registers = ["ctx", "base"]
+jump_address = 0x82400FDC
+evidence_hex = "4803aa69"
+
+[[midasm_hook]]
+address = 0x82401004
+name = "SimpsonsNativeStateRebuildMag"
+registers = ["ctx", "base"]
+jump_address = 0x82401008
+evidence_hex = "4803abcd"
+
+[[midasm_hook]]
+address = 0x82401028
+name = "SimpsonsNativeStateRebuildMip"
+registers = ["ctx", "base"]
+jump_address = 0x8240104C
+evidence_hex = "817acaf8915d00207d385a148109048c5148b9d09109048ce94b00187d4acb78f94b0018"
+
+[[midasm_hook]]
+address = 0x82401068
+name = "SimpsonsNativeStateRebuildAddressU"
+registers = ["ctx", "base"]
+jump_address = 0x8240108C
+evidence_hex = "817acaf87d3cba14915dffc07d09582e514854ea7d09592ee94b00187f2a5378f94b0018"
+
+[[midasm_hook]]
+address = 0x824010A8
+name = "SimpsonsNativeStateRebuildAddressV"
+registers = ["ctx", "base"]
+jump_address = 0x824010CC
+evidence_hex = "817acaf87d3cba14915dffd07d09582e51486c247d09592ee94b00187f2a5378f94b0018"
+
+# Retain the original dispatcher for its native depth prepass. Other scene
+# effects and recording branches remain guarded before their CPU mutations.
+[[midasm_hook]]
+address = 0x82740680
+name = "SimpsonsNativeSceneDispatch"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6482fbd29dbe1ff98"
+
+[[midasm_hook]]
+address = 0x8274069C
+name = "SimpsonsNativeSceneContext"
+registers = ["ctx", "base"]
+evidence_hex = "4bfbf03d3d6082d7810bcca8"
+
+# Preserve the qualified opaque rigid recording-build CPU body.
+[[midasm_hook]]
+address = 0x82740420
+name = "SimpsonsNativeSceneRecordingBuild"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6482fbf999421ff30"
+
+# Complete cached-record playback before CPU state changes.
+[[midasm_hook]]
+address = 0x827402F0
+name = "SimpsonsNativeRecordingReplay"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbc1ffe8"
+
+# Observe the genuine idle scene setter after its original mesh-context store.
+# Recording begin/finish setters retain their independent phase validation.
+[[midasm_hook]]
+address = 0x826FF6F4
+name = "SimpsonsNativeRecordIdleContextPublished"
+registers = ["ctx", "base"]
+evidence_hex = "386000004e80002000000000"
+
+# Recording begin, including lazy creation and context alias changes.
+[[midasm_hook]]
+address = 0x826F4D08
+name = "SimpsonsNativeRecordingBegin"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6483476ad9421ff40"
+
+# Recording texture/resource transfer.
+[[midasm_hook]]
+address = 0x826F39E0
+name = "SimpsonsNativeRigidTextures_826F39E0"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6483489d19421ff40"
+
+# Recording end and record result publication.
+[[midasm_hook]]
+address = 0x826F4F58
+name = "SimpsonsNativeRecordingFinish"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a64834746d9421ff80"
+
+# Independent recording-size query.
+[[midasm_hook]]
+address = 0x826F3690
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "806300684bd67154"
+
+# Thin recording-resource creation wrapper.
+[[midasm_hook]]
+address = 0x826F2F40
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff8fbe1fff0"
+
+# Thin recording-begin wrapper.
+[[midasm_hook]]
+address = 0x826F2FA0
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff89421ffa0"
+
+# Thin recording-end tail wrapper.
+[[midasm_hook]]
+address = 0x826F2FC8
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "4bd69630"
+
+# Thin recording-size wrapper.
+[[midasm_hook]]
+address = 0x826F2E40
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff89421ffa0"
+
+# Thin recording playback wrapper.
+[[midasm_hook]]
+address = 0x8273FB38
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff89421ffa0"
+
+# Partial record cleanup before CPU patch memory release.
+[[midasm_hook]]
+address = 0x826F3560
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff8fbc1ffe8"
+
+# Cached record deletion retains original CPU free/list/LRU/pool operations.
+# Only the native payload resource release substitutes for its SDK BL.
+[[midasm_hook]]
+address = 0x82737400
+name = "SimpsonsNativeRecordDeleteBegin"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a648304fc99421ff90"
+
+[[midasm_hook]]
+address = 0x8273743C
+name = "SimpsonsNativeRecordDeleteRelease"
+registers = ["ctx", "base"]
+jump_address = 0x82737440
+evidence_hex = "4bd0a2cd3ba0000193df0028"
+
+[[midasm_hook]]
+address = 0x827374A4
+name = "SimpsonsNativeRecordDeleteComplete"
+registers = ["ctx", "base"]
+evidence_hex = "3821007048304f7400000000"
+
+# Unsupported manager reset must not orphan a native identity.
+[[midasm_hook]]
+address = 0x826F3628
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "396000009163005491630068"
+
+# Base constructor bypass of registered native ownership.
+[[midasm_hook]]
+address = 0x826F37B8
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "3d60820c396b856091630000"
+
+# Base destructor bypass of paired native cleanup.
+[[midasm_hook]]
+address = 0x826F37D0
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "3d60820c3d4082d1396b8560"
+
+# Base deleting destructor bypass of paired native cleanup.
+[[midasm_hook]]
+address = 0x826F3808
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff8fbe1fff0"
+
+# SDK recording resource fallback.
+[[midasm_hook]]
+address = 0x82459FB0
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff8fbc1ffe8"
+
+# SDK recording begin fallback.
+[[midasm_hook]]
+address = 0x8245A368
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6485e20499421ff60"
+
+# SDK recording end fallback.
+[[midasm_hook]]
+address = 0x8245C5F8
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6485dfdcd9421ff80"
+
+# SDK recording-size query fallback.
+[[midasm_hook]]
+address = 0x8245A7E8
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff8fbc1ffe8"
+
+# SDK recording playback fallback.
+[[midasm_hook]]
+address = 0x8245C7A0
+name = "SimpsonsRejectUnportedGraphics"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6485dfbf99421ff20"
+
+# Native EXm0 factory/instance ownership; original generic allocation/free and registry remain AOT.
+# Qualified streamed input and complete NativeRawF32 quotas retain original CPU queue ownership.
+
+# Retain original Dac0 CPU construction, replacing SDK engine ownership with a
+# real native graph. CPU slots/event/worker stay original; source operations
+# cross the native boundary before any console SDK consumer.
+[[midasm_hook]]
+address = 0x823456D0
+name = "SimpsonsNativeAudioOutputBegin"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6486f6cf5dbe1ffd09421fee0"
+
+[[midasm_hook]]
+address = 0x823458C0
+name = "SimpsonsNativeAudioOutputAcquire"
+registers = ["ctx", "base"]
+jump_address = 0x823458C4
+evidence_hex = "488faba1"
+
+[[midasm_hook]]
+address = 0x8234591C
+name = "SimpsonsNativeAudioSource"
+registers = ["ctx", "base"]
+jump_address = 0x82345920
+evidence_hex = "488fab4d"
+
+[[midasm_hook]]
+address = 0x82345A3C
+name = "SimpsonsNativeAudioActivate"
+registers = ["ctx", "base"]
+jump_address = 0x82345A40
+evidence_hex = "488f9d6d"
+
+[[midasm_hook]]
+address = 0x823460D0
+name = "SimpsonsNativeAudioWorkerBegin"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6486f62e19421ff50"
+
+[[midasm_hook]]
+address = 0x823462F0
+name = "SimpsonsNativeAudioWorkerEnd"
+registers = ["ctx", "base"]
+evidence_hex = "382100b0486f6110"
+
+[[midasm_hook]]
+address = 0x8234612C
+name = "SimpsonsNativeAudioWait"
+registers = ["ctx", "base"]
+jump_address = 0x82346130
+evidence_hex = "488fb175"
+
+[[midasm_hook]]
+address = 0x823461F4
+name = "SimpsonsNativeAudioCapacity"
+registers = ["ctx", "base"]
+jump_address = 0x823461F8
+evidence_hex = "488f92f5"
+
+[[midasm_hook]]
+address = 0x82346230
+name = "SimpsonsNativeAudioSubmit"
+registers = ["ctx", "base"]
+jump_address = 0x82346234
+evidence_hex = "488f9409"
+
+[[midasm_hook]]
+address = 0x82345EB0
+name = "SimpsonsNativeAudioGainEnable"
+registers = ["ctx", "base"]
+jump_address = 0x82345EB4
+evidence_hex = "488f9c51"
+
+[[midasm_hook]]
+address = 0x82345F0C
+name = "SimpsonsNativeAudioGainDisable"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "488f9bf4"
+
+[[midasm_hook]]
+address = 0x823463C8
+name = "SimpsonsNativeAudioSignal"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "488faea8"
+
+[[midasm_hook]]
+address = 0x823463EC
+name = "SimpsonsNativeAudioSignal"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "488fae84"
+
+[[midasm_hook]]
+address = 0x82345A88
+name = "SimpsonsNativeAudioSourceRelease"
+registers = ["ctx", "base"]
+jump_address = 0x82345A8C
+evidence_hex = "488f9751"
+
+[[midasm_hook]]
+address = 0x82345A9C
+name = "SimpsonsNativeAudioEngineRelease"
+registers = ["ctx", "base"]
+jump_address = 0x82345AA0
+evidence_hex = "488fa465"
+
+[[midasm_hook]]
+address = 0x828166FC
+name = "SimpsonsNativeAudioStartup"
+registers = ["ctx", "base"]
+evidence_hex = "2b1c0000419a0038"
+
+[[midasm_hook]]
+address = 0x82339088
+name = "SimpsonsNativeAudioRootJoin"
+registers = ["ctx", "base"]
+evidence_hex = "817f0040280b0000"
+
+[[midasm_hook]]
+address = 0x823391E8
+name = "SimpsonsNativeAudioRootFinish"
+registers = ["ctx", "base"]
+evidence_hex = "382100708181fff87d8803a6"
+
+[[midasm_hook]]
+address = 0x8233E598
+name = "SimpsonsNativeAudioProvider"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff89421ffa0"
+
+[[midasm_hook]]
+address = 0x8233E7E8
+name = "SimpsonsNativeAudioStop"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6486fdbe19421ff90"
+
+[[midasm_hook]]
+address = 0x8233E8A0
+name = "SimpsonsNativeAudioDisable"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6486fdb299421ff90"
+
+[[midasm_hook]]
+address = 0x8233E920
+name = "SimpsonsNativeAudioEnable"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff8fbc1ffe8"
+
+[[midasm_hook]]
+address = 0x823404A8
+name = "SimpsonsNativeAudioCreateBegin"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6486fbf059421ff50"
+
+[[midasm_hook]]
+address = 0x82340548
+name = "SimpsonsNativeAudioCreateAllocated"
+registers = ["ctx", "base"]
+evidence_hex = "817e00083b8000005776063e"
+
+[[midasm_hook]]
+address = 0x8233E9C8
+name = "SimpsonsNativeAudioConstruct"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6486fd9d99421ff40"
+
+[[midasm_hook]]
+address = 0x824324A8
+name = "SimpsonsNativeGetTickCount"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "3d608200816b07f0806b00104e800020"
+
+[[midasm_hook]]
+address = 0x82432D10
+name = "SimpsonsNativeGetLanguage"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff89421ffa03960000038e1005038c0000438a100543880000938600003b16100504888fbad2c030000"
+
+[[midasm_hook]]
+address = 0x82340684
+name = "SimpsonsNativeAudioCreateEnd"
+registers = ["ctx", "base"]
+evidence_hex = "382100b0"
+
+[[midasm_hook]]
+address = 0x823402E8
+name = "SimpsonsNativeAudioDestroyBegin"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbc1ffe8"
+
+[[midasm_hook]]
+address = 0x8233EC58
+name = "SimpsonsNativeAudioRelease"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff8fbc1ffe8"
+
+[[midasm_hook]]
+address = 0x82340360
+name = "SimpsonsNativeAudioDestroyEnd"
+registers = ["ctx", "base"]
+evidence_hex = "382100708181fff87d8803a6"
+
+[[midasm_hook]]
+address = 0x8234E768
+name = "SimpsonsNativeAudioInputPreflight"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6486edc619421ff90"
+
+[[midasm_hook]]
+address = 0x823541B8
+name = "SimpsonsNativeAudioMixerReady"
+registers = ["ctx", "base"]
+evidence_hex = "817a0000"
+
+[[midasm_hook]]
+address = 0x823543A8
+name = "SimpsonsNativeAudioMixerEnd"
+registers = ["ctx", "base"]
+evidence_hex = "382100f0"
+
+[[midasm_hook]]
+address = 0x823425DC
+name = "SimpsonsNativeAudioProducerEnd"
+registers = ["ctx", "base"]
+evidence_hex = "38210090"
+
+[[midasm_hook]]
+address = 0x82362660
+name = "SimpsonsNativeAudioAdvanceBegin"
+registers = ["ctx", "base"]
+evidence_hex = "89630031"
+
+[[midasm_hook]]
+address = 0x82362688
+name = "SimpsonsNativeAudioAdvancePartial"
+registers = ["ctx", "base"]
+evidence_hex = "4c9a0020"
+
+[[midasm_hook]]
+address = 0x823626D4
+name = "SimpsonsNativeAudioAdvanceComplete"
+registers = ["ctx", "base"]
+evidence_hex = "4e800020"
+
+[[midasm_hook]]
+address = 0x82341840
+name = "SimpsonsNativeAudioSourceFreeBegin"
+registers = ["ctx", "base"]
+evidence_hex = "813ffff3"
+
+[[midasm_hook]]
+address = 0x82341880
+name = "SimpsonsNativeAudioSourceFreeEnd"
+registers = ["ctx", "base"]
+evidence_hex = "939ffff3"
+
+[[midasm_hook]]
+address = 0x82342D28
+name = "SimpsonsNativeAudioSourceCancelBegin"
+registers = ["ctx", "base"]
+evidence_hex = "817d0000"
+
+[[midasm_hook]]
+address = 0x82342D60
+name = "SimpsonsNativeAudioSourceCancelEnd"
+registers = ["ctx", "base"]
+evidence_hex = "931d0000"
+
+[[midasm_hook]]
+address = 0x82341884
+name = "SimpsonsNativeAudioResidentFreeEnd"
+registers = ["ctx", "base"]
+evidence_hex = "37bdffff"
+
+[[midasm_hook]]
+address = 0x82342D64
+name = "SimpsonsNativeAudioResidentCancelEnd"
+registers = ["ctx", "base"]
+evidence_hex = "375affff"
+
+# The original SBK loader copies metadata and audio into separate allocations,
+# then releases the complete source bank through its completion callback.
+# Observe that sequence without replacing its calls, stores or return values.
+[[midasm_hook]]
+address = 0x82711918
+name = "SimpsonsAudioBank82711918"
+registers = ["ctx", "base"]
+evidence_hex = "4e800421"
+
+[[midasm_hook]]
+address = 0x8271191C
+name = "SimpsonsAudioBank8271191C"
+registers = ["ctx", "base"]
+evidence_hex = "7c6b1b78"
+
+[[midasm_hook]]
+address = 0x826F1DCC
+name = "SimpsonsAudioBank826F1DCC"
+registers = ["ctx", "base"]
+evidence_hex = "7c7e1b78"
+
+[[midasm_hook]]
+address = 0x826F1E04
+name = "SimpsonsAudioBank826F1E04"
+registers = ["ctx", "base"]
+evidence_hex = "7c7e1b78"
+
+[[midasm_hook]]
+address = 0x8272E9DC
+name = "SimpsonsAudioBank8272E9DC"
+registers = ["ctx", "base"]
+evidence_hex = "480d951d"
+
+[[midasm_hook]]
+address = 0x8272E9E0
+name = "SimpsonsAudioBank8272E9E0"
+registers = ["ctx", "base"]
+evidence_hex = "2b030000"
+
+[[midasm_hook]]
+address = 0x82807C4C
+name = "SimpsonsAudioBank82807C4C"
+registers = ["ctx", "base"]
+evidence_hex = "4e800421"
+
+[[midasm_hook]]
+address = 0x82811568
+name = "SimpsonsAudioBank82811568"
+registers = ["ctx", "base"]
+evidence_hex = "4bb7d319"
+
+[[midasm_hook]]
+address = 0x82811580
+name = "SimpsonsAudioBank82811580"
+registers = ["ctx", "base"]
+evidence_hex = "4822b801"
+
+[[midasm_hook]]
+address = 0x82811584
+name = "SimpsonsAudioBank82811584"
+registers = ["ctx", "base"]
+evidence_hex = "817f0000"
+
+[[midasm_hook]]
+address = 0x828115A8
+name = "SimpsonsAudioBank828115A8"
+registers = ["ctx", "base"]
+evidence_hex = "38210080"
+
+[[midasm_hook]]
+address = 0x828115D4
+name = "SimpsonsAudioBank828115D4"
+registers = ["ctx", "base"]
+evidence_hex = "38210080"
+
+[[midasm_hook]]
+address = 0x82807C6C
+name = "SimpsonsAudioBank82807C6C"
+registers = ["ctx", "base"]
+evidence_hex = "382100a0"
+
+[[midasm_hook]]
+address = 0x82812A00
+name = "SimpsonsAudioBank82812A00"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6"
+
+# Observe the actual shared manager, including calls from resource allocators
+# which do not pass through8238E880. Retain every lower-heap call and return.
+[[midasm_hook]]
+address = 0x8268DDA0
+name = "SimpsonsAudioHeap8268DDA0"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6"
+
+[[midasm_hook]]
+address = 0x8268DED0
+name = "SimpsonsAudioHeap8268DED0"
+registers = ["ctx", "base"]
+evidence_hex = "481cba61"
+
+[[midasm_hook]]
+address = 0x8268DEF0
+name = "SimpsonsAudioHeap8268DEF0"
+registers = ["ctx", "base"]
+evidence_hex = "481cc2a1"
+
+[[midasm_hook]]
+address = 0x8268DF34
+name = "SimpsonsAudioHeap8268DF34"
+registers = ["ctx", "base"]
+evidence_hex = "481cb9fd"
+
+[[midasm_hook]]
+address = 0x8268DF50
+name = "SimpsonsAudioHeap8268DF50"
+registers = ["ctx", "base"]
+evidence_hex = "481cc241"
+
+[[midasm_hook]]
+address = 0x8268DF84
+name = "SimpsonsAudioHeap8268DF84"
+registers = ["ctx", "base"]
+evidence_hex = "38210090"
+
+[[midasm_hook]]
+address = 0x8268DF90
+name = "SimpsonsAudioHeap8268DF90"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6"
+
+[[midasm_hook]]
+address = 0x8268DFD4
+name = "SimpsonsAudioHeap8268DFD4"
+registers = ["ctx", "base"]
+evidence_hex = "481ca81d"
+
+[[midasm_hook]]
+address = 0x8268E014
+name = "SimpsonsAudioHeap8268E014"
+registers = ["ctx", "base"]
+evidence_hex = "481ca7dd"
+
+[[midasm_hook]]
+address = 0x8268E018
+name = "SimpsonsAudioHeap8268E018"
+registers = ["ctx", "base"]
+evidence_hex = "38210070"
+
+# Observe reader ownership while retaining every original CPU operation.
+[[midasm_hook]]
+address = 0x8233C654
+name = "SimpsonsAudioStream8233C654"
+registers = ["ctx", "base"]
+evidence_hex = "480006ad"
+
+[[midasm_hook]]
+address = 0x8233CD44
+name = "SimpsonsAudioStream8233CD44"
+registers = ["ctx", "base"]
+evidence_hex = "4e800421"
+
+[[midasm_hook]]
+address = 0x8233CD48
+name = "SimpsonsAudioStream8233CD48"
+registers = ["ctx", "base"]
+evidence_hex = "28030000"
+
+[[midasm_hook]]
+address = 0x8233C658
+name = "SimpsonsAudioStream8233C658"
+registers = ["ctx", "base"]
+evidence_hex = "83e10050"
+
+[[midasm_hook]]
+address = 0x8233C77C
+name = "SimpsonsAudioStream8233C77C"
+registers = ["ctx", "base"]
+evidence_hex = "4800146d"
+
+[[midasm_hook]]
+address = 0x8233C780
+name = "SimpsonsAudioStream8233C780"
+registers = ["ctx", "base"]
+evidence_hex = "546b003e"
+
+[[midasm_hook]]
+address = 0x823418E8
+name = "SimpsonsAudioStream823418E8"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6"
+
+[[midasm_hook]]
+address = 0x823419AC
+name = "SimpsonsAudioStream823419AC"
+registers = ["ctx", "base"]
+evidence_hex = "4e800421"
+
+[[midasm_hook]]
+address = 0x823419B0
+name = "SimpsonsAudioStream823419B0"
+registers = ["ctx", "base"]
+evidence_hex = "28030000"
+
+[[midasm_hook]]
+address = 0x82341AB0
+name = "SimpsonsAudioStream82341AB0"
+registers = ["ctx", "base"]
+evidence_hex = "38210080"
+
+[[midasm_hook]]
+address = 0x823425E8
+name = "SimpsonsAudioStream823425E8"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6"
+
+[[midasm_hook]]
+address = 0x82341AB8
+name = "SimpsonsAudioStream82341AB8"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6"
+
+[[midasm_hook]]
+address = 0x82341B04
+name = "SimpsonsAudioStream82341B04"
+registers = ["ctx", "base"]
+evidence_hex = "4e800421"
+
+[[midasm_hook]]
+address = 0x82341B08
+name = "SimpsonsAudioStream82341B08"
+registers = ["ctx", "base"]
+evidence_hex = "38210060"
+
+[[midasm_hook]]
+address = 0x8233C838
+name = "SimpsonsAudioStream8233C838"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6"
+
+[[midasm_hook]]
+address = 0x8233C924
+name = "SimpsonsAudioStream8233C924"
+registers = ["ctx", "base"]
+evidence_hex = "4e800421"
+
+[[midasm_hook]]
+address = 0x8233C928
+name = "SimpsonsAudioStream8233C928"
+registers = ["ctx", "base"]
+evidence_hex = "38210080"
+
+[[midasm_hook]]
+address = 0x823424D8
+name = "SimpsonsNativeAudioProducerBegin"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6"
+
+[[midasm_hook]]
+address = 0x823226E8
+name = "SimpsonsAudioReader823226E8"
+registers = ["ctx", "base"]
+evidence_hex = "906b6b94"
+
+[[midasm_hook]]
+address = 0x823227DC
+name = "SimpsonsAudioReader823227DC"
+registers = ["ctx", "base"]
+evidence_hex = "916a6b94"
+
+[[midasm_hook]]
+address = 0x8233D5F8
+name = "SimpsonsAudioReader8233D5F8"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6"
+
+[[midasm_hook]]
+address = 0x8233DB3C
+name = "SimpsonsAudioReader8233DB3C"
+registers = ["ctx", "base"]
+evidence_hex = "4e800421"
+
+[[midasm_hook]]
+address = 0x8233DB40
+name = "SimpsonsAudioReader8233DB40"
+registers = ["ctx", "base"]
+evidence_hex = "28030000"
+
+[[midasm_hook]]
+address = 0x8233D644
+name = "SimpsonsAudioReader8233D644"
+registers = ["ctx", "base"]
+evidence_hex = "83e10050"
+
+[[midasm_hook]]
+address = 0x8238CD48
+name = "SimpsonsAudioReader8238CD48"
+registers = ["ctx", "base"]
+evidence_hex = "4e800421"
+
+[[midasm_hook]]
+address = 0x8238CD4C
+name = "SimpsonsAudioReader8238CD4C"
+registers = ["ctx", "base"]
+evidence_hex = "28030000"
+
+[[midasm_hook]]
+address = 0x8238CD6C
+name = "SimpsonsAudioReader8238CD6C"
+registers = ["ctx", "base"]
+evidence_hex = "4bfff9a5"
+
+[[midasm_hook]]
+address = 0x8233D6C8
+name = "SimpsonsAudioReader8233D6C8"
+registers = ["ctx", "base"]
+evidence_hex = "817f0004"
+
+[[midasm_hook]]
+address = 0x8233D70C
+name = "SimpsonsAudioReader8233D70C"
+registers = ["ctx", "base"]
+evidence_hex = "7fe3fb78"
+
+[[midasm_hook]]
+address = 0x8233D710
+name = "SimpsonsAudioReader8233D710"
+registers = ["ctx", "base"]
+evidence_hex = "382100a0"
+
+[[midasm_hook]]
+address = 0x8238D568
+name = "SimpsonsAudioReader8238D568"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6"
+
+[[midasm_hook]]
+address = 0x8238D634
+name = "SimpsonsAudioReader8238D634"
+registers = ["ctx", "base"]
+evidence_hex = "38210080"
+
+[[midasm_hook]]
+address = 0x8238D640
+name = "SimpsonsAudioReader8238D640"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6"
+
+[[midasm_hook]]
+address = 0x8238D6CC
+name = "SimpsonsAudioReader8238D6CC"
+registers = ["ctx", "base"]
+evidence_hex = "38210070"
+
+[[midasm_hook]]
+address = 0x8238D480
+name = "SimpsonsAudioReader8238D480"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6"
+
+[[midasm_hook]]
+address = 0x8238D54C
+name = "SimpsonsAudioReader8238D54C"
+registers = ["ctx", "base"]
+evidence_hex = "38210070"
+
+[[midasm_hook]]
+address = 0x8233D980
+name = "SimpsonsAudioReader8233D980"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6"
+
+[[midasm_hook]]
+address = 0x8238CE90
+name = "SimpsonsAudioReader8238CE90"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6"
+
+[[midasm_hook]]
+address = 0x8238CF20
+name = "SimpsonsAudioReader8238CF20"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6"
+
+[[midasm_hook]]
+address = 0x8238CA18
+name = "SimpsonsAudioReader8238CA18"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6"
+
+[[midasm_hook]]
+address = 0x8238CF54
+name = "SimpsonsAudioReader8238CF54"
+registers = ["ctx", "base"]
+evidence_hex = "4e800421"
+
+[[midasm_hook]]
+address = 0x8238CF58
+name = "SimpsonsAudioReader8238CF58"
+registers = ["ctx", "base"]
+evidence_hex = "7fe3fb78"
+
+[[midasm_hook]]
+address = 0x8238CF08
+name = "SimpsonsAudioReader8238CF08"
+registers = ["ctx", "base"]
+evidence_hex = "38210070"
+
+[[midasm_hook]]
+address = 0x8233D5E8
+name = "SimpsonsAudioReader8233D5E8"
+registers = ["ctx", "base"]
+evidence_hex = "4e800421"
+
+[[midasm_hook]]
+address = 0x8233D5EC
+name = "SimpsonsAudioReader8233D5EC"
+registers = ["ctx", "base"]
+evidence_hex = "38210070"
+
+[[midasm_hook]]
+address = 0x823227A8
+name = "SimpsonsAudioReader823227A8"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6"
+
+[[midasm_hook]]
+address = 0x8233E5C0
+name = "SimpsonsRejectAudioPoolInit"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6486fddf19421ff40"
+
+[[midasm_hook]]
+address = 0x8233E568
+name = "SimpsonsRejectAudioContextQuery"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "2b030000419a002089630008"
+
+[[midasm_hook]]
+address = 0x8233ED78
+name = "SimpsonsRejectAudioContextInit"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6486fd6499421ff40"
+
+[[midasm_hook]]
+address = 0x8233FF80
+name = "SimpsonsRejectAudioReset"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff8fbe1fff0"
+
+[[midasm_hook]]
+address = 0x8233FAF0
+name = "SimpsonsNativeAudioInput"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "4bfff510"
+
+[[midasm_hook]]
+address = 0x8233F000
+name = "SimpsonsRejectAudioFeeder"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6486fd3bd9421ff70"
+
+[[midasm_hook]]
+address = 0x8233FAF8
+name = "SimpsonsNativeAudioDecode"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6486fc8a59421ff30"
+
+[[midasm_hook]]
+address = 0x8233EC00
+name = "SimpsonsRejectAudioDeletingDestructor"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff8fbe1fff0"
+
+[[midasm_hook]]
+address = 0x8233EC48
+name = "SimpsonsRejectAudioBaseDestructor"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "3d60821e396bcad8"
+
+[[midasm_hook]]
+address = 0x8233EBF0
+name = "SimpsonsRejectAudioBaseVtable"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "3d60821e396bcae091630000"
+
+[[midasm_hook]]
+address = 0x82756554
+name = "SimpsonsNativeScreenDraw"
+registers = ["ctx", "base"]
+jump_address = 0x8275684C
+evidence_hex = "4bce417538800000807fcaf84bce39a138800001807fcaf84bce39f538800004807fcaf84bce3f2938800001807fcaf84bce3eb5807fcaf82b1b00013ca0000138800000419801a8419a01982b1b00034198018460a500014bce65d52f1b0003419a001038800001807fcaf84bce4df1807fcaf82b1c0000419a01803d6082cf808b23403d6082cd908b1a6c4bceef993d6082cf807fcaf8808b23343d6082cd908b1a704bceec813d6082e4815c000038c00000807fcaf83880000064c68000816bdc947caa582e4bcea2c538a00001807fcaf8388000004bce541538a0000138800000807fcaf84bce5595817fcaf838c0000038a000003880000038600000814b0480554a05a4914b0480e94b0018654a8000f94b0018817fcaf8814b0480554a04de914b0480e94b0018654a8000f94b00184bc98551809d01143d6082cd807fcaf8908b1a684bcef0fd817fcaf8c01e00003980000138c00010798cffe638a00004d00b178038800006c01e0004d00b1784c01e0008d00b1788c01e000cd00b178ce94b00087d4a6378f94b0008807fcaf84bcf5d69d3630008d343000cd3c30010d3a30014d3230018d343001cd3e30020d3830024d3630028d303002cd3c30030d3830034d3230038d303003c480000e060a501864bce64554bfffe8860a507064bce64494bfffe7c60a501064bce643d4bfffe703d6082cf808b231c3d6082cd908b1a6c4bceee1d3d6082cf807fcaf8808b23103d6082cd908b1a704bceeb0538c0000038a0000038800000386000004bc98451809d01103d6082cd807fcaf8908b1a684bceeffd817fcaf8c01e00003980000138c00008798cffe638a00004d00b178038800006c01e0004d00b1784c01e0008d00b1788c01e000cd00b178ce94b00087d4a6378f94b0008807fcaf84bcf5c69d3c30008d3a3000cd3e30010d3830014d3c30018d383001cd3e30000d3a30004807fcaf84bcf60e138800000807fcaf84bce37f538800000807fcaf84bce373938800001807fcaf84bce3e952f1b0003419a001038800000807fcaf84bce4b69"
+
+[[midasm_hook]]
+address = 0x827521C4
+name = "SimpsonsNativeScreenFlatCreate"
+registers = ["ctx", "base"]
+jump_address = 0x827521C8
+evidence_hex = "4bcf371d"
+
+[[midasm_hook]]
+address = 0x827521D8
+name = "SimpsonsNativeScreenTextureCreate"
+registers = ["ctx", "base"]
+jump_address = 0x827521DC
+evidence_hex = "4bcf3709"
+
+[[midasm_hook]]
+address = 0x827522EC
+name = "SimpsonsNativeScreenFlatRelease"
+registers = ["ctx", "base"]
+jump_address = 0x827522F0
+evidence_hex = "4bcef41d"
+
+[[midasm_hook]]
+address = 0x827522FC
+name = "SimpsonsNativeScreenTextureRelease"
+registers = ["ctx", "base"]
+jump_address = 0x82752300
+evidence_hex = "4bcef40d"
+
+# Retain original RW address/filter helpers inside a checked native transaction.
+# Only SDK writes become native sampler state; CPU stores/branches remain AOT.
+[[midasm_hook]]
+address = 0x827F5AF0
+name = "SimpsonsNativeOverlayExpandedEnter"
+registers = ["ctx", "base"]
+jump_address = 0x827F5AF4
+evidence_hex = "4bc458c1"
+
+[[midasm_hook]]
+address = 0x827F5C08
+name = "SimpsonsNativeOverlayExpandedExit"
+registers = ["ctx", "base"]
+jump_address = 0x827F5C0C
+evidence_hex = "4bc457a9"
+
+[[midasm_hook]]
+address = 0x82402718
+name = "SimpsonsNativeRwAddressCall"
+registers = ["ctx", "base"]
+jump_address = 0x8240271C
+evidence_hex = "4bffef49"
+
+[[midasm_hook]]
+address = 0x8240273C
+name = "SimpsonsNativeRwFilterCall"
+registers = ["ctx", "base"]
+jump_address = 0x82402740
+evidence_hex = "4bfff065"
+
+[[midasm_hook]]
+address = 0x82401660
+name = "SimpsonsNativeRwAddressEntry"
+registers = ["ctx", "base"]
+evidence_hex = "3d6082d13ce082d1396bd170"
+
+[[midasm_hook]]
+address = 0x824017A0
+name = "SimpsonsNativeRwFilterEntry"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a64863ac259421ff80"
+
+[[midasm_hook]]
+address = 0x82401694
+name = "SimpsonsNativeRwAddressU"
+registers = ["ctx", "base"]
+jump_address = 0x824016AC
+evidence_hex = "80ca0480512654ea90ca0480e92a001865298000f92a0018"
+
+[[midasm_hook]]
+address = 0x824016CC
+name = "SimpsonsNativeRwAddressV"
+registers = ["ctx", "base"]
+jump_address = 0x824016E4
+evidence_hex = "816a0480512b6c24916a0480e96a0018656b8000f96a0018"
+
+[[midasm_hook]]
+address = 0x824017E0
+name = "SimpsonsNativeRwFilterAnisotropy"
+registers = ["ctx", "base"]
+jump_address = 0x824017E4
+evidence_hex = "4803a671"
+
+[[midasm_hook]]
+address = 0x8240181C
+name = "SimpsonsNativeRwFilterMin"
+registers = ["ctx", "base"]
+jump_address = 0x82401820
+evidence_hex = "4803a225"
+
+[[midasm_hook]]
+address = 0x82401830
+name = "SimpsonsNativeRwFilterMag"
+registers = ["ctx", "base"]
+jump_address = 0x82401834
+evidence_hex = "4803a3a1"
+
+[[midasm_hook]]
+address = 0x82401848
+name = "SimpsonsNativeRwFilterMip"
+registers = ["ctx", "base"]
+jump_address = 0x82401860
+evidence_hex = "814b048c538ab9d0914b048ce94b0018654a8000f94b0018"
+
+
+# Optional console background-music controller is unavailable on this native PC port.
+# Original presenter has committed/unlocked a frame before this native draw boundary.
+[[midasm_hook]]
+address = 0x8282E3E8
+name = "SimpsonsNativeMovieDraw"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a64820dfe19421ff90"
+
+# Return the actual unsupported-operation error; original game intent/callers remain.
+[[midasm_hook]]
+address = 0x82B794B8
+name = "SimpsonsNativeExternalMusicUnavailable"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a64bec2f0d9421ff8048149081"
+
+[[midasm_hook]]
+address = 0x82B79590
+name = "SimpsonsNativeExternalMusicUnavailable"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a64bec2e359421ff8048148fa9"
+
+# Query a retained native thread after the original typed object reference.
+# Preserve the original output store, dereference, failure path and poll policy.
+[[midasm_hook]]
+address = 0x82433358
+name = "SimpsonsNativeThreadExitStatus"
+registers = ["ctx", "base"]
+jump_address = 0x82433370
+evidence_hex = "81630004556b063f4182000c816301404800000839600103"
+
+
+# edgeAA: bounded SDK resolver cuts; original loads, conversions, stores and ABI remain.
+
+[[midasm_hook]]
+address = 0x823C9A9C
+name = "SimpsonsNativeEdgeAA_823C9A9C"
+registers = ["ctx", "base"]
+jump_address = 0x823C9B18
+evidence_hex = "5549fbfe554b07fe55458bf8"
+
+[[midasm_hook]]
+address = 0x823C9B28
+name = "SimpsonsNativeEdgeAA_823C9B28"
+registers = ["ctx", "base"]
+jump_address = 0x823C9B2C
+evidence_hex = "81480010"
+
+[[midasm_hook]]
+address = 0x823C9B30
+name = "SimpsonsNativeEdgeAA_823C9B30"
+registers = ["ctx", "base"]
+jump_address = 0x823C9BA4
+evidence_hex = "552b07fe55258bf880ea010c"
+
+[[midasm_hook]]
+address = 0x823C9BB0
+name = "SimpsonsNativeEdgeAA_823C9BB0"
+registers = ["ctx", "base"]
+jump_address = 0x823C9C30
+evidence_hex = "80ff00005549fbfe554b07fe"
+
+[[midasm_hook]]
+address = 0x823C9C40
+name = "SimpsonsNativeEdgeAA_823C9C40"
+registers = ["ctx", "base"]
+jump_address = 0x823C9CB8
+evidence_hex = "81480010552b07fe55258bf8"
+
+[[midasm_hook]]
+address = 0x823C9CCC
+name = "SimpsonsNativeEdgeAA_823C9CCC"
+registers = ["ctx", "base"]
+jump_address = 0x823C9D44
+evidence_hex = "814a00105528fbfe552b07fe"
+
+[[midasm_hook]]
+address = 0x823C9D5C
+name = "SimpsonsNativeEdgeAA_823C9D5C"
+registers = ["ctx", "base"]
+jump_address = 0x823C9DE0
+evidence_hex = "81480010552b07fe7d274b78"
+
+[[midasm_hook]]
+address = 0x823C9DF0
+name = "SimpsonsNativeEdgeAA_823C9DF0"
+registers = ["ctx", "base"]
+jump_address = 0x823C9DFC
+evidence_hex = "808b012c5528fbfe806b0108"
+
+[[midasm_hook]]
+address = 0x823C9E00
+name = "SimpsonsNativeEdgeAA_823C9E00"
+registers = ["ctx", "base"]
+jump_address = 0x823C9E70
+evidence_hex = "552a07fe5507e8fe838b0128"
+
+[[midasm_hook]]
+address = 0x823C9E80
+name = "SimpsonsNativeEdgeAA_823C9E80"
+registers = ["ctx", "base"]
+jump_address = 0x823C9E84
+evidence_hex = "80cb010c"
+
+[[midasm_hook]]
+address = 0x823C9E88
+name = "SimpsonsNativeEdgeAA_823C9E88"
+registers = ["ctx", "base"]
+jump_address = 0x823C9EB0
+evidence_hex = "806b01005528fbfe80ab012c"
+
+[[midasm_hook]]
+address = 0x823C9EB4
+name = "SimpsonsNativeEdgeAA_823C9EB4"
+registers = ["ctx", "base"]
+jump_address = 0x823C9EC0
+evidence_hex = "394affff8325000054c48bf8"
+
+[[midasm_hook]]
+address = 0x823C9EC4
+name = "SimpsonsNativeEdgeAA_823C9EC4"
+registers = ["ctx", "base"]
+jump_address = 0x823C9F08
+evidence_hex = "7d4b58387f8650387f08f0ae"
+
+[[midasm_hook]]
+address = 0x823C9F1C
+name = "SimpsonsNativeEdgeAA_823C9F1C"
+registers = ["ctx", "base"]
+jump_address = 0x823C9F20
+evidence_hex = "81480010"
+
+[[midasm_hook]]
+address = 0x823C9F24
+name = "SimpsonsNativeEdgeAA_823C9F24"
+registers = ["ctx", "base"]
+jump_address = 0x823C9F98
+evidence_hex = "552b07fe55248bf880ea010c"
+
+[[midasm_hook]]
+address = 0x823C9F9C
+name = "SimpsonsNativeEdgeAA_823C9F9C"
+registers = ["ctx", "base"]
+jump_address = 0x823C9FA4
+evidence_hex = "55692336816a0010"
+
+[[midasm_hook]]
+address = 0x823C9FB4
+name = "SimpsonsNativeEdgeAA_823C9FB4"
+registers = ["ctx", "base"]
+jump_address = 0x823CA030
+evidence_hex = "806b01085528fbfe838b0128"
+
+[[midasm_hook]]
+address = 0x823CA03C
+name = "SimpsonsNativeEdgeAA_823CA03C"
+registers = ["ctx", "base"]
+jump_address = 0x823CA040
+evidence_hex = "810b010c"
+
+[[midasm_hook]]
+address = 0x823CA044
+name = "SimpsonsNativeEdgeAA_823CA044"
+registers = ["ctx", "base"]
+jump_address = 0x823CA0B0
+evidence_hex = "80eb012c552a07fe80cb0108"
+
+[[midasm_hook]]
+address = 0x823CA0B4
+name = "SimpsonsNativeEdgeAA_823CA0B4"
+registers = ["ctx", "base"]
+jump_address = 0x823CA0B8
+evidence_hex = "556b2336"
+
+[[midasm_hook]]
+address = 0x823C8178
+name = "SimpsonsNativeEdgeAA_823C8178"
+registers = ["ctx", "base"]
+jump_address = 0x823C81F8
+evidence_hex = "3d008206816300105489fbfe"
+
+[[midasm_hook]]
+address = 0x823C8208
+name = "SimpsonsNativeEdgeAA_823C8208"
+registers = ["ctx", "base"]
+jump_address = 0x823C8288
+evidence_hex = "3d008206816300105489fbfe"
+
+# Original full-size viewport texture8 ownership and exact post-pass depth resolve.
+
+[[midasm_hook]]
+address = 0x827514F4
+name = "SimpsonsNativeViewportDepthPublish"
+registers = ["ctx", "base"]
+evidence_hex = "7f03c378382101b0482eaee4"
+
+[[midasm_hook]]
+address = 0x82751004
+name = "SimpsonsNativeViewportDepthRetire"
+registers = ["ctx", "base"]
+evidence_hex = "3b7e00383b80000a7f7fdb78"
+
+[[midasm_hook]]
+address = 0x82751750
+name = "SimpsonsNativeViewportDepthCopy"
+registers = ["ctx", "base"]
+jump_address = 0x82751754
+evidence_hex = "4bd03e21"
+
+[[midasm_hook]]
+address = 0x82704C2C
+name = "SimpsonsNativeShadowDepthCopy"
+registers = ["ctx", "base"]
+jump_address = 0x82704C30
+evidence_hex = "4bd5094538210080"
+
+# Native static depth prepass; retain original binding/selection/submesh bodies.
+[[midasm_hook]]
+address = 0x826FF4C8
+name = "SimpsonsNativeZPrepassMesh"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a64833cef59421ff70"
+
+[[midasm_hook]]
+address = 0x826FF340
+name = "SimpsonsNativeZPrepassStream"
+registers = ["ctx", "base"]
+jump_address = 0x826FF344
+evidence_hex = "4bd3d2814800014c"
+
+[[midasm_hook]]
+address = 0x826FF498
+name = "SimpsonsNativeZPrepassDeclaration"
+registers = ["ctx", "base"]
+jump_address = 0x826FF49C
+evidence_hex = "4bd46301389b0058"
+
+[[midasm_hook]]
+address = 0x826FF4A4
+name = "SimpsonsNativeZPrepassIndices"
+registers = ["ctx", "base"]
+jump_address = 0x826FF4A8
+evidence_hex = "4bd3d2c538600000"
+
+[[midasm_hook]]
+address = 0x826FF584
+name = "SimpsonsNativeZPrepassDraw"
+registers = ["ctx", "base"]
+jump_address = 0x826FF588
+evidence_hex = "4bd4dddd3bbdffff"
+
+[[midasm_hook]]
+address = 0x826FF5B0
+name = "SimpsonsNativeZPrepassStreamCleanup"
+registers = ["ctx", "base"]
+jump_address = 0x826FF5B4
+evidence_hex = "4bd3d0117f63db78"
+
+
+# Preserve original scene packet context publication for the main bucket.
+[[midasm_hook]]
+address = 0x82740960
+name = "SimpsonsNativeScenePacketContext"
+registers = ["ctx", "base"]
+evidence_hex = "917f00143d6082d7815f0004"
+
+[[midasm_hook]]
+address = 0x826F4DE4
+name = "SimpsonsNativeRecordBegin_826F4DE4"
+registers = ["ctx", "base"]
+jump_address = 0x826F4DE8
+evidence_hex = "4bd47a55907f006c807f0064"
+
+[[midasm_hook]]
+address = 0x826F4DF0
+name = "SimpsonsNativeRecordBegin_826F4DF0"
+registers = ["ctx", "base"]
+jump_address = 0x826F4DF4
+evidence_hex = "4bd47a913bbf0074907f0070"
+
+[[midasm_hook]]
+address = 0x826F4E04
+name = "SimpsonsNativeRecordBegin_826F4E04"
+registers = ["ctx", "base"]
+jump_address = 0x826F4E08
+evidence_hex = "4bd509453b9f0078807f0064"
+
+[[midasm_hook]]
+address = 0x826F4E14
+name = "SimpsonsNativeRecordBegin_826F4E14"
+registers = ["ctx", "base"]
+jump_address = 0x826F4E18
+evidence_hex = "4bd5062538810050807f0064"
+
+[[midasm_hook]]
+address = 0x826F4E20
+name = "SimpsonsNativeRecordBegin_826F4E20"
+registers = ["ctx", "base"]
+jump_address = 0x826F4E24
+evidence_hex = "4bd4771138810060807f0064"
+
+[[midasm_hook]]
+address = 0x826F4E2C
+name = "SimpsonsNativeRecordBegin_826F4E2C"
+registers = ["ctx", "base"]
+jump_address = 0x826F4E30
+evidence_hex = "4bd4772d3d6082d7815f0058"
+
+[[midasm_hook]]
+address = 0x826F4E94
+name = "SimpsonsNativeRecordBegin_826F4E94"
+registers = ["ctx", "base"]
+jump_address = 0x826F4E98
+evidence_hex = "4bd6511d2b030000907f0054"
+
+[[midasm_hook]]
+address = 0x826F4ED4
+name = "SimpsonsNativeRecordBegin_826F4ED4"
+registers = ["ctx", "base"]
+jump_address = 0x826F4ED8
+evidence_hex = "4bd65495386000034bfc2b7d"
+
+[[midasm_hook]]
+address = 0x826F4EEC
+name = "SimpsonsNativeRecordBegin_826F4EEC"
+registers = ["ctx", "base"]
+jump_address = 0x826F4EF0
+evidence_hex = "4bd48fe5809f0070807e0000"
+
+[[midasm_hook]]
+address = 0x826F4EF8
+name = "SimpsonsNativeRecordBegin_826F4EF8"
+registers = ["ctx", "base"]
+jump_address = 0x826F4EFC
+evidence_hex = "4bd486a138810060807e0000"
+
+[[midasm_hook]]
+address = 0x826F4F04
+name = "SimpsonsNativeRecordBegin_826F4F04"
+registers = ["ctx", "base"]
+jump_address = 0x826F4F08
+evidence_hex = "4bd481f538810050807e0000"
+
+[[midasm_hook]]
+address = 0x826F4F10
+name = "SimpsonsNativeRecordBegin_826F4F10"
+registers = ["ctx", "base"]
+jump_address = 0x826F4F14
+evidence_hex = "4bd47521809c0000807e0000"
+
+[[midasm_hook]]
+address = 0x826F4F1C
+name = "SimpsonsNativeRecordBegin_826F4F1C"
+registers = ["ctx", "base"]
+jump_address = 0x826F4F20
+evidence_hex = "4bd5035d809d0000807e0000"
+
+[[midasm_hook]]
+address = 0x826F4F28
+name = "SimpsonsNativeRecordBegin_826F4F28"
+registers = ["ctx", "base"]
+jump_address = 0x826F4F2C
+evidence_hex = "4bd506513900000080df0060"
+
+[[midasm_hook]]
+address = 0x826F4F48
+name = "SimpsonsNativeRecordBegin_826F4F48"
+registers = ["ctx", "base"]
+evidence_hex = "807f0054382100c0483474b8"
+
+# Exact existing-native-context -> active recording-context lease transfer.
+[[midasm_hook]]
+address = 0x82C1CFE8
+name = "SimpsonsNativeEffectRecordingContext"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff8fbc1ffe8"
+
+# Rigid recording texture helper: owned metadata at opaque FX reads only.
+[[midasm_hook]]
+address = 0x826F3A10
+name = "SimpsonsNativeRigidTextures_826F3A10"
+registers = ["ctx", "base"]
+jump_address = 0x826F3A3C
+evidence_hex = "817e020057ea843a393d0004"
+
+[[midasm_hook]]
+address = 0x826F3ABC
+name = "SimpsonsNativeRigidTextures_826F3ABC"
+registers = ["ctx", "base"]
+jump_address = 0x826F3AC0
+evidence_hex = "4bfff79d7c6a1b78554b0672"
+
+[[midasm_hook]]
+address = 0x826F3ADC
+name = "SimpsonsNativeRigidTextures_826F3ADC"
+registers = ["ctx", "base"]
+jump_address = 0x826F3B50
+evidence_hex = "576b74be80fe02107d4a0034"
+
+[[midasm_hook]]
+address = 0x826F3B5C
+name = "SimpsonsNativeRigidTextures_826F3B5C"
+registers = ["ctx", "base"]
+jump_address = 0x826F3B60
+evidence_hex = "4bd4cd853b9c00042b1c000c"
+
+[[midasm_hook]]
+address = 0x826F3B6C
+name = "SimpsonsNativeRigidTextures_826F3B6C"
+registers = ["ctx", "base"]
+evidence_hex = "382100c04834889400000000"
+
+
+# Native recording finish and execute at original SDK boundaries.
+[[midasm_hook]]
+address = 0x826F4F88
+name = "SimpsonsNativeRecordFinish_826F4F88"
+registers = ["ctx", "base"]
+jump_address = 0x826F4F8C
+evidence_hex = "4bd65861817e00603b800000"
+
+[[midasm_hook]]
+address = 0x826F4FC0
+name = "SimpsonsNativeRecordFinish_826F4FC0"
+registers = ["ctx", "base"]
+jump_address = 0x826F4FC4
+evidence_hex = "4bd676392f030000409a00a0"
+
+[[midasm_hook]]
+address = 0x826F50A8
+name = "SimpsonsNativeRecordFinish_826F50A8"
+registers = ["ctx", "base"]
+jump_address = 0x826F50AC
+evidence_hex = "4bd4c661807e00704bd4c659"
+
+[[midasm_hook]]
+address = 0x826F50B0
+name = "SimpsonsNativeRecordFinish_826F50B0"
+registers = ["ctx", "base"]
+jump_address = 0x826F50B4
+evidence_hex = "4bd4c659807e00644800a621"
+
+[[midasm_hook]]
+address = 0x826F50C4
+name = "SimpsonsNativeRecordFinish_826F50C4"
+registers = ["ctx", "base"]
+evidence_hex = "578b063e2b0b0000419a0014"
+
+[[midasm_hook]]
+address = 0x82740348
+name = "SimpsonsNativeRecordingExecute"
+registers = ["ctx", "base"]
+jump_address = 0x8274034C
+evidence_hex = "4bd1c4593860000038210070"
+
+
+# Original rigid material/mesh loops and inherited staging; SDK objects remain unmapped.
+[[midasm_hook]]
+address = 0x82701448
+name = "SimpsonsNativeRigidMeshEntry"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a64833af4d9421ff20"
+
+[[midasm_hook]]
+address = 0x82701628
+name = "SimpsonsNativeRigidMeshComplete"
+registers = ["ctx", "base"]
+evidence_hex = "38600000382100e04833adb8"
+
+[[midasm_hook]]
+address = 0x826B5618
+name = "SimpsonsNativeRigidMaterialEntry"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a648386da19421ff40"
+
+[[midasm_hook]]
+address = 0x826B2F20
+name = "SimpsonsNativeRigidMaterialFilter"
+registers = ["ctx", "base"]
+jump_address = 0x826B2FD0
+evidence_hex = "81630120390000002b0b0000"
+
+[[midasm_hook]]
+address = 0x82C1DBA0
+name = "SimpsonsNativeRigidMaterialCommit"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a64be1e7f99421fdf0"
+
+[[midasm_hook]]
+address = 0x827015C0
+name = "SimpsonsNativeRigidMeshDraw"
+registers = ["ctx", "base"]
+jump_address = 0x827015C4
+evidence_hex = "4bd4bda12b1e0000419a002c"
+
+[[midasm_hook]]
+address = 0x826B6068
+name = "SimpsonsNativeRigidReplayShared"
+registers = ["ctx", "base"]
+evidence_hex = "3d60820b388b71204bffe6b8"
+
+[[midasm_hook]]
+address = 0x826B5770
+name = "SimpsonsNativeRigidReplayCallbacks"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a648386c4d9421ff30"
+
+[[midasm_hook]]
+address = 0x826B3270
+name = "SimpsonsNativeRigidReplayUpload"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a64838914d9421ff70"
+
+[[midasm_hook]]
+address = 0x826B32E4
+name = "SimpsonsNativeRigidReplayStage_826B32E4"
+registers = ["ctx", "base"]
+jump_address = 0x826B32E8
+evidence_hex = "4bd918f53d6082d757bd2036"
+
+[[midasm_hook]]
+address = 0x826B3314
+name = "SimpsonsNativeRigidReplayCopied_826B3314"
+registers = ["ctx", "base"]
+evidence_hex = "4804c3ed4804c3e97f68db78"
+
+[[midasm_hook]]
+address = 0x826B3330
+name = "SimpsonsNativeRigidReplayStage_826B3330"
+registers = ["ctx", "base"]
+jump_address = 0x826B3334
+evidence_hex = "4bd918a93d6082d7577d2036"
+
+[[midasm_hook]]
+address = 0x826B3364
+name = "SimpsonsNativeRigidReplayCopied_826B3364"
+registers = ["ctx", "base"]
+evidence_hex = "38210090483890a800000000"
+
+[[midasm_hook]]
+address = 0x8270BAB0
+name = "SimpsonsNativeRigidParameter_8270BAB0"
+registers = ["ctx", "base"]
+jump_address = 0x8270BB18
+evidence_hex = "812b012c394affff808b010c"
+
+[[midasm_hook]]
+address = 0x8270BB50
+name = "SimpsonsNativeRigidParameter_8270BB50"
+registers = ["ctx", "base"]
+jump_address = 0x8270BBB8
+evidence_hex = "812b012c394affff808b010c"
+
+[[midasm_hook]]
+address = 0x8270BBEC
+name = "SimpsonsNativeRigidParameter_8270BBEC"
+registers = ["ctx", "base"]
+jump_address = 0x8270BC54
+evidence_hex = "812b012c394affff808b010c"
+
+[[midasm_hook]]
+address = 0x8270BC90
+name = "SimpsonsNativeRigidParameter_8270BC90"
+registers = ["ctx", "base"]
+jump_address = 0x8270BCAC
+evidence_hex = "806b010c5508077e83eb012c"
+
+[[midasm_hook]]
+address = 0x8270BCB0
+name = "SimpsonsNativeRigidParameter_8270BCB0"
+registers = ["ctx", "base"]
+jump_address = 0x8270BD00
+evidence_hex = "838b01287d4b583880c30000"
+
+[[midasm_hook]]
+address = 0x8270BD38
+name = "SimpsonsNativeRigidParameter_8270BD38"
+registers = ["ctx", "base"]
+jump_address = 0x8270BD54
+evidence_hex = "806b010c5508077e83eb012c"
+
+[[midasm_hook]]
+address = 0x8270BD58
+name = "SimpsonsNativeRigidParameter_8270BD58"
+registers = ["ctx", "base"]
+jump_address = 0x8270BDA8
+evidence_hex = "838b01287d4b583880c30000"
+
+[[midasm_hook]]
+address = 0x8270BDDC
+name = "SimpsonsNativeRigidParameter_8270BDDC"
+registers = ["ctx", "base"]
+jump_address = 0x8270BE44
+evidence_hex = "812b012c394affff808b010c"
+
+[[midasm_hook]]
+address = 0x8270BE7C
+name = "SimpsonsNativeRigidParameter_8270BE7C"
+registers = ["ctx", "base"]
+jump_address = 0x8270BEE4
+evidence_hex = "812b012c394affff806b010c"
+
+
+# Original cache-limit fallback. Preserve the quota result, opaque/static
+# dispatcher, CPU callback loops, material state restoration and both cleanup
+# calls. Only opaque SDK traversals/binds route to owned native resources.
+[[midasm_hook]]
+address = 0x827400F8
+name = "SimpsonsNativeRigidImmediateEntry"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6482fc2cd9421ff80"
+
+[[midasm_hook]]
+address = 0x827402E4
+name = "SimpsonsNativeRigidImmediateComplete"
+registers = ["ctx", "base"]
+evidence_hex = "3860000038210080482fc12c"
+
+[[midasm_hook]]
+address = 0x8273FF80
+name = "SimpsonsNativeRigidImmediateTextures_8273FF80"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6482fc4319421ff40"
+
+[[midasm_hook]]
+address = 0x8273FFA4
+name = "SimpsonsNativeRigidImmediateTextures_8273FFA4"
+registers = ["ctx", "base"]
+jump_address = 0x8273FFC0
+evidence_hex = "815d020060e766673b800000"
+
+[[midasm_hook]]
+address = 0x82740044
+name = "SimpsonsNativeRigidImmediateTextures_82740044"
+registers = ["ctx", "base"]
+jump_address = 0x82740048
+evidence_hex = "4bfb3215546b06722b0b0000"
+
+[[midasm_hook]]
+address = 0x82740060
+name = "SimpsonsNativeRigidImmediateTextures_82740060"
+registers = ["ctx", "base"]
+jump_address = 0x827400D4
+evidence_hex = "576b74be80fd02107c6a0034"
+
+[[midasm_hook]]
+address = 0x827400E0
+name = "SimpsonsNativeRigidImmediateTextures_827400E0"
+registers = ["ctx", "base"]
+jump_address = 0x827400E4
+evidence_hex = "4bd008013b9c00042b1c000c"
+
+[[midasm_hook]]
+address = 0x827400F0
+name = "SimpsonsNativeRigidImmediateTextures_827400F0"
+registers = ["ctx", "base"]
+evidence_hex = "382100c0482fc3107d8802a6"
+
+[[midasm_hook]]
+address = 0x82701220
+name = "SimpsonsNativeRigidImmediateMeshEntry"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a64833b1719421ff10"
+
+# Skin immediate mesh-loop entry (reached when the shared fallback selects a
+# skinned packet via meta+0x24 bones). Replaces the original skin mesh loop;
+# per-submesh vertex/declaration/material/draw sites are shared with rigid
+# unless a replay reveals skin-specific call sites.
+[[midasm_hook]]
+address = 0x82701638
+name = "SimpsonsNativeSkinMeshEntry"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a64833ad559421ff10"
+
+# Skin sampler-state commit (bl 8243C5C0 reached only from the shared stream
+# helper on skin-shaped calls; census over rigid/zprepass/normalmap replays
+# shows no other flow reaches this bl). The call targets the native
+# scene-context id and faults; the skin pass has no samplers, so validate the
+# call shape and resume after the call.
+[[midasm_hook]]
+address = 0x826FF3B4
+name = "SimpsonsNativeSkinSamplerSkip"
+registers = ["ctx", "base"]
+jump_address = 0x826FF3B8
+evidence_hex = "4bd3d20d396000013b800000"
+
+# Skin morph-stream commit loop (bl 8243C5C0 per stream index; the loop
+# counter/register updates run originally). Same unmapped-target situation as
+# above; validate the per-iteration shape and resume after the call.
+[[midasm_hook]]
+address = 0x826FF47C
+name = "SimpsonsNativeSkinMorphSkip"
+registers = ["ctx", "base"]
+jump_address = 0x826FF480
+evidence_hex = "4bd3d1453b9cffff3bde0001"
+
+# Skin per-submesh draw (bl 8244D360 from the skin mesh loop; the shared draw
+# submitter for bound vertices plus committed constants, same helper rigid
+# draws through from 827013B0). Its original staging-upload prologue faults
+# on the native scene-context id, so validate the submesh draw arguments,
+# submit the native skin draw and resume after the call.
+[[midasm_hook]]
+address = 0x827018C0
+name = "SimpsonsNativeSkinDraw"
+registers = ["ctx", "base"]
+jump_address = 0x827018C4
+evidence_hex = "4bd4baa12b1f0000419a0028"
+
+# Skin mesh-loop epilogue (after the 826FE668 sampler loop). The loop has no
+# auxiliary-stream site for skin; all submeshes drew with committed
+# materials. Observe-only: the original epilogue still returns.
+[[midasm_hook]]
+address = 0x8270192C
+name = "SimpsonsNativeSkinLoopEnd"
+registers = ["ctx", "base"]
+evidence_hex = "38600000382100f04833aaac"
+
+# Skin sampler commit inside the 826FE710 matrix-select helper (bl 8243C5C0;
+# same unmapped scene-context target as the sampler skip, r4=1 commit index).
+# The skin pass has no samplers; validate the shape, resume after the call.
+[[midasm_hook]]
+address = 0x826FE6CC
+name = "SimpsonsNativeSkinSamplerCommitSkip"
+registers = ["ctx", "base"]
+jump_address = 0x826FE6D0
+evidence_hex = "4bd3def53bdeffff3bff0001"
+
+# Copy the original selected morph stream into an owned native vertex delta
+# snapshot. Preserve the CPU loop and its stream-specific fetch dirty mask.
+[[midasm_hook]]
+address = 0x826FF434
+name = "SimpsonsNativeSkinMorphStreamBind"
+registers = ["ctx", "base"]
+jump_address = 0x826FF438
+evidence_hex = "4bd3d18d7f1ee0404198ffb0"
+
+# Sky per-texture bind inside the 8270AD68 transfer helper (bl 824408E0).
+# Probe only: logs shape/owners, then stops for exact qualification.
+[[midasm_hook]]
+address = 0x8270AD5C
+name = "SimpsonsNativeSkyTextureBind"
+registers = ["ctx", "base"]
+jump_address = 0x8270AD60
+evidence_hex = "4bd35b8538210080483316b0"
+
+# Callee-entry observer for the shared sampler-commit helper. Logs every
+# invocation (lr identifies the call-site bl) to reveal further skin shapes.
+[[midasm_hook]]
+address = 0x8243C5C0
+name = "SimpsonsNativeSkinSamplerWatch"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6485ffdfd9421ff70"
+
+[[midasm_hook]]
+address = 0x82700498
+name = "SimpsonsNativeRigidImmediateSubmeshEntry"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a64833bf219421ff20"
+
+[[midasm_hook]]
+address = 0x827005DC
+name = "SimpsonsNativeRigidImmediateSubmeshComplete"
+registers = ["ctx", "base"]
+evidence_hex = "38600000382100e04833be28"
+
+[[midasm_hook]]
+address = 0x826B54D0
+name = "SimpsonsNativeRigidImmediateMaterialEntry"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a648386eed9421ff40"
+
+[[midasm_hook]]
+address = 0x827013B0
+name = "SimpsonsNativeRigidImmediateMeshDraw"
+registers = ["ctx", "base"]
+jump_address = 0x827013B4
+evidence_hex = "4bd4bfb12b1e0000419a0028"
+
+[[midasm_hook]]
+address = 0x8270142C
+name = "SimpsonsNativeRigidImmediateMeshCleanup"
+registers = ["ctx", "base"]
+jump_address = 0x82701430
+evidence_hex = "4bd3b1957ec3b3784bffd235"
+
+[[midasm_hook]]
+address = 0x82701438
+name = "SimpsonsNativeRigidImmediateMeshComplete"
+registers = ["ctx", "base"]
+evidence_hex = "38600000382100f04833afa4"
+
+# Observe original cache LRU, event counter reset and quota return; retain all original instructions.
+[[midasm_hook]]
+address = 0x826F4C70
+name = "SimpsonsNativeRecordLru_826F4C70"
+registers = ["ctx", "base"]
+evidence_hex = "81640004394000002f0b0000"
+
+[[midasm_hook]]
+address = 0x826F4CF4
+name = "SimpsonsNativeRecordLru_826F4CF4"
+registers = ["ctx", "base"]
+evidence_hex = "4e8000209083004890830044"
+
+[[midasm_hook]]
+address = 0x826F4D00
+name = "SimpsonsNativeRecordLru_826F4D00"
+registers = ["ctx", "base"]
+evidence_hex = "4e800020000000007d8802a6"
+
+[[midasm_hook]]
+address = 0x826F3988
+name = "SimpsonsNativeRecordCounter_826F3988"
+registers = ["ctx", "base"]
+evidence_hex = "3d6082d6816b1dd02b0b0000"
+
+[[midasm_hook]]
+address = 0x826F39A0
+name = "SimpsonsNativeRecordCounter_826F39A0"
+registers = ["ctx", "base"]
+evidence_hex = "4e800020000000003863fffc"
+
+[[midasm_hook]]
+address = 0x826F4D50
+name = "SimpsonsNativeRecordQuota_826F4D50"
+registers = ["ctx", "base"]
+evidence_hex = "483476b838a0000038800000"
+
+
+# Immediate geometry state/storage ownership. Its general draw remains guarded;
+# particle/sprite consumers have their own native draw boundaries.
+[[midasm_hook]]
+address = 0x827521A4
+name = "SimpsonsNativeImmediateBufferPublish"
+registers = ["ctx", "base"]
+evidence_hex = "3bdeffff3bbd00282b1e0000"
+
+[[midasm_hook]]
+address = 0x82752338
+name = "SimpsonsNativeImmediateBufferRetire"
+registers = ["ctx", "base"]
+evidence_hex = "808b000481630000816b0024"
+
+[[midasm_hook]]
+address = 0x82751E38
+name = "SimpsonsNativeImmediateDrawFrontier"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6482ea5919421ff90"
+return = true
+
+[[midasm_hook]]
+address = 0x82751DA0
+name = "SimpsonsNativeImmediateGeometryEnd"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbc1ffe8fbe1fff0"
+return = true
+
+[[midasm_hook]]
+address = 0x82751B74
+name = "SimpsonsNativeDeviceEpilogue"
+registers = ["ctx", "base"]
+jump_address = 0x82751D98
+evidence_hex = "7c7d1b787cbe2b783fe082d13880000193dd0004807fcaf84bce982557cb077a807fcaf82b0b00003d6082e03b8bea20419a00d83d6082cf808b1fc83d6082cd908b1a6c4bcf39c1817c01782b0b0000419a00903cc0200080ab00f038800002807fcaf84bceed0938a0000038800002807fcaf84bce9e5938a0000038800002807fcaf84bce9fd9817fcaf839400001812b04bc5529024c912b04bce92b001865292000f92b0018817fcaf8812b04b051495cea912b04b0e92b001865292000f92b0018817fcaf8812b04b051497424912b04b0e94b0018654a2000f94b001857cb07bc807fcaf82b0b0000419a00103d6082cf808b1fb0480000483d6082cf808b1fa44800003c3d6082cf808b1fbc3d6082cd908b1a6c4bcf38ed57cb07bc807fcaf82b0b0000419a00103d6082cf808b1f984800000c3d6082cf808b1f8c3d6082cd908b1a704bcf35bd57cb0738807fcaf8216b00007d6b59105564077c4bce822d3ca0000138800000807fcaf860a507064bceae9938c0000038a00000807fcaf864c68000388000004bceebe138800001807fcaf84bce89bd38800001807fcaf84bce89f157cb07fe2b0b0000419a00203c803f00807fcaf84bce8d713c8038fb807fcaf86084a8824bce8e2938800000807fcaf84bce8215817c010038c00020388b000838600000814b0000812b00043d6082e07ca9505083cbe3504bc9ce653d6082cd807fcaf87fc4f37893cb1a684bcf3a11396000007fa3eb78917d0000"
+
+# Original mode-zero immediate trail boundary.
+[[midasm_hook]]
+address = 0x8275187C
+name = "SimpsonsNativeImmediateDeclarationCreate"
+registers = ["ctx", "base"]
+jump_address = 0x82751880
+evidence_hex = "4bcf4065"
+
+# Original mode-zero immediate trail boundary.
+[[midasm_hook]]
+address = 0x827522DC
+name = "SimpsonsNativeImmediateDeclarationRelease"
+registers = ["ctx", "base"]
+jump_address = 0x827522E0
+evidence_hex = "4bcef42d"
+
+# Original mode-zero immediate trail boundary.
+[[midasm_hook]]
+address = 0x827518B0
+name = "SimpsonsNativeImmediateDeclarationReleaseLocal"
+registers = ["ctx", "base"]
+jump_address = 0x827518B4
+evidence_hex = "4bcefe59"
+
+# Original mode-zero immediate trail boundary.
+[[midasm_hook]]
+address = 0x8277E3BC
+name = "SimpsonsNativeTrailBegin"
+registers = ["ctx", "base"]
+jump_address = 0x8277E4FC
+evidence_hex = "815f00a039800001798ccfe6816a0020556b06b42f0b00003d6082d13bcbcaf8817e0000419a0034c00a0074d0010090d2610094d2610098d261009cd00b0910c0010094d00b0914c0010098d00b0918c001009c480000343d40821ed26100a4d26100a8d26100acc00ad110d00100a0d00b0910c00100a4d00b0914c00100a8d00b0918c00100acd00b091ce94b0000386100707d4a6378f94b000080bf00a8809f00a44bfd3529815f00a039800001817e000038800000798cf7e6c00a0044d00100b0c1aa0048d1a100b4c1aa004cd1a100b8d3e100bcd00b07c0c00100b4d00b07c4c00100b8d00b07c8c00100bcd00b07cce94b00007d4a6378f94b0000807e00004bcbc249817f00a038610070896b00247d6407744bc4ca2d38800001807e00004bcbba8138800004807e00004bcbbfb538800001807e00004bcbbf41"
+
+# Original mode-zero immediate trail boundary.
+[[midasm_hook]]
+address = 0x8277E860
+name = "SimpsonsNativeTrailFinish"
+registers = ["ctx", "base"]
+evidence_hex = "2f1a0000419a0030817f00a0"
+
+# Original radial sprite native boundary; CPU vertex construction is retained.
+[[midasm_hook]]
+address = 0x8276BF3C
+name = "SimpsonsNativeRadialDeclarationCreate"
+registers = ["ctx", "base"]
+jump_address = 0x8276BF40
+evidence_hex = "4bcd99a5"
+
+# Original radial sprite native boundary; CPU vertex construction is retained.
+[[midasm_hook]]
+address = 0x8276C078
+name = "SimpsonsNativeRadialDeclarationRelease"
+registers = ["ctx", "base"]
+jump_address = 0x8276C07C
+evidence_hex = "4bcd5691"
+
+# Original radial sprite native boundary; CPU vertex construction is retained.
+[[midasm_hook]]
+address = 0x8276BC50
+name = "SimpsonsNativeRadialBegin"
+registers = ["ctx", "base"]
+jump_address = 0x8276BCB4
+evidence_hex = "3d6082cf3fc082d1808b23bc3d6082cd807ecaf8908b1a6c4bcd99113d6082e0807ecaf8808bf2843d6082cd908b1a684bcd9b19897f0000807ecaf82b0b0000419a00103d6082cf808b23d44800000c3d6082cf808b23c83d6082cd908b1a704bcd95c9"
+
+# Original radial sprite native boundary; CPU vertex construction is retained.
+[[midasm_hook]]
+address = 0x8276BD4C
+name = "SimpsonsNativeRadialConstants"
+registers = ["ctx", "base"]
+jump_address = 0x8276BD74
+evidence_hex = "38800001807ecaf84bccf65d38e0000138c00002807ecaf878e7ffe638a10080388000024bcd8fa1"
+
+# Original radial sprite native boundary; CPU vertex construction is retained.
+[[midasm_hook]]
+address = 0x8276BDA8
+name = "SimpsonsNativeRadialLock"
+registers = ["ctx", "base"]
+jump_address = 0x8276BDAC
+evidence_hex = "4bce06a9"
+
+# Original radial sprite native boundary; CPU vertex construction is retained.
+[[midasm_hook]]
+address = 0x8276BE80
+name = "SimpsonsNativeRadialFinish"
+registers = ["ctx", "base"]
+jump_address = 0x8276BE94
+evidence_hex = "807ecaf84bce0a6d38800000807ecaf84bccf521"
+
+# Original mode-zero billboard; preserve matrix kernel and CPU quad stores.
+[[midasm_hook]]
+address = 0x8275F228
+name = "SimpsonsNativeBillboardBegin"
+registers = ["ctx", "base"]
+jump_address = 0x8275F2F8
+evidence_hex = "4bff2761817f01183f4082d1816b00d0807acaf8556427fe4bcdb4c9817f0118807acaf8816b00d47d6b58f8556407fe4bcdb471817f0118816b00d0556a06302f0a0000419a000c3960000048000018556b05ee7d6b0034556bdffe696b0001396b0001807acaf82b0b00013ca000013880000041980028419a001c2b0b00034198000c60a500014800001860a501864800001060a507064800000860a501064bcdd8b9817f011838800001807acaf88bcb01064bcdac8538800004807acaf84bcdb1b97fc4f378807acaf84bcdb145"
+
+# Original mode-zero billboard; preserve matrix kernel and CPU quad stores.
+[[midasm_hook]]
+address = 0x82751934
+name = "SimpsonsNativeBillboardMatrix"
+registers = ["ctx", "base"]
+jump_address = 0x82751938
+evidence_hex = "4bcf33dd"
+
+# Original mode-zero billboard; preserve matrix kernel and CPU quad stores.
+[[midasm_hook]]
+address = 0x8275F494
+name = "SimpsonsNativeBillboardColor"
+registers = ["ctx", "base"]
+jump_address = 0x8275F4C8
+evidence_hex = "817acaf8c001008038610070d00b07c0c0010084d00b07c4c0010088d00b07c8c001008cd00b07cce94b00007d4acb78f94b0000"
+
+# Original mode-zero billboard; preserve matrix kernel and CPU quad stores.
+[[midasm_hook]]
+address = 0x8275F4E8
+name = "SimpsonsNativeBillboardSoft"
+registers = ["ctx", "base"]
+jump_address = 0x8275F4EC
+evidence_hex = "4bffd6e9"
+
+# Original mode-zero billboard; preserve matrix kernel and CPU quad stores.
+[[midasm_hook]]
+address = 0x8275F7EC
+name = "SimpsonsNativeBillboardFinish"
+registers = ["ctx", "base"]
+evidence_hex = "a17f00c83b7b00017d6b0734"
+
+# Original view-space beam/ribbon consumer. Retain the point transforms, segment
+# loop, perpendicular width/UV calculations and all four CPU vertex stores.
+[[midasm_hook]]
+address = 0x8277B284
+name = "SimpsonsNativeBeamEntry"
+registers = ["ctx", "base"]
+evidence_hex = "3d6082e038810080806bf098"
+
+[[midasm_hook]]
+address = 0x8277B328
+name = "SimpsonsNativeBeamBegin"
+registers = ["ctx", "base"]
+jump_address = 0x8277B3EC
+evidence_hex = "4bfd66613d6082e03fe082d1396bea2038e0000138c0000478e7ffe638ab0080807fcaf8388000004bcc99c1815c00a4817fcaf83980000138800000798cf7e6c00a0074d0010060c1aa0078d1a10064c1aa007cd1a10068d3e1006cd00b07c0c0010064d00b07c4c0010068d00b07c8c001006cd00b07cce94b00007d4a6378f94b0000807fcaf84bcbf3593ca00001807fcaf83880000060a501064bcc17bd38800001807fcaf84bcbeb9138800004807fcaf84bcbf0c538800008807fcaf84bcbf051"
+
+[[midasm_hook]]
+address = 0x8277B20C
+name = "SimpsonsNativeBeamFinish"
+registers = ["ctx", "base"]
+evidence_hex = "382100a08181fff87d8803a6"
+
+# Endpoint beams share the qualified immediate shader. Keep original camera
+# vectors, cross/normalization, optional color callback and CPU vertex stores.
+[[midasm_hook]]
+address = 0x8286D754
+name = "SimpsonsNativeEndpointBeamBegin"
+registers = ["ctx", "base"]
+jump_address = 0x8286D7A0
+evidence_hex = "4bee42353fc082d138800000807ecaf84bbccfa53ca00001807ecaf83880000060a501064bbcf40938800001807ecaf84bbcc7dd38800004807ecaf84bbccd1138800001807ecaf84bbccc9d"
+
+[[midasm_hook]]
+address = 0x8286D80C
+name = "SimpsonsNativeEndpointBeamColor"
+registers = ["ctx", "base"]
+jump_address = 0x8286D854
+evidence_hex = "817ecaf8c00100803d40821639800001388aa470798cf7e6d00b07c038a00000c001008438610060d00b07c4c0010088d00b07c8c001008cd00b07cce94b00007d4a6378f94b0000"
+
+[[midasm_hook]]
+address = 0x8286D9AC
+name = "SimpsonsNativeEndpointBeamFinish"
+registers = ["ctx", "base"]
+evidence_hex = "386100604bee43f138210110"
+
+# Remaining original mode-zero consumers: six-face queue, eight-vertex ribbon,
+# and seven-vertex strip. Preserve all original geometry and branch decisions.
+[[midasm_hook]]
+address = 0x823CB2A0
+name = "SimpsonsNativeImmediateBoxEntry"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6486711193981ffc0"
+
+[[midasm_hook]]
+address = 0x823CB2D8
+name = "SimpsonsNativeImmediateBoxBegin"
+registers = ["ctx", "base"]
+jump_address = 0x823CB2F0
+evidence_hex = "3f8082d13ca000013880000060a50001807ccaf848071895"
+
+[[midasm_hook]]
+address = 0x823CB348
+name = "SimpsonsNativeImmediateBoxTexture"
+registers = ["ctx", "base"]
+jump_address = 0x823CB34C
+evidence_hex = "48386641"
+
+[[midasm_hook]]
+address = 0x823CB370
+name = "SimpsonsNativeImmediateBoxColor"
+registers = ["ctx", "base"]
+jump_address = 0x823CB398
+evidence_hex = "d32b07c0c0010264d00b07c4c0010268d00b07c8c001026cd00b07cce94b00007d4adb78f94b0000"
+
+[[midasm_hook]]
+address = 0x823CB288
+name = "SimpsonsNativeImmediateBoxFinish"
+registers = ["ctx", "base"]
+evidence_hex = "382100708181fff87d8803a6"
+
+[[midasm_hook]]
+address = 0x82776534
+name = "SimpsonsNativeImmediateEightBegin"
+registers = ["ctx", "base"]
+jump_address = 0x827765D4
+evidence_hex = "4bfdb455815f00a03fc082d13980000138800000798cf7e6c00a0020817ecaf8d00100b0c1aa0024d1a100b4c1aa0028d1a100b8d28100bcd00b07c0c00100b4d00b07c4c00100b8d00b07c8c00100bcd00b07cce94b00007d4a6378f94b0000807ecaf84bcc4171817f00a038610050896b00127d6407744bc5495538800001807ecaf84bcc39a938800004807ecaf84bcc3edd38800001807ecaf84bcc3e69"
+
+[[midasm_hook]]
+address = 0x82776874
+name = "SimpsonsNativeImmediateEightFinish"
+registers = ["ctx", "base"]
+evidence_hex = "386100504bfdb529382101d0"
+
+[[midasm_hook]]
+address = 0x82779A94
+name = "SimpsonsNativeImmediateSevenBegin"
+registers = ["ctx", "base"]
+jump_address = 0x82779A98
+evidence_hex = "4bfd7ef5"
+
+[[midasm_hook]]
+address = 0x82779AD4
+name = "SimpsonsNativeImmediateSevenColor"
+registers = ["ctx", "base"]
+jump_address = 0x82779B90
+evidence_hex = "d00b07c0c00100a4d00b07c4c00100a8d00b07c8c00100acd00b07cce94b00007d4a8378f94b00008073caf84bcc0c09817b00b48073caf8816b003c556be8fe7d6b58f8556407fe4bcc0bad817b00b48073caf83ca0000138800000816b003c556be7fe2b0b000141980028419a001c2b0b00034198000c60a500014800001860a501864800001060a507064800000860a501064bcc3019388000018073caf84bcc03ed388000048073caf84bcc0921388000088073caf84bcc08ad"
+
+[[midasm_hook]]
+address = 0x827790D4
+name = "SimpsonsNativeImmediateSevenFinish"
+registers = ["ctx", "base"]
+evidence_hex = "382100608181fff87d8803a6"
+
+# Preserve original mono world assembly and activation; observe its exact packet lifetime.
+[[midasm_hook]]
+address = 0x8273A878
+name = "SimpsonsNativeMonoWorldEntry"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbc1ffe8"
+
+# Skinned mono masks use the original shared mesh loop and bone assembly.
+# Replace only its FX-owned matrix endpoint and native indexed draw.
+[[midasm_hook]]
+address = 0x82700318
+name = "SimpsonsNativeMonoSkinEntry"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a64833c0959421ff50"
+
+[[midasm_hook]]
+address = 0x827003A0
+name = "SimpsonsNativeMonoSkinBones"
+registers = ["ctx", "base"]
+jump_address = 0x827003A4
+evidence_hex = "4bffccc138a00001809e00b8"
+
+# Original>64 composed palettes select an authored<=64 group for each submesh.
+[[midasm_hook]]
+address = 0x82700440
+name = "SimpsonsNativeMonoSkinGroupBones"
+registers = ["ctx", "base"]
+jump_address = 0x82700444
+evidence_hex = "4bffcc2138a00001809e00b8"
+
+[[midasm_hook]]
+address = 0x82700470
+name = "SimpsonsNativeMonoSkinDraw"
+registers = ["ctx", "base"]
+jump_address = 0x82700474
+evidence_hex = "4bd4cef13b5affff3bbd0024"
+
+[[midasm_hook]]
+address = 0x8270048C
+name = "SimpsonsNativeMonoSkinComplete"
+registers = ["ctx", "base"]
+evidence_hex = "38600000382100b04833bf6c"
+
+# Original 82773D40 post filter: retain CPU branches, rectangle stores,
+# constant calculations and target-stack push/pop. Only exact native endpoints.
+
+[[midasm_hook]]
+address = 0x82773E34
+name = "SimpsonsNativePost82773E34"
+registers = ["ctx", "base"]
+jump_address = 0x82773E38
+evidence_hex = "4bce173d"
+
+[[midasm_hook]]
+address = 0x82773F44
+name = "SimpsonsNativePost82773F44"
+registers = ["ctx", "base"]
+jump_address = 0x82773F48
+evidence_hex = "4bce162d"
+
+[[midasm_hook]]
+address = 0x82774000
+name = "SimpsonsNativePost82774000"
+registers = ["ctx", "base"]
+jump_address = 0x82774004
+evidence_hex = "4bce1571"
+
+[[midasm_hook]]
+address = 0x827740C4
+name = "SimpsonsNativePost827740C4"
+registers = ["ctx", "base"]
+jump_address = 0x827740C8
+evidence_hex = "4bce14ad"
+
+[[midasm_hook]]
+address = 0x82771E58
+name = "SimpsonsNativePost82771E58"
+registers = ["ctx", "base"]
+jump_address = 0x82771E5C
+evidence_hex = "4bcca9e1"
+
+[[midasm_hook]]
+address = 0x82771E74
+name = "SimpsonsNativePost82771E74"
+registers = ["ctx", "base"]
+jump_address = 0x82771E78
+evidence_hex = "4bccc05d"
+
+[[midasm_hook]]
+address = 0x82771E80
+name = "SimpsonsNativePost82771E80"
+registers = ["ctx", "base"]
+jump_address = 0x82771E84
+evidence_hex = "4bcca6d9"
+
+[[midasm_hook]]
+address = 0x82771EA4
+name = "SimpsonsNativePost82771EA4"
+registers = ["ctx", "base"]
+jump_address = 0x82771EA8
+evidence_hex = "4bccb255"
+
+[[midasm_hook]]
+address = 0x82771F58
+name = "SimpsonsNativePost82771F58"
+registers = ["ctx", "base"]
+jump_address = 0x82771F5C
+evidence_hex = "4bccbf79"
+
+[[midasm_hook]]
+address = 0x82771F64
+name = "SimpsonsNativePost82771F64"
+registers = ["ctx", "base"]
+jump_address = 0x82771F68
+evidence_hex = "4bcca5f5"
+
+[[midasm_hook]]
+address = 0x82771F88
+name = "SimpsonsNativePost82771F88"
+registers = ["ctx", "base"]
+jump_address = 0x82771F8C
+evidence_hex = "4bccb171"
+
+[[midasm_hook]]
+address = 0x82771F98
+name = "SimpsonsNativePost82771F98"
+registers = ["ctx", "base"]
+jump_address = 0x82771F9C
+evidence_hex = "4bccf771"
+
+[[midasm_hook]]
+address = 0x82773E50
+name = "SimpsonsNativePost82773E50"
+registers = ["ctx", "base"]
+jump_address = 0x82773E54
+evidence_hex = "4bccca91"
+
+[[midasm_hook]]
+address = 0x82773F6C
+name = "SimpsonsNativePost82773F6C"
+registers = ["ctx", "base"]
+jump_address = 0x82773F70
+evidence_hex = "4bccc975"
+
+[[midasm_hook]]
+address = 0x82774014
+name = "SimpsonsNativePost82774014"
+registers = ["ctx", "base"]
+jump_address = 0x82774018
+evidence_hex = "4bccc8cd"
+
+[[midasm_hook]]
+address = 0x82773EE4
+name = "SimpsonsNativePost82773EE4"
+registers = ["ctx", "base"]
+jump_address = 0x82773EE8
+evidence_hex = "4bcd1695"
+
+[[midasm_hook]]
+address = 0x82773EFC
+name = "SimpsonsNativePost82773EFC"
+registers = ["ctx", "base"]
+jump_address = 0x82773F00
+evidence_hex = "4bcd137d"
+
+[[midasm_hook]]
+address = 0x82773F80
+name = "SimpsonsNativePost82773F80"
+registers = ["ctx", "base"]
+jump_address = 0x82773F84
+evidence_hex = "4bcd12f9"
+
+[[midasm_hook]]
+address = 0x82774034
+name = "SimpsonsNativePost82774034"
+registers = ["ctx", "base"]
+jump_address = 0x82774038
+evidence_hex = "4bcd1245"
+
+[[midasm_hook]]
+address = 0x82774144
+name = "SimpsonsNativePost82774144"
+registers = ["ctx", "base"]
+jump_address = 0x82774148
+evidence_hex = "4bcd1135"
+
+[[midasm_hook]]
+address = 0x82773F10
+name = "SimpsonsNativePost82773F10"
+registers = ["ctx", "base"]
+jump_address = 0x82773F14
+evidence_hex = "4bcd1889"
+
+[[midasm_hook]]
+address = 0x82773FA8
+name = "SimpsonsNativePost82773FA8"
+registers = ["ctx", "base"]
+jump_address = 0x82773FD0
+evidence_hex = "d00b1780c0010074d00b1784c0010078d00b1788c001007cd00b178ce94b00087d4ad378f94b0008"
+
+[[midasm_hook]]
+address = 0x8277406C
+name = "SimpsonsNativePost8277406C"
+registers = ["ctx", "base"]
+jump_address = 0x82774094
+evidence_hex = "d1ab1810c0010084d00b1814c0010088d00b1818c001008cd00b181ce94b00087d4a6378f94b0008"
+
+[[midasm_hook]]
+address = 0x82774174
+name = "SimpsonsNativePost82774174"
+registers = ["ctx", "base"]
+jump_address = 0x827741A4
+evidence_hex = "817fcaf8c00100a0d00b1780c00100a4d00b1784c00100a8d00b1788c00100acd00b178ce94b00087d4ad378f94b0008"
+
+[[midasm_hook]]
+address = 0x827741C8
+name = "SimpsonsNativePost827741C8"
+registers = ["ctx", "base"]
+jump_address = 0x827741F0
+evidence_hex = "d00b1790c0010094d00b1794c0010098d00b1798c001009cd00b179ce94b00087d4ad378f94b0008"
+
+[[midasm_hook]]
+address = 0x82773E74
+name = "SimpsonsNativePost82773E74"
+registers = ["ctx", "base"]
+jump_address = 0x82773EB4
+evidence_hex = "817fcaf83940000138600000812b048051495cea912b0480e92b001865298000f92b0018817fcaf8812b048051497424912b0480e94b0018654a8000f94b0018"
+
+[[midasm_hook]]
+address = 0x82773CF4
+name = "SimpsonsNativePost82773CF4"
+registers = ["ctx", "base"]
+jump_address = 0x82773CF8
+evidence_hex = "4bcd875d"
+
+[[midasm_hook]]
+address = 0x82773D24
+name = "SimpsonsNativePost82773D24"
+registers = ["ctx", "base"]
+jump_address = 0x82773D28
+evidence_hex = "4bcd8bcd"
+
+[[midasm_hook]]
+address = 0x82774218
+name = "SimpsonsNativePost82774218"
+registers = ["ctx", "base"]
+evidence_hex = "38210120cbc1ffa0cbe1ffa8"
+
+# Exact post scalar/sampler/packed setters publish native effective state.
+
+[[midasm_hook]]
+address = 0x82773D94
+name = "SimpsonsNativePost82773D94"
+registers = ["ctx", "base"]
+jump_address = 0x82773D98
+evidence_hex = "4bcc6ecd"
+
+[[midasm_hook]]
+address = 0x82773DA0
+name = "SimpsonsNativePost82773DA0"
+registers = ["ctx", "base"]
+jump_address = 0x82773DA4
+evidence_hex = "4bcc6d01"
+
+[[midasm_hook]]
+address = 0x82773DAC
+name = "SimpsonsNativePost82773DAC"
+registers = ["ctx", "base"]
+jump_address = 0x82773DB0
+evidence_hex = "4bcc6dbd"
+
+[[midasm_hook]]
+address = 0x82773DCC
+name = "SimpsonsNativePost82773DCC"
+registers = ["ctx", "base"]
+jump_address = 0x82773DD0
+evidence_hex = "4bcc794d"
+
+[[midasm_hook]]
+address = 0x82773DD8
+name = "SimpsonsNativePost82773DD8"
+registers = ["ctx", "base"]
+jump_address = 0x82773DDC
+evidence_hex = "4bcc6129"
+
+[[midasm_hook]]
+address = 0x82773DE4
+name = "SimpsonsNativePost82773DE4"
+registers = ["ctx", "base"]
+jump_address = 0x82773DE8
+evidence_hex = "4bcc68e5"
+
+[[midasm_hook]]
+address = 0x82773DF0
+name = "SimpsonsNativePost82773DF0"
+registers = ["ctx", "base"]
+jump_address = 0x82773DF4
+evidence_hex = "4bcc6171"
+
+[[midasm_hook]]
+address = 0x82773E60
+name = "SimpsonsNativePost82773E60"
+registers = ["ctx", "base"]
+jump_address = 0x82773E64
+evidence_hex = "4bcc7be1"
+
+[[midasm_hook]]
+address = 0x82773E70
+name = "SimpsonsNativePost82773E70"
+registers = ["ctx", "base"]
+jump_address = 0x82773E74
+evidence_hex = "4bcc7d61"
+
+[[midasm_hook]]
+address = 0x82773ECC
+name = "SimpsonsNativePost82773ECC"
+registers = ["ctx", "base"]
+jump_address = 0x82773ED0
+evidence_hex = "4bcc8cb5"
+
+[[midasm_hook]]
+address = 0x82774130
+name = "SimpsonsNativePost82774130"
+registers = ["ctx", "base"]
+jump_address = 0x82774134
+evidence_hex = "4bcc8a51"
+
+[[midasm_hook]]
+address = 0x827741FC
+name = "SimpsonsNativePost827741FC"
+registers = ["ctx", "base"]
+jump_address = 0x82774200
+evidence_hex = "4bcc751d"
+
+[[midasm_hook]]
+address = 0x82774208
+name = "SimpsonsNativePost82774208"
+registers = ["ctx", "base"]
+jump_address = 0x8277420C
+evidence_hex = "4bcc5e09"
+
+[[midasm_hook]]
+address = 0x82774214
+name = "SimpsonsNativePost82774214"
+registers = ["ctx", "base"]
+jump_address = 0x82774218
+evidence_hex = "4bcc64b5"
+
+# Gameplay flat color overlay: keep original alpha/query prefix and epilogue.
+[[midasm_hook]]
+address = 0x827560A4
+name = "SimpsonsNativeGameplayOverlay"
+registers = ["ctx", "base"]
+jump_address = 0x8275625C
+evidence_hex = "38800001807fcaf84bce530538800001807fcaf84bce566138800000807fcaf84bce3e3d38800000807fcaf84bce45f938800000807fcaf84bce3e853ca0000138800000807fcaf860a507064bce6a913d6082cf807fcaf8808b231c3d6082cd908b1a6c4bcef47157cb07fe807fcaf8394000012f0b0000795effe6419a00683d6082cf808b23043d6082cd908b1a704bcef1453d40821ec0010050817fcaf8d0010064c00ad0d8d0010068d001006cc0010054d0010060d00b1790c0010064d00b1794c0010068d00b1798c001006cd00b179ce94b00087d4af378f94b0008480000183d6082cf808b23103d6082cd908b1a704bcef0e1817fcaf8c01d000038c0000038a000003880000038600000d00b1780c01d0004d00b1784c01d0008d00b1788c01d000cd00b178ce94b00087d4af378f94b00084bc989fd809c01103d6082cd807fcaf8908b1a684bcef5a938c00008807fcaf838a00003388000084bcf624d3d60821ec00bd1103d608200d0030000d0030004d003000cd0030010c1ab0bb0d1a30008d1a30014807fcaf84bcf66bd38800000807fcaf84bce3dd138800001807fcaf84bce447d38800000807fcaf84bce5159"
+
+# Original post-filter alpha preparation: preserve its CPU flag store and epilogue.
+
+[[midasm_hook]]
+address = 0x82773B44
+name = "SimpsonsNativePostPrepare82773B44"
+registers = ["ctx", "base"]
+jump_address = 0x82773C68
+evidence_hex = "38800008807fcaf84bcc711538800000807fcaf84bcc6b7138800000807fcaf84bcc6ba538800000807fcaf84bcc639138800000807fcaf84bcc63e538800000807fcaf84bcc64893d6082cf807fcaf8808b231c3d6082cd908b1a6c4bcd19d93d6082cf807fcaf8808b23103d6082cd908b1a704bcd16c13d6082e0807fcaf8396bea20808b01103d6082cd908b1a684bcd1bc53d40821e817fcaf83980000138c00008798cffe638a00003c00ad0d838800008d0010054d0010058d001005cd0010050d00b1780c0010054d00b1784c0010058d00b1788c001005cd00b178ce94b00087d4a6378f94b0008807fcaf84bcd881d3d60821ec00bd1103d608200d0030000d0030004d003000cd0030010c1ab0bb0d1a30008d1a30014807fcaf84bcd8c8d"
+
+[[midasm_hook]]
+address = 0x82773C80
+name = "SimpsonsNativePostPrepare82773C80"
+registers = ["ctx", "base"]
+jump_address = 0x82773C84
+evidence_hex = "4bcc6a49"
+
+[[midasm_hook]]
+address = 0x82773C8C
+name = "SimpsonsNativePostPrepare82773C8C"
+registers = ["ctx", "base"]
+jump_address = 0x82773C90
+evidence_hex = "4bcc6a7d"
+
+[[midasm_hook]]
+address = 0x82773C98
+name = "SimpsonsNativePostPrepare82773C98"
+registers = ["ctx", "base"]
+jump_address = 0x82773C9C
+evidence_hex = "4bcc6269"
+
+[[midasm_hook]]
+address = 0x82773CA8
+name = "SimpsonsNativePostPrepare82773CA8"
+registers = ["ctx", "base"]
+jump_address = 0x82773CAC
+evidence_hex = "4bcc6ec1"
+
+[[midasm_hook]]
+address = 0x82773CB4
+name = "SimpsonsNativePostPrepare82773CB4"
+registers = ["ctx", "base"]
+jump_address = 0x82773CB8
+evidence_hex = "4bcc6ded"
+
+# Ball Homer dash sprite: preserve original alpha, animated UVs and vertex stores.
+
+[[midasm_hook]]
+address = 0x82771998
+name = "SimpsonsNativeBallEffect82771998"
+registers = ["ctx", "base"]
+jump_address = 0x8277199C
+evidence_hex = "4bcd3379"
+
+[[midasm_hook]]
+address = 0x827719B4
+name = "SimpsonsNativeBallEffect827719B4"
+registers = ["ctx", "base"]
+jump_address = 0x827719B8
+evidence_hex = "4bcd335d"
+
+[[midasm_hook]]
+address = 0x82771AE0
+name = "SimpsonsNativeBallEffect82771AE0"
+registers = ["ctx", "base"]
+jump_address = 0x82771B28
+evidence_hex = "3fc082d1c00100603980000138c00000798cefe664c68000817ecaf838800000d00b0800c0010064d00b0804c0010068d00b0808c001006cd00b080ce94b00007d4a6378f94b0000"
+
+[[midasm_hook]]
+address = 0x82771CBC
+name = "SimpsonsNativeBallEffect82771CBC"
+registers = ["ctx", "base"]
+jump_address = 0x82771D08
+evidence_hex = "3d6082cf807ecaf8808b25b43d6082cd908b1a6c4bcd38a93d6082cf807ecaf8808b25843d6082cd908b1a704bcd35913d6082e0807ecaf8396bea20808b01143d6082cd908b1a684bcd3a95"
+
+[[midasm_hook]]
+address = 0x82771D18
+name = "SimpsonsNativeBallEffect82771D18"
+registers = ["ctx", "base"]
+jump_address = 0x82771D1C
+evidence_hex = "4bcda739"
+
+[[midasm_hook]]
+address = 0x82771D98
+name = "SimpsonsNativeBallEffect82771D98"
+registers = ["ctx", "base"]
+jump_address = 0x82771D9C
+evidence_hex = "4bcdab59"
+
+# Original Ball distortion continuation: preserve CPU filters, target stack,
+# rectangle stores and phase gating; translate exact graphics SDK endpoints.
+
+[[midasm_hook]]
+address = 0x827724E0
+name = "SimpsonsNativeDistortion827724E0"
+registers = ["ctx", "base"]
+jump_address = 0x827724E4
+evidence_hex = "7fe3fb78"
+
+[[midasm_hook]]
+address = 0x8277252C
+name = "SimpsonsNativeDistortion8277252C"
+registers = ["ctx", "base"]
+jump_address = 0x82772530
+evidence_hex = "382100a0"
+
+[[midasm_hook]]
+address = 0x827719C0
+name = "SimpsonsNativeDistortion827719C0"
+registers = ["ctx", "base"]
+jump_address = 0x827719C4
+evidence_hex = "4bcc9d59"
+
+[[midasm_hook]]
+address = 0x827719CC
+name = "SimpsonsNativeDistortion827719CC"
+registers = ["ctx", "base"]
+jump_address = 0x827719D0
+evidence_hex = "4bcc8535"
+
+[[midasm_hook]]
+address = 0x827719D8
+name = "SimpsonsNativeDistortion827719D8"
+registers = ["ctx", "base"]
+jump_address = 0x827719DC
+evidence_hex = "4bcc8cf1"
+
+[[midasm_hook]]
+address = 0x827719E8
+name = "SimpsonsNativeDistortion827719E8"
+registers = ["ctx", "base"]
+jump_address = 0x827719EC
+evidence_hex = "4bcca059"
+
+[[midasm_hook]]
+address = 0x827719F8
+name = "SimpsonsNativeDistortion827719F8"
+registers = ["ctx", "base"]
+jump_address = 0x827719FC
+evidence_hex = "4bcca1d9"
+
+[[midasm_hook]]
+address = 0x82771B88
+name = "SimpsonsNativeDistortion82771B88"
+registers = ["ctx", "base"]
+jump_address = 0x82771B8C
+evidence_hex = "4bccaff9"
+
+[[midasm_hook]]
+address = 0x82772024
+name = "SimpsonsNativeDistortion82772024"
+registers = ["ctx", "base"]
+jump_address = 0x82772028
+evidence_hex = "4bcc96f5"
+
+[[midasm_hook]]
+address = 0x82772030
+name = "SimpsonsNativeDistortion82772030"
+registers = ["ctx", "base"]
+jump_address = 0x82772034
+evidence_hex = "4bcc7ed1"
+
+[[midasm_hook]]
+address = 0x8277203C
+name = "SimpsonsNativeDistortion8277203C"
+registers = ["ctx", "base"]
+jump_address = 0x82772040
+evidence_hex = "4bcc868d"
+
+[[midasm_hook]]
+address = 0x82772048
+name = "SimpsonsNativeDistortion82772048"
+registers = ["ctx", "base"]
+jump_address = 0x8277204C
+evidence_hex = "4bcc86c1"
+
+[[midasm_hook]]
+address = 0x82772054
+name = "SimpsonsNativeDistortion82772054"
+registers = ["ctx", "base"]
+jump_address = 0x82772058
+evidence_hex = "4bcc7f0d"
+
+[[midasm_hook]]
+address = 0x82772068
+name = "SimpsonsNativeDistortion82772068"
+registers = ["ctx", "base"]
+jump_address = 0x8277206C
+evidence_hex = "4bccab19"
+
+[[midasm_hook]]
+address = 0x827720AC
+name = "SimpsonsNativeDistortion827720AC"
+registers = ["ctx", "base"]
+jump_address = 0x827720B0
+evidence_hex = "4bce34c5"
+
+[[midasm_hook]]
+address = 0x827720D8
+name = "SimpsonsNativeDistortion827720D8"
+registers = ["ctx", "base"]
+jump_address = 0x827720DC
+evidence_hex = "4bcce5c1"
+
+[[midasm_hook]]
+address = 0x827720FC
+name = "SimpsonsNativeDistortion827720FC"
+registers = ["ctx", "base"]
+jump_address = 0x82772100
+evidence_hex = "4bcd347d"
+
+[[midasm_hook]]
+address = 0x82772114
+name = "SimpsonsNativeDistortion82772114"
+registers = ["ctx", "base"]
+jump_address = 0x82772118
+evidence_hex = "4bcd3165"
+
+[[midasm_hook]]
+address = 0x82772130
+name = "SimpsonsNativeDistortion82772130"
+registers = ["ctx", "base"]
+jump_address = 0x82772134
+evidence_hex = "4bcce7b1"
+
+[[midasm_hook]]
+address = 0x82772140
+name = "SimpsonsNativeDistortion82772140"
+registers = ["ctx", "base"]
+jump_address = 0x82772144
+evidence_hex = "4bcc9901"
+
+[[midasm_hook]]
+address = 0x82772150
+name = "SimpsonsNativeDistortion82772150"
+registers = ["ctx", "base"]
+jump_address = 0x82772154
+evidence_hex = "4bcc9a81"
+
+[[midasm_hook]]
+address = 0x82772154
+name = "SimpsonsNativeDistortion82772154"
+registers = ["ctx", "base"]
+jump_address = 0x82772190
+evidence_hex = "817fcaf839400001812b048051495cea912b0480e92b001865298000f92b0018817fcaf8812b048051497424912b0480e94b0018654a8000f94b0018"
+
+[[midasm_hook]]
+address = 0x827721A0
+name = "SimpsonsNativeDistortion827721A0"
+registers = ["ctx", "base"]
+jump_address = 0x827721A4
+evidence_hex = "4bcd35f9"
+
+[[midasm_hook]]
+address = 0x827721D4
+name = "SimpsonsNativeDistortion827721D4"
+registers = ["ctx", "base"]
+jump_address = 0x827721FC
+evidence_hex = "d00b1810c0010074d00b1814c0010078d00b1818c001007cd00b181ce94b00087d4ae378f94b0008"
+
+[[midasm_hook]]
+address = 0x82772200
+name = "SimpsonsNativeDistortion82772200"
+registers = ["ctx", "base"]
+jump_address = 0x82772204
+evidence_hex = "4bcda251"
+
+[[midasm_hook]]
+address = 0x82772248
+name = "SimpsonsNativeDistortion82772248"
+registers = ["ctx", "base"]
+jump_address = 0x8277224C
+evidence_hex = "4bcda6a9"
+
+[[midasm_hook]]
+address = 0x82772278
+name = "SimpsonsNativeDistortion82772278"
+registers = ["ctx", "base"]
+jump_address = 0x8277227C
+evidence_hex = "4bce32f9"
+
+[[midasm_hook]]
+address = 0x82772284
+name = "SimpsonsNativeDistortion82772284"
+registers = ["ctx", "base"]
+jump_address = 0x82772288
+evidence_hex = "4bccf485"
+
+[[midasm_hook]]
+address = 0x82750C54
+name = "SimpsonsNativeDistortion82750C54"
+registers = ["ctx", "base"]
+jump_address = 0x82750C58
+evidence_hex = "4bcefa45"
+
+[[midasm_hook]]
+address = 0x827722B0
+name = "SimpsonsNativeDistortion827722B0"
+registers = ["ctx", "base"]
+jump_address = 0x827722B4
+evidence_hex = "4bcce631"
+
+[[midasm_hook]]
+address = 0x827722DC
+name = "SimpsonsNativeDistortion827722DC"
+registers = ["ctx", "base"]
+jump_address = 0x82772304
+evidence_hex = "d00b1810c0010084d00b1814c0010088d00b1818c001008cd00b181ce94b00087d4ae378f94b0008"
+
+[[midasm_hook]]
+address = 0x82772308
+name = "SimpsonsNativeDistortion82772308"
+registers = ["ctx", "base"]
+jump_address = 0x8277230C
+evidence_hex = "4bcda149"
+
+[[midasm_hook]]
+address = 0x82772340
+name = "SimpsonsNativeDistortion82772340"
+registers = ["ctx", "base"]
+jump_address = 0x82772344
+evidence_hex = "4bcda5b1"
+
+[[midasm_hook]]
+address = 0x82772370
+name = "SimpsonsNativeDistortion82772370"
+registers = ["ctx", "base"]
+jump_address = 0x82772374
+evidence_hex = "4bce3201"
+
+[[midasm_hook]]
+address = 0x82772380
+name = "SimpsonsNativeDistortion82772380"
+registers = ["ctx", "base"]
+jump_address = 0x82772384
+evidence_hex = "4bcd31f9"
+
+[[midasm_hook]]
+address = 0x82772394
+name = "SimpsonsNativeDistortion82772394"
+registers = ["ctx", "base"]
+jump_address = 0x82772398
+evidence_hex = "4bcd2ee5"
+
+[[midasm_hook]]
+address = 0x827723A8
+name = "SimpsonsNativeDistortion827723A8"
+registers = ["ctx", "base"]
+jump_address = 0x827723AC
+evidence_hex = "4bcce539"
+
+[[midasm_hook]]
+address = 0x827723B8
+name = "SimpsonsNativeDistortion827723B8"
+registers = ["ctx", "base"]
+jump_address = 0x827723BC
+evidence_hex = "4bcc9689"
+
+[[midasm_hook]]
+address = 0x827723C8
+name = "SimpsonsNativeDistortion827723C8"
+registers = ["ctx", "base"]
+jump_address = 0x827723CC
+evidence_hex = "4bcc9809"
+
+[[midasm_hook]]
+address = 0x827723DC
+name = "SimpsonsNativeDistortion827723DC"
+registers = ["ctx", "base"]
+jump_address = 0x827723E0
+evidence_hex = "4bcda075"
+
+[[midasm_hook]]
+address = 0x82772414
+name = "SimpsonsNativeDistortion82772414"
+registers = ["ctx", "base"]
+jump_address = 0x82772418
+evidence_hex = "4bcda4dd"
+
+[[midasm_hook]]
+address = 0x82772444
+name = "SimpsonsNativeDistortion82772444"
+registers = ["ctx", "base"]
+jump_address = 0x82772448
+evidence_hex = "4bce312d"
+
+[[midasm_hook]]
+address = 0x82772450
+name = "SimpsonsNativeDistortion82772450"
+registers = ["ctx", "base"]
+jump_address = 0x82772454
+evidence_hex = "4bccf2b9"
+
+[[midasm_hook]]
+address = 0x8277157C
+name = "SimpsonsNativeDistortion8277157C"
+registers = ["ctx", "base"]
+jump_address = 0x82771580
+evidence_hex = "4bcca19d"
+
+[[midasm_hook]]
+address = 0x82771588
+name = "SimpsonsNativeDistortion82771588"
+registers = ["ctx", "base"]
+jump_address = 0x8277158C
+evidence_hex = "4bcc8979"
+
+[[midasm_hook]]
+address = 0x82771594
+name = "SimpsonsNativeDistortion82771594"
+registers = ["ctx", "base"]
+jump_address = 0x82771598
+evidence_hex = "4bcc9135"
+
+[[midasm_hook]]
+address = 0x827715A0
+name = "SimpsonsNativeDistortion827715A0"
+registers = ["ctx", "base"]
+jump_address = 0x827715A4
+evidence_hex = "4bcc89c1"
+
+[[midasm_hook]]
+address = 0x827715B4
+name = "SimpsonsNativeDistortion827715B4"
+registers = ["ctx", "base"]
+jump_address = 0x827715B8
+evidence_hex = "4bccb5cd"
+
+[[midasm_hook]]
+address = 0x827715CC
+name = "SimpsonsNativeDistortion827715CC"
+registers = ["ctx", "base"]
+jump_address = 0x827715D0
+evidence_hex = "4bcd3fad"
+
+[[midasm_hook]]
+address = 0x827715E4
+name = "SimpsonsNativeDistortion827715E4"
+registers = ["ctx", "base"]
+jump_address = 0x827715E8
+evidence_hex = "4bcd3c95"
+
+[[midasm_hook]]
+address = 0x82771604
+name = "SimpsonsNativeDistortion82771604"
+registers = ["ctx", "base"]
+jump_address = 0x82771608
+evidence_hex = "4bccf2dd"
+
+[[midasm_hook]]
+address = 0x82771614
+name = "SimpsonsNativeDistortion82771614"
+registers = ["ctx", "base"]
+jump_address = 0x82771618
+evidence_hex = "4bcca42d"
+
+[[midasm_hook]]
+address = 0x82771624
+name = "SimpsonsNativeDistortion82771624"
+registers = ["ctx", "base"]
+jump_address = 0x82771628
+evidence_hex = "4bcca5ad"
+
+[[midasm_hook]]
+address = 0x82771638
+name = "SimpsonsNativeDistortion82771638"
+registers = ["ctx", "base"]
+jump_address = 0x8277163C
+evidence_hex = "4bcd4161"
+
+[[midasm_hook]]
+address = 0x8277166C
+name = "SimpsonsNativeDistortion8277166C"
+registers = ["ctx", "base"]
+jump_address = 0x82771694
+evidence_hex = "d3eb1780c0010054d00b1784c0010058d00b1788c001005cd00b178ce94b00087d4a6378f94b0008"
+
+[[midasm_hook]]
+address = 0x82771698
+name = "SimpsonsNativeDistortion82771698"
+registers = ["ctx", "base"]
+jump_address = 0x8277169C
+evidence_hex = "4bcdadb9"
+
+[[midasm_hook]]
+address = 0x827716E0
+name = "SimpsonsNativeDistortion827716E0"
+registers = ["ctx", "base"]
+jump_address = 0x827716E4
+evidence_hex = "4bcdb211"
+
+[[midasm_hook]]
+address = 0x82771718
+name = "SimpsonsNativeDistortion82771718"
+registers = ["ctx", "base"]
+jump_address = 0x8277171C
+evidence_hex = "4bcca001"
+
+[[midasm_hook]]
+address = 0x82771724
+name = "SimpsonsNativeDistortion82771724"
+registers = ["ctx", "base"]
+jump_address = 0x82771728
+evidence_hex = "4bcc87dd"
+
+[[midasm_hook]]
+address = 0x82771730
+name = "SimpsonsNativeDistortion82771730"
+registers = ["ctx", "base"]
+jump_address = 0x82771734
+evidence_hex = "4bcc8f99"
+
+[[midasm_hook]]
+address = 0x8277173C
+name = "SimpsonsNativeDistortion8277173C"
+registers = ["ctx", "base"]
+jump_address = 0x82771740
+evidence_hex = "4bcc8825"
+
+[[midasm_hook]]
+address = 0x82771750
+name = "SimpsonsNativeDistortion82771750"
+registers = ["ctx", "base"]
+jump_address = 0x82771754
+evidence_hex = "4bccb431"
+
+[[midasm_hook]]
+address = 0x82771768
+name = "SimpsonsNativeDistortion82771768"
+registers = ["ctx", "base"]
+jump_address = 0x8277176C
+evidence_hex = "4bcd3e11"
+
+[[midasm_hook]]
+address = 0x82771780
+name = "SimpsonsNativeDistortion82771780"
+registers = ["ctx", "base"]
+jump_address = 0x82771784
+evidence_hex = "4bcd3af9"
+
+[[midasm_hook]]
+address = 0x827717A0
+name = "SimpsonsNativeDistortion827717A0"
+registers = ["ctx", "base"]
+jump_address = 0x827717A4
+evidence_hex = "4bccf141"
+
+[[midasm_hook]]
+address = 0x827717B0
+name = "SimpsonsNativeDistortion827717B0"
+registers = ["ctx", "base"]
+jump_address = 0x827717B4
+evidence_hex = "4bcca291"
+
+[[midasm_hook]]
+address = 0x827717C0
+name = "SimpsonsNativeDistortion827717C0"
+registers = ["ctx", "base"]
+jump_address = 0x827717C4
+evidence_hex = "4bcca411"
+
+[[midasm_hook]]
+address = 0x827717C4
+name = "SimpsonsNativeDistortion827717C4"
+registers = ["ctx", "base"]
+jump_address = 0x82771808
+evidence_hex = "817fcaf83ba000013cc0400038800001814b049853aa5cea914b0498e94b0018654a4000f94b0018817fcaf8814b049853aa7424914b0498e94b0018654a4000f94b0018"
+
+[[midasm_hook]]
+address = 0x82771810
+name = "SimpsonsNativeDistortion82771810"
+registers = ["ctx", "base"]
+jump_address = 0x82771814
+evidence_hex = "4bccf0d1"
+
+[[midasm_hook]]
+address = 0x82771820
+name = "SimpsonsNativeDistortion82771820"
+registers = ["ctx", "base"]
+jump_address = 0x82771824
+evidence_hex = "4bcca221"
+
+[[midasm_hook]]
+address = 0x82771830
+name = "SimpsonsNativeDistortion82771830"
+registers = ["ctx", "base"]
+jump_address = 0x82771834
+evidence_hex = "4bcca3a1"
+
+[[midasm_hook]]
+address = 0x82771834
+name = "SimpsonsNativeDistortion82771834"
+registers = ["ctx", "base"]
+jump_address = 0x8277186C
+evidence_hex = "817fcaf8814b049853aa5cea914b0498e94b0018654a4000f94b0018817fcaf8814b049853aa7424914b0498e94b0018654a4000f94b0018"
+
+[[midasm_hook]]
+address = 0x8277187C
+name = "SimpsonsNativeDistortion8277187C"
+registers = ["ctx", "base"]
+jump_address = 0x82771880
+evidence_hex = "4bcd3f1d"
+
+[[midasm_hook]]
+address = 0x82771890
+name = "SimpsonsNativeDistortion82771890"
+registers = ["ctx", "base"]
+jump_address = 0x82771894
+evidence_hex = "4bcdabc1"
+
+[[midasm_hook]]
+address = 0x827718E0
+name = "SimpsonsNativeDistortion827718E0"
+registers = ["ctx", "base"]
+jump_address = 0x827718E4
+evidence_hex = "4bcdb011"
+
+[[midasm_hook]]
+address = 0x82772510
+name = "SimpsonsNativeDistortion82772510"
+registers = ["ctx", "base"]
+jump_address = 0x82772514
+evidence_hex = "4bcc7b01"
+
+[[midasm_hook]]
+address = 0x8277251C
+name = "SimpsonsNativeDistortion8277251C"
+registers = ["ctx", "base"]
+jump_address = 0x82772520
+evidence_hex = "4bcc81ad"
+
+[[midasm_hook]]
+address = 0x82772528
+name = "SimpsonsNativeDistortion82772528"
+registers = ["ctx", "base"]
+jump_address = 0x8277252C
+evidence_hex = "4bcc81e1"
+
+# Original 82754288/82754C90/82755508/8276C930/8276FE60 screen effects, the
+# 82756268 letterbox and the 82755FD0 overlay query prefix:
+# generated by tools/generate_screen_effect_sites.py. SDK calls and console
+# device loads become bounded native endpoints; all CPU math stays original.
+
+[[midasm_hook]]
+address = 0x82754384
+name = "SimpsonsNativeScreenEffect82754384"
+registers = ["ctx", "base"]
+jump_address = 0x82754388
+evidence_hex = "4bce7395"
+
+[[midasm_hook]]
+address = 0x827543BC
+name = "SimpsonsNativeScreenEffect827543BC"
+registers = ["ctx", "base"]
+jump_address = 0x827543C0
+evidence_hex = "4bd011b5"
+
+[[midasm_hook]]
+address = 0x827543C8
+name = "SimpsonsNativeScreenEffect827543C8"
+registers = ["ctx", "base"]
+jump_address = 0x827543CC
+evidence_hex = "4bce5b39"
+
+[[midasm_hook]]
+address = 0x827543D4
+name = "SimpsonsNativeScreenEffect827543D4"
+registers = ["ctx", "base"]
+jump_address = 0x827543D8
+evidence_hex = "4bce62f5"
+
+[[midasm_hook]]
+address = 0x827543E0
+name = "SimpsonsNativeScreenEffect827543E0"
+registers = ["ctx", "base"]
+jump_address = 0x827543E4
+evidence_hex = "4bce5b81"
+
+[[midasm_hook]]
+address = 0x827543F4
+name = "SimpsonsNativeScreenEffect827543F4"
+registers = ["ctx", "base"]
+jump_address = 0x827543F8
+evidence_hex = "4bce878d"
+
+[[midasm_hook]]
+address = 0x8275440C
+name = "SimpsonsNativeScreenEffect8275440C"
+registers = ["ctx", "base"]
+jump_address = 0x82754410
+evidence_hex = "4bcf116d"
+
+[[midasm_hook]]
+address = 0x82754424
+name = "SimpsonsNativeScreenEffect82754424"
+registers = ["ctx", "base"]
+jump_address = 0x82754428
+evidence_hex = "4bcf0e55"
+
+[[midasm_hook]]
+address = 0x8275443C
+name = "SimpsonsNativeScreenEffect8275443C"
+registers = ["ctx", "base"]
+jump_address = 0x82754440
+evidence_hex = "4bcec4a5"
+
+[[midasm_hook]]
+address = 0x8275444C
+name = "SimpsonsNativeScreenEffect8275444C"
+registers = ["ctx", "base"]
+jump_address = 0x82754450
+evidence_hex = "4bce75f5"
+
+[[midasm_hook]]
+address = 0x8275445C
+name = "SimpsonsNativeScreenEffect8275445C"
+registers = ["ctx", "base"]
+jump_address = 0x82754460
+evidence_hex = "4bce7775"
+
+[[midasm_hook]]
+address = 0x82754460
+name = "SimpsonsNativeScreenEffect82754460"
+registers = ["ctx", "base"]
+jump_address = 0x82754464
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x82754484
+name = "SimpsonsNativeScreenEffect82754484"
+registers = ["ctx", "base"]
+jump_address = 0x82754488
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x827544A8
+name = "SimpsonsNativeScreenEffect827544A8"
+registers = ["ctx", "base"]
+jump_address = 0x827544AC
+evidence_hex = "4bcec439"
+
+[[midasm_hook]]
+address = 0x827544B8
+name = "SimpsonsNativeScreenEffect827544B8"
+registers = ["ctx", "base"]
+jump_address = 0x827544BC
+evidence_hex = "4bce7589"
+
+[[midasm_hook]]
+address = 0x827544C8
+name = "SimpsonsNativeScreenEffect827544C8"
+registers = ["ctx", "base"]
+jump_address = 0x827544CC
+evidence_hex = "4bce7709"
+
+[[midasm_hook]]
+address = 0x827544CC
+name = "SimpsonsNativeScreenEffect827544CC"
+registers = ["ctx", "base"]
+jump_address = 0x827544D0
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x827544E8
+name = "SimpsonsNativeScreenEffect827544E8"
+registers = ["ctx", "base"]
+jump_address = 0x827544EC
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x82754514
+name = "SimpsonsNativeScreenEffect82754514"
+registers = ["ctx", "base"]
+jump_address = 0x82754518
+evidence_hex = "4bcf1285"
+
+[[midasm_hook]]
+address = 0x82754518
+name = "SimpsonsNativeScreenEffect82754518"
+registers = ["ctx", "base"]
+jump_address = 0x8275451C
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x8275458C
+name = "SimpsonsNativeScreenEffect8275458C"
+registers = ["ctx", "base"]
+jump_address = 0x82754590
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x827545DC
+name = "SimpsonsNativeScreenEffect827545DC"
+registers = ["ctx", "base"]
+jump_address = 0x827545E0
+evidence_hex = "4bcf7e75"
+
+[[midasm_hook]]
+address = 0x82754614
+name = "SimpsonsNativeScreenEffect82754614"
+registers = ["ctx", "base"]
+jump_address = 0x82754618
+evidence_hex = "4bcf82dd"
+
+[[midasm_hook]]
+address = 0x82754620
+name = "SimpsonsNativeScreenEffect82754620"
+registers = ["ctx", "base"]
+jump_address = 0x82754624
+evidence_hex = "4bce59f1"
+
+[[midasm_hook]]
+address = 0x8275462C
+name = "SimpsonsNativeScreenEffect8275462C"
+registers = ["ctx", "base"]
+jump_address = 0x82754630
+evidence_hex = "4bce609d"
+
+[[midasm_hook]]
+address = 0x82754D80
+name = "SimpsonsNativeScreenEffect82754D80"
+registers = ["ctx", "base"]
+jump_address = 0x82754D84
+evidence_hex = "4bce6631"
+
+[[midasm_hook]]
+address = 0x82754D8C
+name = "SimpsonsNativeScreenEffect82754D8C"
+registers = ["ctx", "base"]
+jump_address = 0x82754D90
+evidence_hex = "4bce698d"
+
+[[midasm_hook]]
+address = 0x82754D98
+name = "SimpsonsNativeScreenEffect82754D98"
+registers = ["ctx", "base"]
+jump_address = 0x82754D9C
+evidence_hex = "4bce5169"
+
+[[midasm_hook]]
+address = 0x82754DA4
+name = "SimpsonsNativeScreenEffect82754DA4"
+registers = ["ctx", "base"]
+jump_address = 0x82754DA8
+evidence_hex = "4bce5925"
+
+[[midasm_hook]]
+address = 0x82754DB0
+name = "SimpsonsNativeScreenEffect82754DB0"
+registers = ["ctx", "base"]
+jump_address = 0x82754DB4
+evidence_hex = "4bce51b1"
+
+[[midasm_hook]]
+address = 0x82754DC4
+name = "SimpsonsNativeScreenEffect82754DC4"
+registers = ["ctx", "base"]
+jump_address = 0x82754DC8
+evidence_hex = "4bce7dbd"
+
+[[midasm_hook]]
+address = 0x82754DDC
+name = "SimpsonsNativeScreenEffect82754DDC"
+registers = ["ctx", "base"]
+jump_address = 0x82754DE0
+evidence_hex = "4bcf079d"
+
+[[midasm_hook]]
+address = 0x82754DF4
+name = "SimpsonsNativeScreenEffect82754DF4"
+registers = ["ctx", "base"]
+jump_address = 0x82754DF8
+evidence_hex = "4bcf0485"
+
+[[midasm_hook]]
+address = 0x82754E0C
+name = "SimpsonsNativeScreenEffect82754E0C"
+registers = ["ctx", "base"]
+jump_address = 0x82754E10
+evidence_hex = "4bcebad5"
+
+[[midasm_hook]]
+address = 0x82754E1C
+name = "SimpsonsNativeScreenEffect82754E1C"
+registers = ["ctx", "base"]
+jump_address = 0x82754E20
+evidence_hex = "4bce6c25"
+
+[[midasm_hook]]
+address = 0x82754E2C
+name = "SimpsonsNativeScreenEffect82754E2C"
+registers = ["ctx", "base"]
+jump_address = 0x82754E30
+evidence_hex = "4bce6da5"
+
+[[midasm_hook]]
+address = 0x82754E30
+name = "SimpsonsNativeScreenEffect82754E30"
+registers = ["ctx", "base"]
+jump_address = 0x82754E34
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x82754E4C
+name = "SimpsonsNativeScreenEffect82754E4C"
+registers = ["ctx", "base"]
+jump_address = 0x82754E50
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x82754E78
+name = "SimpsonsNativeScreenEffect82754E78"
+registers = ["ctx", "base"]
+jump_address = 0x82754E7C
+evidence_hex = "4bcf0921"
+
+[[midasm_hook]]
+address = 0x82754E7C
+name = "SimpsonsNativeScreenEffect82754E7C"
+registers = ["ctx", "base"]
+jump_address = 0x82754E80
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x82754EC4
+name = "SimpsonsNativeScreenEffect82754EC4"
+registers = ["ctx", "base"]
+jump_address = 0x82754EC8
+evidence_hex = "4bcf758d"
+
+[[midasm_hook]]
+address = 0x82754EF4
+name = "SimpsonsNativeScreenEffect82754EF4"
+registers = ["ctx", "base"]
+jump_address = 0x82754EF8
+evidence_hex = "4bcf79fd"
+
+[[midasm_hook]]
+address = 0x82754F00
+name = "SimpsonsNativeScreenEffect82754F00"
+registers = ["ctx", "base"]
+jump_address = 0x82754F04
+evidence_hex = "4bce5111"
+
+[[midasm_hook]]
+address = 0x82754F0C
+name = "SimpsonsNativeScreenEffect82754F0C"
+registers = ["ctx", "base"]
+jump_address = 0x82754F10
+evidence_hex = "4bce57bd"
+
+[[midasm_hook]]
+address = 0x82754F18
+name = "SimpsonsNativeScreenEffect82754F18"
+registers = ["ctx", "base"]
+jump_address = 0x82754F1C
+evidence_hex = "4bce6499"
+
+[[midasm_hook]]
+address = 0x82754F54
+name = "SimpsonsNativeScreenEffect82754F54"
+registers = ["ctx", "base"]
+jump_address = 0x82754F58
+evidence_hex = "4bd0061d"
+
+[[midasm_hook]]
+address = 0x827555B4
+name = "SimpsonsNativeScreenEffect827555B4"
+registers = ["ctx", "base"]
+jump_address = 0x827555B8
+evidence_hex = "4bce6165"
+
+[[midasm_hook]]
+address = 0x827555F4
+name = "SimpsonsNativeScreenEffect827555F4"
+registers = ["ctx", "base"]
+jump_address = 0x827555F8
+evidence_hex = "4bcfff7d"
+
+[[midasm_hook]]
+address = 0x82755600
+name = "SimpsonsNativeScreenEffect82755600"
+registers = ["ctx", "base"]
+jump_address = 0x82755604
+evidence_hex = "4bce4901"
+
+[[midasm_hook]]
+address = 0x8275560C
+name = "SimpsonsNativeScreenEffect8275560C"
+registers = ["ctx", "base"]
+jump_address = 0x82755610
+evidence_hex = "4bce50bd"
+
+[[midasm_hook]]
+address = 0x82755618
+name = "SimpsonsNativeScreenEffect82755618"
+registers = ["ctx", "base"]
+jump_address = 0x8275561C
+evidence_hex = "4bce4949"
+
+[[midasm_hook]]
+address = 0x8275562C
+name = "SimpsonsNativeScreenEffect8275562C"
+registers = ["ctx", "base"]
+jump_address = 0x82755630
+evidence_hex = "4bce7555"
+
+[[midasm_hook]]
+address = 0x82755644
+name = "SimpsonsNativeScreenEffect82755644"
+registers = ["ctx", "base"]
+jump_address = 0x82755648
+evidence_hex = "4bceff35"
+
+[[midasm_hook]]
+address = 0x8275565C
+name = "SimpsonsNativeScreenEffect8275565C"
+registers = ["ctx", "base"]
+jump_address = 0x82755660
+evidence_hex = "4bcefc1d"
+
+[[midasm_hook]]
+address = 0x82755674
+name = "SimpsonsNativeScreenEffect82755674"
+registers = ["ctx", "base"]
+jump_address = 0x82755678
+evidence_hex = "4bceb26d"
+
+[[midasm_hook]]
+address = 0x82755684
+name = "SimpsonsNativeScreenEffect82755684"
+registers = ["ctx", "base"]
+jump_address = 0x82755688
+evidence_hex = "4bce63bd"
+
+[[midasm_hook]]
+address = 0x82755694
+name = "SimpsonsNativeScreenEffect82755694"
+registers = ["ctx", "base"]
+jump_address = 0x82755698
+evidence_hex = "4bce653d"
+
+[[midasm_hook]]
+address = 0x82755698
+name = "SimpsonsNativeScreenEffect82755698"
+registers = ["ctx", "base"]
+jump_address = 0x8275569C
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x827556BC
+name = "SimpsonsNativeScreenEffect827556BC"
+registers = ["ctx", "base"]
+jump_address = 0x827556C0
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x827556E0
+name = "SimpsonsNativeScreenEffect827556E0"
+registers = ["ctx", "base"]
+jump_address = 0x827556E4
+evidence_hex = "4bceb201"
+
+[[midasm_hook]]
+address = 0x827556F0
+name = "SimpsonsNativeScreenEffect827556F0"
+registers = ["ctx", "base"]
+jump_address = 0x827556F4
+evidence_hex = "4bce6351"
+
+[[midasm_hook]]
+address = 0x82755700
+name = "SimpsonsNativeScreenEffect82755700"
+registers = ["ctx", "base"]
+jump_address = 0x82755704
+evidence_hex = "4bce64d1"
+
+[[midasm_hook]]
+address = 0x82755704
+name = "SimpsonsNativeScreenEffect82755704"
+registers = ["ctx", "base"]
+jump_address = 0x82755708
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x82755730
+name = "SimpsonsNativeScreenEffect82755730"
+registers = ["ctx", "base"]
+jump_address = 0x82755734
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x82755750
+name = "SimpsonsNativeScreenEffect82755750"
+registers = ["ctx", "base"]
+jump_address = 0x82755754
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x827557AC
+name = "SimpsonsNativeScreenEffect827557AC"
+registers = ["ctx", "base"]
+jump_address = 0x827557B0
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x827557E0
+name = "SimpsonsNativeScreenEffect827557E0"
+registers = ["ctx", "base"]
+jump_address = 0x827557E4
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x82755840
+name = "SimpsonsNativeScreenEffect82755840"
+registers = ["ctx", "base"]
+jump_address = 0x82755844
+evidence_hex = "4bceff59"
+
+[[midasm_hook]]
+address = 0x82755854
+name = "SimpsonsNativeScreenEffect82755854"
+registers = ["ctx", "base"]
+jump_address = 0x82755858
+evidence_hex = "4bcf6bfd"
+
+[[midasm_hook]]
+address = 0x8275587C
+name = "SimpsonsNativeScreenEffect8275587C"
+registers = ["ctx", "base"]
+jump_address = 0x82755880
+evidence_hex = "4bcf7075"
+
+[[midasm_hook]]
+address = 0x82755888
+name = "SimpsonsNativeScreenEffect82755888"
+registers = ["ctx", "base"]
+jump_address = 0x8275588C
+evidence_hex = "4bce4e41"
+
+[[midasm_hook]]
+address = 0x82755894
+name = "SimpsonsNativeScreenEffect82755894"
+registers = ["ctx", "base"]
+jump_address = 0x82755898
+evidence_hex = "4bce477d"
+
+[[midasm_hook]]
+address = 0x8276CA80
+name = "SimpsonsNativeScreenEffect8276CA80"
+registers = ["ctx", "base"]
+jump_address = 0x8276CA84
+evidence_hex = "4bcce931"
+
+[[midasm_hook]]
+address = 0x8276CA8C
+name = "SimpsonsNativeScreenEffect8276CA8C"
+registers = ["ctx", "base"]
+jump_address = 0x8276CA90
+evidence_hex = "4bccec8d"
+
+[[midasm_hook]]
+address = 0x8276CA98
+name = "SimpsonsNativeScreenEffect8276CA98"
+registers = ["ctx", "base"]
+jump_address = 0x8276CA9C
+evidence_hex = "4bccd469"
+
+[[midasm_hook]]
+address = 0x8276CAA4
+name = "SimpsonsNativeScreenEffect8276CAA4"
+registers = ["ctx", "base"]
+jump_address = 0x8276CAA8
+evidence_hex = "4bccdc25"
+
+[[midasm_hook]]
+address = 0x8276CAB0
+name = "SimpsonsNativeScreenEffect8276CAB0"
+registers = ["ctx", "base"]
+jump_address = 0x8276CAB4
+evidence_hex = "4bccd4b1"
+
+[[midasm_hook]]
+address = 0x8276CAC4
+name = "SimpsonsNativeScreenEffect8276CAC4"
+registers = ["ctx", "base"]
+jump_address = 0x8276CAC8
+evidence_hex = "4bcd00bd"
+
+[[midasm_hook]]
+address = 0x8276CADC
+name = "SimpsonsNativeScreenEffect8276CADC"
+registers = ["ctx", "base"]
+jump_address = 0x8276CAE0
+evidence_hex = "4bcd8a9d"
+
+[[midasm_hook]]
+address = 0x8276CB20
+name = "SimpsonsNativeScreenEffect8276CB20"
+registers = ["ctx", "base"]
+jump_address = 0x8276CB24
+evidence_hex = "4bcd8759"
+
+[[midasm_hook]]
+address = 0x8276CB40
+name = "SimpsonsNativeScreenEffect8276CB40"
+registers = ["ctx", "base"]
+jump_address = 0x8276CB44
+evidence_hex = "4bcd3da1"
+
+[[midasm_hook]]
+address = 0x8276CB50
+name = "SimpsonsNativeScreenEffect8276CB50"
+registers = ["ctx", "base"]
+jump_address = 0x8276CB54
+evidence_hex = "4bcceef1"
+
+[[midasm_hook]]
+address = 0x8276CB60
+name = "SimpsonsNativeScreenEffect8276CB60"
+registers = ["ctx", "base"]
+jump_address = 0x8276CB64
+evidence_hex = "4bccf071"
+
+[[midasm_hook]]
+address = 0x8276CB64
+name = "SimpsonsNativeScreenEffect8276CB64"
+registers = ["ctx", "base"]
+jump_address = 0x8276CB68
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x8276CB80
+name = "SimpsonsNativeScreenEffect8276CB80"
+registers = ["ctx", "base"]
+jump_address = 0x8276CB84
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x8276CBAC
+name = "SimpsonsNativeScreenEffect8276CBAC"
+registers = ["ctx", "base"]
+jump_address = 0x8276CBB0
+evidence_hex = "4bcd8bed"
+
+[[midasm_hook]]
+address = 0x8276CBB0
+name = "SimpsonsNativeScreenEffect8276CBB0"
+registers = ["ctx", "base"]
+jump_address = 0x8276CBB4
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x8276CC50
+name = "SimpsonsNativeScreenEffect8276CC50"
+registers = ["ctx", "base"]
+jump_address = 0x8276CC54
+evidence_hex = "4bcd81a9"
+
+[[midasm_hook]]
+address = 0x8276CC64
+name = "SimpsonsNativeScreenEffect8276CC64"
+registers = ["ctx", "base"]
+jump_address = 0x8276CC68
+evidence_hex = "4bcdf7ed"
+
+[[midasm_hook]]
+address = 0x8276CC94
+name = "SimpsonsNativeScreenEffect8276CC94"
+registers = ["ctx", "base"]
+jump_address = 0x8276CC98
+evidence_hex = "4bcdfc5d"
+
+[[midasm_hook]]
+address = 0x8276CCA0
+name = "SimpsonsNativeScreenEffect8276CCA0"
+registers = ["ctx", "base"]
+jump_address = 0x8276CCA4
+evidence_hex = "4bccd371"
+
+[[midasm_hook]]
+address = 0x8276CCAC
+name = "SimpsonsNativeScreenEffect8276CCAC"
+registers = ["ctx", "base"]
+jump_address = 0x8276CCB0
+evidence_hex = "4bccda1d"
+
+[[midasm_hook]]
+address = 0x8276CCB8
+name = "SimpsonsNativeScreenEffect8276CCB8"
+registers = ["ctx", "base"]
+jump_address = 0x8276CCBC
+evidence_hex = "4bcce6f9"
+
+[[midasm_hook]]
+address = 0x8276FF8C
+name = "SimpsonsNativeScreenEffect8276FF8C"
+registers = ["ctx", "base"]
+jump_address = 0x8276FF90
+evidence_hex = "4bce55e5"
+
+[[midasm_hook]]
+address = 0x8276FF98
+name = "SimpsonsNativeScreenEffect8276FF98"
+registers = ["ctx", "base"]
+jump_address = 0x8276FF9C
+evidence_hex = "4bccb781"
+
+[[midasm_hook]]
+address = 0x8276FFA4
+name = "SimpsonsNativeScreenEffect8276FFA4"
+registers = ["ctx", "base"]
+jump_address = 0x8276FFA8
+evidence_hex = "4bcc9f5d"
+
+[[midasm_hook]]
+address = 0x8276FFB0
+name = "SimpsonsNativeScreenEffect8276FFB0"
+registers = ["ctx", "base"]
+jump_address = 0x8276FFB4
+evidence_hex = "4bcca719"
+
+[[midasm_hook]]
+address = 0x8276FFBC
+name = "SimpsonsNativeScreenEffect8276FFBC"
+registers = ["ctx", "base"]
+jump_address = 0x8276FFC0
+evidence_hex = "4bcca74d"
+
+[[midasm_hook]]
+address = 0x8276FFC8
+name = "SimpsonsNativeScreenEffect8276FFC8"
+registers = ["ctx", "base"]
+jump_address = 0x8276FFCC
+evidence_hex = "4bcc9f99"
+
+[[midasm_hook]]
+address = 0x8276FFDC
+name = "SimpsonsNativeScreenEffect8276FFDC"
+registers = ["ctx", "base"]
+jump_address = 0x8276FFE0
+evidence_hex = "4bcccba5"
+
+[[midasm_hook]]
+address = 0x8276FFF4
+name = "SimpsonsNativeScreenEffect8276FFF4"
+registers = ["ctx", "base"]
+jump_address = 0x8276FFF8
+evidence_hex = "4bcd5585"
+
+[[midasm_hook]]
+address = 0x8277000C
+name = "SimpsonsNativeScreenEffect8277000C"
+registers = ["ctx", "base"]
+jump_address = 0x82770010
+evidence_hex = "4bcd526d"
+
+[[midasm_hook]]
+address = 0x82770024
+name = "SimpsonsNativeScreenEffect82770024"
+registers = ["ctx", "base"]
+jump_address = 0x82770028
+evidence_hex = "4bcd08bd"
+
+[[midasm_hook]]
+address = 0x82770034
+name = "SimpsonsNativeScreenEffect82770034"
+registers = ["ctx", "base"]
+jump_address = 0x82770038
+evidence_hex = "4bccba0d"
+
+[[midasm_hook]]
+address = 0x82770044
+name = "SimpsonsNativeScreenEffect82770044"
+registers = ["ctx", "base"]
+jump_address = 0x82770048
+evidence_hex = "4bccbb8d"
+
+[[midasm_hook]]
+address = 0x82770048
+name = "SimpsonsNativeScreenEffect82770048"
+registers = ["ctx", "base"]
+jump_address = 0x8277004C
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x82770064
+name = "SimpsonsNativeScreenEffect82770064"
+registers = ["ctx", "base"]
+jump_address = 0x82770068
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x82770098
+name = "SimpsonsNativeScreenEffect82770098"
+registers = ["ctx", "base"]
+jump_address = 0x8277009C
+evidence_hex = "4bcd4d61"
+
+[[midasm_hook]]
+address = 0x827700AC
+name = "SimpsonsNativeScreenEffect827700AC"
+registers = ["ctx", "base"]
+jump_address = 0x827700B0
+evidence_hex = "4bcd56ed"
+
+[[midasm_hook]]
+address = 0x827700C0
+name = "SimpsonsNativeScreenEffect827700C0"
+registers = ["ctx", "base"]
+jump_address = 0x827700C4
+evidence_hex = "4bcdc391"
+
+[[midasm_hook]]
+address = 0x827700E8
+name = "SimpsonsNativeScreenEffect827700E8"
+registers = ["ctx", "base"]
+jump_address = 0x827700EC
+evidence_hex = "4bcdc809"
+
+[[midasm_hook]]
+address = 0x827700F4
+name = "SimpsonsNativeScreenEffect827700F4"
+registers = ["ctx", "base"]
+jump_address = 0x827700F8
+evidence_hex = "4bcc9f1d"
+
+[[midasm_hook]]
+address = 0x82770100
+name = "SimpsonsNativeScreenEffect82770100"
+registers = ["ctx", "base"]
+jump_address = 0x82770104
+evidence_hex = "4bcca5c9"
+
+[[midasm_hook]]
+address = 0x8277010C
+name = "SimpsonsNativeScreenEffect8277010C"
+registers = ["ctx", "base"]
+jump_address = 0x82770110
+evidence_hex = "4bcca5fd"
+
+[[midasm_hook]]
+address = 0x827562AC
+name = "SimpsonsNativeScreenEffect827562AC"
+registers = ["ctx", "base"]
+jump_address = 0x827562B0
+evidence_hex = "4bce546d"
+
+[[midasm_hook]]
+address = 0x827562B8
+name = "SimpsonsNativeScreenEffect827562B8"
+registers = ["ctx", "base"]
+jump_address = 0x827562BC
+evidence_hex = "4bce3c49"
+
+[[midasm_hook]]
+address = 0x827562C4
+name = "SimpsonsNativeScreenEffect827562C4"
+registers = ["ctx", "base"]
+jump_address = 0x827562C8
+evidence_hex = "4bce4405"
+
+[[midasm_hook]]
+address = 0x827562D0
+name = "SimpsonsNativeScreenEffect827562D0"
+registers = ["ctx", "base"]
+jump_address = 0x827562D4
+evidence_hex = "4bce3c91"
+
+[[midasm_hook]]
+address = 0x827562E4
+name = "SimpsonsNativeScreenEffect827562E4"
+registers = ["ctx", "base"]
+jump_address = 0x827562E8
+evidence_hex = "4bce689d"
+
+[[midasm_hook]]
+address = 0x827562FC
+name = "SimpsonsNativeScreenEffect827562FC"
+registers = ["ctx", "base"]
+jump_address = 0x82756300
+evidence_hex = "4bcef27d"
+
+[[midasm_hook]]
+address = 0x82756314
+name = "SimpsonsNativeScreenEffect82756314"
+registers = ["ctx", "base"]
+jump_address = 0x82756318
+evidence_hex = "4bceef65"
+
+[[midasm_hook]]
+address = 0x82756344
+name = "SimpsonsNativeScreenEffect82756344"
+registers = ["ctx", "base"]
+jump_address = 0x82756348
+evidence_hex = "4bcef455"
+
+[[midasm_hook]]
+address = 0x82756348
+name = "SimpsonsNativeScreenEffect82756348"
+registers = ["ctx", "base"]
+jump_address = 0x8275634C
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x827563C4
+name = "SimpsonsNativeScreenEffect827563C4"
+registers = ["ctx", "base"]
+jump_address = 0x827563C8
+evidence_hex = "4bcf608d"
+
+[[midasm_hook]]
+address = 0x82756400
+name = "SimpsonsNativeScreenEffect82756400"
+registers = ["ctx", "base"]
+jump_address = 0x82756404
+evidence_hex = "4bcf64f1"
+
+[[midasm_hook]]
+address = 0x82756414
+name = "SimpsonsNativeScreenEffect82756414"
+registers = ["ctx", "base"]
+jump_address = 0x82756418
+evidence_hex = "4bcf603d"
+
+[[midasm_hook]]
+address = 0x82756440
+name = "SimpsonsNativeScreenEffect82756440"
+registers = ["ctx", "base"]
+jump_address = 0x82756444
+evidence_hex = "4bcf64b1"
+
+[[midasm_hook]]
+address = 0x8275644C
+name = "SimpsonsNativeScreenEffect8275644C"
+registers = ["ctx", "base"]
+jump_address = 0x82756450
+evidence_hex = "4bce3bc5"
+
+[[midasm_hook]]
+address = 0x82756458
+name = "SimpsonsNativeScreenEffect82756458"
+registers = ["ctx", "base"]
+jump_address = 0x8275645C
+evidence_hex = "4bce4271"
+
+[[midasm_hook]]
+address = 0x82756044
+name = "SimpsonsNativeScreenEffect82756044"
+registers = ["ctx", "base"]
+jump_address = 0x82756048
+evidence_hex = "4bcea89d"
+
+[[midasm_hook]]
+address = 0x82756054
+name = "SimpsonsNativeScreenEffect82756054"
+registers = ["ctx", "base"]
+jump_address = 0x82756058
+evidence_hex = "4bce59ed"
+
+[[midasm_hook]]
+address = 0x82756064
+name = "SimpsonsNativeScreenEffect82756064"
+registers = ["ctx", "base"]
+jump_address = 0x82756068
+evidence_hex = "4bce5b6d"
+
+[[midasm_hook]]
+address = 0x82756068
+name = "SimpsonsNativeScreenEffect82756068"
+registers = ["ctx", "base"]
+jump_address = 0x8275606C
+evidence_hex = "817fcaf8"
+
+[[midasm_hook]]
+address = 0x82756088
+name = "SimpsonsNativeScreenEffect82756088"
+registers = ["ctx", "base"]
+jump_address = 0x8275608C
+evidence_hex = "817fcaf8"
+
+# Original 82770AF0 luma layers: preserve layer tests, normalization, strip
+# stores and resets; translate its SDK calls and four device-shadow blocks.
+
+[[midasm_hook]]
+address = 0x82770BF0
+name = "SimpsonsNativeLuma82770BF0"
+registers = ["ctx", "base"]
+jump_address = 0x82770BF4
+evidence_hex = "4bccab29"
+
+[[midasm_hook]]
+address = 0x82770C28
+name = "SimpsonsNativeLuma82770C28"
+registers = ["ctx", "base"]
+jump_address = 0x82770C2C
+evidence_hex = "4bce4949"
+
+[[midasm_hook]]
+address = 0x82770C34
+name = "SimpsonsNativeLuma82770C34"
+registers = ["ctx", "base"]
+jump_address = 0x82770C38
+evidence_hex = "4bcc92cd"
+
+[[midasm_hook]]
+address = 0x82770C40
+name = "SimpsonsNativeLuma82770C40"
+registers = ["ctx", "base"]
+jump_address = 0x82770C44
+evidence_hex = "4bcc9a89"
+
+[[midasm_hook]]
+address = 0x82770C4C
+name = "SimpsonsNativeLuma82770C4C"
+registers = ["ctx", "base"]
+jump_address = 0x82770C50
+evidence_hex = "4bcc9315"
+
+[[midasm_hook]]
+address = 0x82770C60
+name = "SimpsonsNativeLuma82770C60"
+registers = ["ctx", "base"]
+jump_address = 0x82770C64
+evidence_hex = "4bccbf21"
+
+[[midasm_hook]]
+address = 0x82770C78
+name = "SimpsonsNativeLuma82770C78"
+registers = ["ctx", "base"]
+jump_address = 0x82770C7C
+evidence_hex = "4bcd4901"
+
+[[midasm_hook]]
+address = 0x82770C90
+name = "SimpsonsNativeLuma82770C90"
+registers = ["ctx", "base"]
+jump_address = 0x82770C94
+evidence_hex = "4bcd45e9"
+
+[[midasm_hook]]
+address = 0x82770CA8
+name = "SimpsonsNativeLuma82770CA8"
+registers = ["ctx", "base"]
+jump_address = 0x82770CAC
+evidence_hex = "4bccfc39"
+
+[[midasm_hook]]
+address = 0x82770CB8
+name = "SimpsonsNativeLuma82770CB8"
+registers = ["ctx", "base"]
+jump_address = 0x82770CBC
+evidence_hex = "4bccad89"
+
+[[midasm_hook]]
+address = 0x82770CC8
+name = "SimpsonsNativeLuma82770CC8"
+registers = ["ctx", "base"]
+jump_address = 0x82770CCC
+evidence_hex = "4bccaf09"
+
+[[midasm_hook]]
+address = 0x82770CCC
+name = "SimpsonsNativeLuma82770CCC"
+registers = ["ctx", "base"]
+jump_address = 0x82770D04
+evidence_hex = "817fcaf8814b0480536a5cea914b0480e94b0018654a8000f94b0018817fcaf8814b0480536a7424914b0480e94b0018654a8000f94b0018"
+
+[[midasm_hook]]
+address = 0x82770D14
+name = "SimpsonsNativeLuma82770D14"
+registers = ["ctx", "base"]
+jump_address = 0x82770D18
+evidence_hex = "4bcd4a85"
+
+[[midasm_hook]]
+address = 0x82770D94
+name = "SimpsonsNativeLuma82770D94"
+registers = ["ctx", "base"]
+jump_address = 0x82770D98
+evidence_hex = "4bcd4065"
+
+[[midasm_hook]]
+address = 0x82770D9C
+name = "SimpsonsNativeLuma82770D9C"
+registers = ["ctx", "base"]
+jump_address = 0x82770DD4
+evidence_hex = "817fcaf8c01d000039400001795cffe6d00b1780c01d0004d00b1784c01d0008d00b1788c01d000cd00b178ce94b00087d4ae378f94b0008"
+
+[[midasm_hook]]
+address = 0x82770E40
+name = "SimpsonsNativeLuma82770E40"
+registers = ["ctx", "base"]
+jump_address = 0x82770E44
+evidence_hex = "4bcd3fb9"
+
+[[midasm_hook]]
+address = 0x82770E48
+name = "SimpsonsNativeLuma82770E48"
+registers = ["ctx", "base"]
+jump_address = 0x82770E78
+evidence_hex = "817fcaf8c01d0000d00b17a0c01d0004d00b17a4c01d0008d00b17a8c01d000cd00b17ace94b00087d4ae378f94b0008"
+
+[[midasm_hook]]
+address = 0x82770EA4
+name = "SimpsonsNativeLuma82770EA4"
+registers = ["ctx", "base"]
+jump_address = 0x82770EA8
+evidence_hex = "4bcd3f55"
+
+[[midasm_hook]]
+address = 0x82770EAC
+name = "SimpsonsNativeLuma82770EAC"
+registers = ["ctx", "base"]
+jump_address = 0x82770EE4
+evidence_hex = "817fcaf8c01d000039800001798cf7e6d00b17c0c01d0004d00b17c4c01d0008d00b17c8c01d000cd00b17cce94b00087d4a6378f94b0008"
+
+[[midasm_hook]]
+address = 0x82770EF4
+name = "SimpsonsNativeLuma82770EF4"
+registers = ["ctx", "base"]
+jump_address = 0x82770EF8
+evidence_hex = "4bcdb55d"
+
+[[midasm_hook]]
+address = 0x82770F24
+name = "SimpsonsNativeLuma82770F24"
+registers = ["ctx", "base"]
+jump_address = 0x82770F28
+evidence_hex = "4bcdb9cd"
+
+[[midasm_hook]]
+address = 0x82770F30
+name = "SimpsonsNativeLuma82770F30"
+registers = ["ctx", "base"]
+jump_address = 0x82770F34
+evidence_hex = "4bcc90e1"
+
+[[midasm_hook]]
+address = 0x82770F3C
+name = "SimpsonsNativeLuma82770F3C"
+registers = ["ctx", "base"]
+jump_address = 0x82770F40
+evidence_hex = "4bcc978d"
+
+# Original decal list/geometry boundary; CPU matrices and vertex fills remain original.
+[[midasm_hook]]
+address = 0x827640A0
+name = "SimpsonsNativeDecalEntry"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6482d83259421ff60"
+
+# Original decal list/geometry boundary; CPU matrices and vertex fills remain original.
+[[midasm_hook]]
+address = 0x827640EC
+name = "SimpsonsNativeDecalTexture"
+registers = ["ctx", "base"]
+jump_address = 0x827640F0
+evidence_hex = "4bfed89d"
+
+# Original decal list/geometry boundary; CPU matrices and vertex fills remain original.
+[[midasm_hook]]
+address = 0x8276412C
+name = "SimpsonsNativeDecalColor"
+registers = ["ctx", "base"]
+jump_address = 0x827641AC
+evidence_hex = "d00b07c0c0010064d00b07c4c0010068d00b07c8c001006cd00b07cce94b00007d4a6378f94b0000807ecaf84bcd65b1817f000038610058888b00144bc66d99817f0000807ecaf88b8b00157f8b0034556bdffe697d00017fa4eb784bcd5dd92b1d0000419a001c38800004807ecaf84bcd63057f84e378807ecaf84bcd6291"
+
+# Original decal list/geometry boundary; CPU matrices and vertex fills remain original.
+[[midasm_hook]]
+address = 0x82764608
+name = "SimpsonsNativeDecalQuadEntry"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbc1ffe8"
+
+# Original decal list/geometry boundary; CPU matrices and vertex fills remain original.
+[[midasm_hook]]
+address = 0x82766D98
+name = "SimpsonsNativeDecalMeshEntry"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a6482d561d9421fe60"
+
+# Original decal list/geometry boundary; CPU matrices and vertex fills remain original.
+[[midasm_hook]]
+address = 0x827646A0
+name = "SimpsonsNativeDecalQuadProjectedConstant"
+registers = ["ctx", "base"]
+jump_address = 0x82764714
+evidence_hex = "d00b0910c0010054d00b0914c0010058d00b0918c001005c480000403d40821e394ad0d8c3ea00003d40821ed3e10064d3e10068d3e1006cc00ad110d0010060d00b0910c0010064d00b0914c0010068d00b0918c001006cd00b091ce94b000038a000047d4a6378388000067fc3f378f94b0000"
+
+# Original decal list/geometry boundary; CPU matrices and vertex fills remain original.
+[[midasm_hook]]
+address = 0x827646E0
+name = "SimpsonsNativeDecalQuadConstant"
+registers = ["ctx", "base"]
+jump_address = 0x82764714
+evidence_hex = "d00b0910c0010064d00b0914c0010068d00b0918c001006cd00b091ce94b000038a000047d4a6378388000067fc3f378f94b0000"
+
+# Original decal list/geometry boundary; CPU matrices and vertex fills remain original.
+[[midasm_hook]]
+address = 0x82766ECC
+name = "SimpsonsNativeDecalMeshProjectedConstant"
+registers = ["ctx", "base"]
+jump_address = 0x82766F3C
+evidence_hex = "d1ab0910c0010064d00b0914c0010068d00b0918c001006c4800003c3d40821ec00ad0d83d40821ed0010074d0010078d001007cc00ad110d0010070d00b0910c0010074d00b0914c0010078d00b0918c001007cd00b091ce94b0000388100d07d4a63787fe3fb783b000000f94b0000"
+
+# Original decal list/geometry boundary; CPU matrices and vertex fills remain original.
+[[midasm_hook]]
+address = 0x82766F08
+name = "SimpsonsNativeDecalMeshConstant"
+registers = ["ctx", "base"]
+jump_address = 0x82766F3C
+evidence_hex = "d00b0910c0010074d00b0914c0010078d00b0918c001007cd00b091ce94b0000388100d07d4a63787fe3fb783b000000f94b0000"
+
+# Original decal list/geometry boundary; CPU matrices and vertex fills remain original.
+[[midasm_hook]]
+address = 0x82764810
+name = "SimpsonsNativeDecalQuadFinish"
+registers = ["ctx", "base"]
+evidence_hex = "382100a08181fff87d8803a6"
+
+# Original decal list/geometry boundary; CPU matrices and vertex fills remain original.
+[[midasm_hook]]
+address = 0x82767210
+name = "SimpsonsNativeDecalMeshFinish"
+registers = ["ctx", "base"]
+evidence_hex = "382101a0482d51f47d8802a6"
+
+# Original decal list/geometry boundary; CPU matrices and vertex fills remain original.
+[[midasm_hook]]
+address = 0x82766E08
+name = "SimpsonsNativeDecalMeshFallbackFinish"
+registers = ["ctx", "base"]
+evidence_hex = "382101a0482d55fca17c115a"
+
+# Original decal list/geometry boundary; CPU matrices and vertex fills remain original.
+[[midasm_hook]]
+address = 0x82751978
+name = "SimpsonsNativeImmediateProjectedMatrix"
+registers = ["ctx", "base"]
+jump_address = 0x8275197C
+evidence_hex = "4bcf3399"
+
+# Original deferred decal rebuild expiry returns independently of the draw path.
+[[midasm_hook]]
+address = 0x82766E3C
+name = "SimpsonsNativeDecalMeshDeferredFinish"
+registers = ["ctx", "base"]
+evidence_hex = "382101a0482d55c8"

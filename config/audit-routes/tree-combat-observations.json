@@ -1,0 +1,16 @@
+[
+  {"name":"opening-confirm-0","command":"A"},
+  {"name":"opening-confirm-1","command":"A"},
+  {"name":"opening-confirm-2","command":"A"},
+  {"name":"opening-confirm-3","command":"A"},
+  {"name":"saxophone-raise","command":"B","capture_after":true},
+  {"name":"saxophone-use","command":"B","capture_after":true},
+  {"name":"forward-1","buttons":0,"lx":0,"ly":32767,"ms":2000,"rt":0,"wait_after_ms":500},
+  {"name":"forward-2","buttons":0,"lx":0,"ly":32767,"ms":2000,"rt":0,"wait_after_ms":500,"capture_after":true},
+  {"name":"enemy-contact","buttons":0,"lx":0,"ly":0,"ms":50,"rt":0,"wait_after_ms":15000,"capture_after":true},
+  {"name":"enemy-contact-later","buttons":0,"lx":0,"ly":0,"ms":50,"rt":0,"wait_after_ms":30000,"capture_after":true},
+  {"name":"attack-1","buttons":16384,"lx":0,"ly":0,"ms":1500,"rt":0,"capture_after":true},
+  {"name":"attack-2","buttons":16384,"lx":0,"ly":0,"ms":1500,"rt":0,"capture_after":true},
+  {"name":"switch-character","buttons":512,"lx":0,"ly":0,"ms":350,"rt":0,"capture_after":true},
+  {"name":"pickup-or-interact-observation","command":"A","capture_after":true}
+]

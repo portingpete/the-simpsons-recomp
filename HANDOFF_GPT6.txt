@@ -1,0 +1,260 @@
+LARGE HANDOFF — Simpsons Native Port Reverse Engineering (for GPT-6)
+=====================================================================
+Repo root: K:\SimpsonsNativeCopy
+Date: 2026-09-18
+Archive companion: handoff-gpt6.zip (all files named below, plus recent game logs)
+
+1. MISSION
+---------
+Continue implementation until the FIRST PRESENTED IN-GAME GAMEPLAY FRAME,
+defined as: an accepted present, geometry draws > 0, nonzero rgb10a2 pixels.
+
+Current gate in tooling: `gameplay_verified=false` is hardcoded in
+`tools/auto_start_native.py`. The loop is (Windows PowerShell 5.1):
+
+  python -B tools/recompile.py --generator build/generator-ninja/XenonRecomp/XenonRecomp.exe --analyser build/generator-ninja/XenonAnalyse/XenonAnalyse.exe
+  cmake --build build/native --parallel 8
+  python -B tools/auto_start_native.py --run-directory build/automatic-startup/reach-game-NNN --until game
+
+CRITICAL BUILD RULE: editing `runtime/engine_effects.cpp` invalidates the AOT
+gate. `cmake --build` alone will then fail at VerifyAOT with:
+  AOT gate: AOT inputs changed; regenerate: ['runtime/engine_effects.cpp']
+Always run tools/recompile.py before building after touching that file (or any
+AOT input). AOT state: 311 files, 0 semantic diagnostics.
+
+Environment: Xbox 360 guest (XenonRecomp AOT) + native D3D11 backend. No CPU
+decoder / console command processor — native engine backend only.
+
+STATUS 3 IS NOT A CLEAN QUIT. runtime/guest_runner.cpp: runOriginalChecked
+returns 4 on success and 3 from __except — i.e. STATUS 3 = SEH HARDWARE
+EXCEPTION (access violation etc.) on the main thread, silent (no [FAILURE] /
+[TERMINATE] line). Any "Game exited with status 3" with no failure string
+means a NATIVE CRASH, usually an OOB read/write in new projection code.
+
+Working style: MINIMAL EXACT WORK TO FRAME FIRST. Every guest behavior is
+pinned with need() checks throwing Failure("[FAILURE] ...") on divergence.
+
+2. FRONTIER STATE
+-----------------
+Completed, in order:
+1. Normalmap rigid (source=0x82057E08): replay057, 9 packets complete.
+   Docs: docs/reach-game-057.md, STATUS.md:1-10.
+2. Skin (packet=82D6D9A4 source=82006348 id=0050001A vtable=82061714,
+   VS 0x82007C1C / PS 0x8200A02C, ctx 0x5830, 1148 words / 4592 B,
+   vc[256]/pc[64], 18+b bones -> vc52+3*bone): full mesh loop, bones,
+   material/submesh/draw/commit/end, sampler skips, fallback 0x827402E4
+   complete, SKIN IMMEDIATE COMPLETE, multiple draws.
+3. Sky (packet=82D6F3A8 source=82036448 id=00500027 vtable=820616C0,
+   technique_AC=0007FFFC, VS 0x82036F08 / PS 0x820374E8,
+   rigidalpha 0007FFFC/0007FFFE, ctx 0x27B0, 188 words, 24 samplers,
+   vc[64]/pc[51]): full dispatch -> begin -> shaders -> textures -> mesh ->
+   material -> commit -> draw -> SKY IMMEDIATE COMPLETE (verts=1239,
+   indices=2492, texture slots 0-3 ITXD hits 512/1024/1024/64).
+4. Chocolate (ACTIVE FRONTIER): packet=82D6EA84 source=8205D2D8
+   simpsons_chocolate id=00500031 vtable=820616C0 technique_AC=0007FFFC,
+   VS 0x8205E0B8 / PS 0x8205EED4, rigidalpha 0007FFFC/0007FFFE, ctx 0x3AD0,
+   184 words, 18 samplers, vc[64]/pc[51], jumps test b0==false,
+   p0 predication.
+
+Chocolate progress (all landed, in this repo state):
+- Dispatch/begin/profile admitted (engine_driver.cpp, recordingBuild,
+  beginRigid chocolateBegin r5=7FFFC lr=0x823CA760, rigid_profile.h:
+  0x8205D2D8 -> {VS 0x8205E0B8, PS 0x8205EED4, ctx 0x3AD0, 18 samplers,
+  184 words}).
+- Shaders transcribed + FXC-clean: tools/analyze_chocolate_shader.py pins
+  VS n=0x518/SHA 5e22faa7.../at=0x2D8/pairs=5/slots 5-46, PS n=0x688/SHA
+  4a2c8322.../at=0x3B8/pairs=10/slots 10-58, 5x JUMPS b0==false,
+  VS_FETCHES 5-10, PS_FETCHES 10,11,34, VS_LITERALS/PS_LITERALS, sin/cos
+  slots 48/49 -> VSChocolate/PSChocolate; tests/test_chocolate_shader.py
+  (8 tests); CMake generates VSChocolate.h/PSChocolate.h;
+  screen_pipeline.cpp artifacts + chocolatePair + validateRigidShaders.
+- Entry admitted: fallback r4==r5==1 allowed for chocolate; TEXENTRY
+  r5=7FFFC; transfer rigidalpha pass; TEXFRAME r23 fix; mask leaves
+  {2,8,9,10,11,12,15,23}.
+- Mesh/material/param sites: CHOCOLATE MESH sites 82701220/826FF340/498/4A4,
+  MATERIAL site=826B54D0, PARAM sites 8270BDDC/BBEC/BD38/BD58/BE7C/BC90/BCB0.
+- Commit site=82C1DBA0, 14 rows, succeeds. Draw submeshes execute through
+  drawRigidMesh (native DrawIndexed, rigidMeshDraws receipt). Loop end +
+  fallback end (0x827402E4) complete for first chocolate packet 82D6EA84
+  (cursor=1/1).
+
+CURRENT BLOCKER (exact): second chocolate packet 82D6EAF0 fails at fallback
+ENTRY (0x827400F8); latest evidence in build/automatic-startup/reach-game-212/game.log:
+
+  [NATIVE FALLBACK ENTRY] fn=827400F8 lr=82740B28 runA=0 rmesh=0 rtex=0 rmat=0
+  skmesh=0 skmat=0 skyM=0 skyMat=0 skinImm=0 r4=00000001 r5=00000001 r6=00000000
+  r1=0203F590 packet=82D6EAF0 meta=E95DC968 typed=00000000
+  [FAILURE] Unqualified original opaque rigid fallback entry
+
+r4==r5==1 is allowed only when chocolateFb is true. chocolateFb =
+wrapper-chain source == 0x8205D2D8, OR (JUST ADDED, UNTESTED — build/run
+pending) selected-view fallback when the chain is unreadable. The wrapper
+chain (packet+0x18 -> typed; typed+0x18 -> wrapper; wrapper+0x10 -> view id ->
+s.find(id).view.source) THROWS for 82D6EAF0 although it worked for 82D6EA84.
+Which step throws is UNKNOWN. Next step: build, run reach-game-213, see if
+the s.rigidId fallback admits it; if admitted, downstream needs
+(vtable 820616C0, profile, bind sites) re-verify chocolate-ness exactly. If
+the fallback is wrong (packet 2 is a different effect with r4=1), downstream
+needs will catch it — read them.
+
+3. CHOCOLATE-SPECIFIC DISCOVERIES (pinned, do not regress)
+----------------------------------------------------------
+- SENTINEL-LEAF OOB CRASH: chocolate profile uses 0xFFFFFFFF sentinel
+  leaves/regs/words (no shadow/rim/scale/exponent/extra).
+  projectRigidMaterial in runtime/rigid_material_constants.h indexed
+  filtered[leaf/8] and words[word+lane] with sentinel values
+  unconditionally -> 512 MB OOB read (filtered[536870911]), SEH -> status 3
+  with no message. Fixed by sentinel-guarding shadow/rim rows (only
+  leaf-14->c49 projects for chocolate; everything else stays staged).
+  PATTERN TO REUSE: any new effect with sentinel profile fields must skip
+  them in EVERY projection/validation loop. materialRegisters loops already
+  skip 0xFFFFFFFF.
+- SHADOW SAMPLER STAGES 0-1 = LINEAR/WRAP, NOT POINT/CLAMP: chocolate's
+  inherited sampler state is
+  {0,0,0,0,1,1,1,0,0,1,1,1,0,13,0,0,0,0,0,1} — bit-for-bit identical to the
+  textured-rigid baseSampler array. Fix in engine_effects.cpp draw path:
+  profile-gated expectation (chocolateSampler vs sampler) and descriptor
+  (MIN_MAG_MIP_LINEAR/WRAP vs MIN_MAG_POINT_MIP_LINEAR/CLAMP).
+  renderer/rigid_mesh.cpp::samplerProfile now accepts either point/clamp or
+  linear/wrap (shared MipLODBias==0, MinLOD==0, MaxLOD==13, Aniso==1, NEVER).
+- REAL ALPHA BLENDING: chocolate draws with blendEnable=1,
+  blendWord=0x07060706, expandedBlend=1. Decoded via
+  renderer/im2d_draw.hlsl::im2d_finish: 0x07060706 = standard src-over,
+  NONSEPARATE alpha (rgb = src.rgb*src.a + dst.rgb*(1-src.a),
+  a = src.a*src.a + dst.a*(1-src.a)). Mapped to D3D11
+  SRC_ALPHA/INV_SRC_ALPHA, ADD on color AND alpha, BlendEnable=true, in both
+  drawRigidMesh (immediate) and recordRigidMesh (recorded) in
+  renderer/rigid_mesh.cpp. Qualification accepts (replacement) OR
+  (blend && 0x07060706 && expanded==1).
+- r30==1 AT FALLBACK END: chocolate's fallback-end has r30=1 (rigid pins
+  r30==0). Disassembly (tools/disassemble.py 0x827402E4) shows the tail is
+  just `li r3,0; addi r1,r1,128; b 0x82A3C418` — r30 is untouched caller
+  ambiance, safe to admit. Pinned as (!r30 || (chocolate && r30==1)) in the
+  rigid fallback-end need only (sky's copy untouched).
+- FALLBACK ENTRIES carry r4==r5==1 for chocolate (code comment: r5
+  dead/overwritten from packet; r4 flows into original packet loop; native
+  staging keys off packet/typed/context only).
+- KNOWN OPEN ISSUE — MATERIAL TEXTURES UNBOUND: chocolate profile has
+  textured=false, so the draw path binds NO base texture, yet chocolate
+  material tables contain type-1 texture rows (E... values). Draws currently
+  sample stages 0-1 only (shadow depths). Not yet failed but the next likely
+  visual/correctness gap after entry: expect a rigidBaseTexture-style owner +
+  sampler qualification modeled on the textured-rigid branch (baseSampler
+  array + LINEAR/WRAP), keyed off chocolate's actual texture rows. The
+  18-sampler 0x3AD0 family table (begin-time metadata rows, cf. sky's 24-row
+  MATROW dump approach) is the source of truth for stage assignment.
+
+4. ARCHITECTURE MAP
+-------------------
+- runtime/engine_driver.cpp — scene dispatch + recordingBuild: per-effect
+  admission (a8/ac technique words, rigidalpha family selection,
+  selected-cache tracking in view.cache).
+- runtime/engine_effects.cpp (~4800 lines) — the interception layer:
+  rigidImmediateOperation (fallback entry 0x827400F8, submesh update
+  0x82700498/0x827005DC, fallback end 0x827402E4, mesh loop, material,
+  draw, loop end). Chocolate flows through this (no separate chocolate ops
+  except probes); sky has skyMeshOperation/skyMaterialOperation/etc.; skin
+  has its own; entry routes sky by s.rigidId source, skin by vtable
+  0x82061714. beginRigid: alpha-family selection, pass/sampler/header/
+  selected-cache generalization. Row callbacks: 0x826B3980-family material
+  rows, 0x8270BDDC/BBEC/BD38/BD58/BE7C/BC90/BCB0 param rows, 0x8270AD5C
+  texture bind (stage->id retained). Commit filter:
+  need(run.filtered && !run.committed && c.lastFunction==0x82C1DBA0)
+  (rigid/sky/skin variants).
+- runtime/rigid_profile.h — per-source profiles: shader addresses, context
+  id, sampler count, word count, leaf/word/reg mappings,
+  multitone/textured/normalmap flags, sentinel 0xFFFFFFFF fields.
+- runtime/rigid_material_constants.h — projectRigidMaterial /
+  projectRigidVertexMaterial (leaf-14->c49 universal across
+  rigid/skin/chocolate).
+- runtime/sky_vertices.{h,cpp}, renderer/sky_mesh.{h,cpp} — sky
+  decode/upload/bind/commit/draw pattern to copy if chocolate ever needs its
+  own mesh path (currently shares rigid).
+- renderer/screen_pipeline.cpp — shader artifact creation
+  (kVSSky/kPSSky/kVSChocolate/kPSChocolate), validateRigidShaders pairs.
+- renderer/native_backend.h — NativeSkyMesh/SkyVertex/SkyMeshDraw/
+  NativeSkyCommit, constant banks, skyMeshDraws; rigid equivalents +
+  rigidMeshDrawCount() receipts.
+- renderer/rigid_mesh.cpp — drawRigidMesh (immediate), recordRigidMesh
+  (recorded), samplerProfile/baseSamplerProfile, blend-state creation.
+- renderer/im2d_pipeline.cpp + renderer/im2d_draw.hlsl — blend-word ground
+  truth (0x07060706, 0x00010706, 0x00010106, 0x00010186, 0x01000100,
+  0x00010001).
+- tools/analyze_{sky,chocolate}_shader.py — shader CF/record inventories
+  (pinned SHA, fetch slots, literals, jumps); tests/test_{sky,chocolate}_
+  shader.py enforce them.
+- config/simpsons.toml — hook list (0x82701638, 0x826FF3B4, 0x826FF47C,
+  0x826FE6CC, 0x826FF434, 0x827018C0 skin draw, 0x8270192C skin loop end,
+  0x8270AD5C sky texture bind, 0x8243C5C0, ...).
+- app/main.cpp — set_terminate -> [TERMINATE] handler; runOriginal status.
+- Logs: build/automatic-startup/reach-game-NNN/game.log (frontier runs
+  201-212 in archive: 210, 211, 212).
+
+5. TEMPORARY DEBUG PROBES (still in tree — remove before finishing)
+------------------------------------------------------------------
+- [NATIVE CHOCOLATE COMMIT] (commit entry: site/material/rows).
+- [NATIVE CHOCOLATE DRAW] (submesh/material/blend/word/expanded).
+- [NATIVE CHOCOLATE LOOPEND] (cursor/size).
+- [NATIVE RIGID ENDPROBE] (full closure state + registers
+  r1/frame/m0/m78/r31/r30). Verbose; delete once chocolate packets close.
+- [NATIVE FALLBACK ENTRY] diagnostic (prints on entry-need failure) — keep
+  until entries stabilize.
+
+6. SUGGESTED NEXT STEPS (in order)
+----------------------------------
+1. Rebuild + run reach-game-213; confirm packet 82D6EAF0 passes entry via
+   the s.rigidId fallback and completes (draw -> loop end -> fallback end ->
+   RIGID IMMEDIATE COMPLETE).
+2. If the chain keeps throwing, instrument catch(...) to log which step
+   fails (packet+0x18 typed readability, typed+0x18 wrapper, wrapper+0x10
+   view id, s.find miss) — tells whether packet 2's typed/wrapper is not
+   resident yet or has a different layout.
+3. Chocolate material textures: dump chocolate's material type-1 rows (cf.
+   sky MATROW approach), add rigidBaseTexture-analog owner +
+   baseSampler-style qualification, gated on chocolate source.
+4. Continue single-blocker loop (commit -> draw -> loop end -> fallback end
+   -> present) until gameplay_verified conditions met. Remove temp probes as
+   each stage goes green across several packets.
+5. Discipline: every new guest value pinned in need() with the exact
+   observed constant; every new effect gets rigid_profile.h entry + shader
+   inventory tool + test before draws are admitted.
+
+7. GLOSSARY OF MAGIC NUMBERS
+----------------------------
+- Sources: 0x8205D2D8 chocolate; 0x82036448 sky; 0x82057E08 normalmap rigid;
+  0x82006348 skin.
+- Vtables: 0x820616C0 rigid/sky/chocolate; 0x82061714 skin.
+- Identities: 00500031 chocolate; 00500027 sky; 0050001A skin.
+- Techniques: a8=0003FFFC, ac=0007FFFC (chocolate/sky);
+  rigidalpha 0007FFFC/0007FFFE.
+- Sites: 827400F8 fallback entry; 827402E4 fallback end; 82740B28 caller lr;
+  82C1DBA0 material commit; 827013B0/827015C0 draws; 82701438/82701628 loop
+  ends; 82700498/827005DC submesh update/return; 826FF340/498/4A4 mesh ops;
+  826B54D0 material; 82701220 mesh; 8270AD5C texture bind; 8243C5C0 sampler
+  watch; chocolate PARAM BBEC/BD38/BD58/BE7C/BC90/BCB0/BDDC.
+- Blend words: 0x00010001 replacement; 0x07060706 src-over nonseparate;
+  0x01000100 depth-only.
+- Sampler arrays (20 entries, effective.sampler(stage,4*i)): rigid shadow
+  {2,2,2,0,0,0,2,0,0,1,1,1,0,13,0,0,0,0,0,1}; chocolate/base
+  {0,0,0,0,1,1,1,0,0,1,1,1,0,13,0,0,0,0,0,1}.
+
+ARCHIVE CONTENTS (handoff-gpt6.zip, paths relative to repo root)
+----------------------------------------------------------------
+HANDOFF_GPT6.txt (this file)
+runtime/engine_effects.cpp, runtime/engine_driver.cpp,
+runtime/rigid_profile.h, runtime/rigid_material_constants.h,
+runtime/guest_runner.cpp, runtime/sky_vertices.h, runtime/sky_vertices.cpp
+renderer/rigid_mesh.cpp, renderer/sky_mesh.h, renderer/sky_mesh.cpp,
+renderer/screen_pipeline.cpp, renderer/native_backend.h,
+renderer/im2d_pipeline.cpp, renderer/im2d_draw.hlsl
+tools/analyze_chocolate_shader.py, tools/analyze_sky_shader.py,
+tools/analyze_expanded_blend.py, tools/disassemble.py, tools/recompile.py,
+tools/auto_start_native.py
+tests/test_chocolate_shader.py, tests/test_sky_shader.py,
+tests/test_sky_vertices.cpp, tests/test_expanded_blend.py
+config/simpsons.toml, app/main.cpp, CMakeLists.txt,
+docs/reach-game-057.md, STATUS.md
+build/automatic-startup/reach-game-210/game.log -> logs/reach-game-210-game.log,
+build/automatic-startup/reach-game-211/game.log -> logs/reach-game-211-game.log,
+build/automatic-startup/reach-game-212/game.log -> logs/reach-game-212-game.log
+(all other files keep their repo-relative paths inside the zip)

@@ -1,0 +1,32 @@
+# Sparse dispatch compares the already loaded r0 byte/halfword OFFSET.
+# Original table reads, address calculation and bounds behavior remain executed.
+# Reject unexpected values explicitly. Evidence bytes are checked before generation.
+[[switch]]
+base = 0x82242e6c
+r = 0
+values = [0,16,32,48,64,80,96,112,128,144,160,176]
+labels = [0x82242e70,0x82242e80,0x82242e90,0x82242ea0,0x82242eb0,0x82242ec0,0x82242ed0,0x82242ee0,0x82242ef0,0x82242f00,0x82242f10,0x82242f20]
+evidence_address = 0x82242e48
+evidence_hex = "3d80821d398c3c307c0c18ae3d808224398c2e707d8c02147d8903a660000000600000004e800420"
+table_address = 0x821d3c30
+table_hex = "00102030405060708090a0b0"
+
+[[switch]]
+base = 0x8245b1f4
+r = 0
+values = [0,12,24,36,48,60,72,84,100]
+labels = [0x8245b1f8,0x8245b204,0x8245b210,0x8245b21c,0x8245b228,0x8245b234,0x8245b240,0x8245b24c,0x8245b25c]
+evidence_address = 0x8245b1d0
+evidence_hex = "3d808207398cafa07c0c50ae3d808246398cb1f87d8c02147d8903a660000000600000004e800420"
+table_address = 0x8206afa0
+table_hex = "000c1824303c485464"
+
+[[switch]]
+base = 0x825615e0
+r = 0
+values = [0,1324]
+labels = [0x825610b8,0x825615e4]
+evidence_address = 0x825615bc
+evidence_hex = "3d80820a398cf5f05700083c7c0c022e3d808256398c10b87d8c02147d8903a6600000004e800420"
+table_address = 0x8209f5f0
+table_hex = "052c052c0000052c052c052c052c00000000052c00000000052c052c052c052c"

@@ -1,0 +1,2077 @@
+[
+ {
+  "name": "opening-confirm-0",
+  "command": "A"
+ },
+ {
+  "name": "opening-confirm-1",
+  "command": "A"
+ },
+ {
+  "name": "opening-confirm-2",
+  "command": "A"
+ },
+ {
+  "name": "opening-confirm-3",
+  "command": "A"
+ },
+ {
+  "name": "s00-walk-left",
+  "buttons": 0,
+  "lx": -32768,
+  "ly": 0,
+  "ms": 900,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s00-walk-attack",
+  "buttons": 16384,
+  "lx": -32768,
+  "ly": 0,
+  "ms": 800,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s00-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s00-jump",
+  "buttons": 4096,
+  "lx": -32768,
+  "ly": 0,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s00-ability",
+  "buttons": 8192,
+  "lx": 0,
+  "ly": 0,
+  "ms": 900,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s00-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s01-walk-right",
+  "buttons": 0,
+  "lx": 32767,
+  "ly": 0,
+  "ms": 1200,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s01-walk-attack",
+  "buttons": 16384,
+  "lx": 32767,
+  "ly": 0,
+  "ms": 800,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s01-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s01-jump",
+  "buttons": 4096,
+  "lx": 32767,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s01-interact",
+  "buttons": 32768,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 700
+ },
+ {
+  "name": "s01-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s02-walk-back-right",
+  "buttons": 0,
+  "lx": 23170,
+  "ly": -23170,
+  "ms": 2000,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s02-walk-attack",
+  "buttons": 16384,
+  "lx": 23170,
+  "ly": -23170,
+  "ms": 800,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s02-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s02-jump",
+  "buttons": 4096,
+  "lx": 23170,
+  "ly": -23170,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s02-ability",
+  "buttons": 8192,
+  "lx": 0,
+  "ly": 0,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s02-special",
+  "buttons": 0,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 255,
+  "wait_after_ms": 700
+ },
+ {
+  "name": "s02-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s03-walk-back",
+  "buttons": 0,
+  "lx": 0,
+  "ly": -32768,
+  "ms": 1200,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s03-walk-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": -32768,
+  "ms": 500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s03-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s03-jump",
+  "buttons": 4096,
+  "lx": 0,
+  "ly": -32768,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s03-switch",
+  "buttons": 512,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 800
+ },
+ {
+  "name": "s03-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s04-walk-back-right",
+  "buttons": 0,
+  "lx": 23170,
+  "ly": -23170,
+  "ms": 1500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s04-walk-attack",
+  "buttons": 16384,
+  "lx": 23170,
+  "ly": -23170,
+  "ms": 500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s04-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s04-jump",
+  "buttons": 4096,
+  "lx": 23170,
+  "ly": -23170,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s04-ability",
+  "buttons": 8192,
+  "lx": 0,
+  "ly": 0,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s04-interact",
+  "buttons": 32768,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 700
+ },
+ {
+  "name": "s04-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s05-walk-back",
+  "buttons": 0,
+  "lx": 0,
+  "ly": -32768,
+  "ms": 1200,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s05-walk-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": -32768,
+  "ms": 800,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s05-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s05-jump",
+  "buttons": 4096,
+  "lx": 0,
+  "ly": -32768,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s05-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s06-walk-right",
+  "buttons": 0,
+  "lx": 32767,
+  "ly": 0,
+  "ms": 1500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s06-walk-attack",
+  "buttons": 16384,
+  "lx": 32767,
+  "ly": 0,
+  "ms": 500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s06-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s06-jump",
+  "buttons": 4096,
+  "lx": 32767,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s06-ability",
+  "buttons": 8192,
+  "lx": 0,
+  "ly": 0,
+  "ms": 900,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s06-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s07-walk-back-right",
+  "buttons": 0,
+  "lx": 23170,
+  "ly": -23170,
+  "ms": 1500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s07-walk-attack",
+  "buttons": 16384,
+  "lx": 23170,
+  "ly": -23170,
+  "ms": 800,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s07-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s07-jump",
+  "buttons": 4096,
+  "lx": 23170,
+  "ly": -23170,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s07-interact",
+  "buttons": 32768,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 700
+ },
+ {
+  "name": "s07-special",
+  "buttons": 0,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 255,
+  "wait_after_ms": 700
+ },
+ {
+  "name": "s07-switch",
+  "buttons": 512,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 800
+ },
+ {
+  "name": "s07-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s08-walk-fwd-left",
+  "buttons": 0,
+  "lx": -23170,
+  "ly": 23170,
+  "ms": 900,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s08-walk-attack",
+  "buttons": 16384,
+  "lx": -23170,
+  "ly": 23170,
+  "ms": 500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s08-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s08-jump",
+  "buttons": 4096,
+  "lx": -23170,
+  "ly": 23170,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s08-ability",
+  "buttons": 8192,
+  "lx": 0,
+  "ly": 0,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s08-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s09-walk-left",
+  "buttons": 0,
+  "lx": -32768,
+  "ly": 0,
+  "ms": 1500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s09-walk-attack",
+  "buttons": 16384,
+  "lx": -32768,
+  "ly": 0,
+  "ms": 1100,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s09-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s09-jump",
+  "buttons": 4096,
+  "lx": -32768,
+  "ly": 0,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s09-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s10-walk-back",
+  "buttons": 0,
+  "lx": 0,
+  "ly": -32768,
+  "ms": 1200,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s10-walk-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": -32768,
+  "ms": 500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s10-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s10-jump",
+  "buttons": 4096,
+  "lx": 0,
+  "ly": -32768,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s10-ability",
+  "buttons": 8192,
+  "lx": 0,
+  "ly": 0,
+  "ms": 900,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s10-interact",
+  "buttons": 32768,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 700
+ },
+ {
+  "name": "s10-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s11-walk-back-left",
+  "buttons": 0,
+  "lx": -23170,
+  "ly": -23170,
+  "ms": 2000,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s11-walk-attack",
+  "buttons": 16384,
+  "lx": -23170,
+  "ly": -23170,
+  "ms": 1100,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s11-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s11-jump",
+  "buttons": 4096,
+  "lx": -23170,
+  "ly": -23170,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s11-switch",
+  "buttons": 512,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 800
+ },
+ {
+  "name": "s11-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s12-walk-fwd",
+  "buttons": 0,
+  "lx": 0,
+  "ly": 32767,
+  "ms": 1200,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s12-walk-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 32767,
+  "ms": 500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s12-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s12-jump",
+  "buttons": 4096,
+  "lx": 0,
+  "ly": 32767,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s12-ability",
+  "buttons": 8192,
+  "lx": 0,
+  "ly": 0,
+  "ms": 900,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s12-special",
+  "buttons": 0,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 255,
+  "wait_after_ms": 700
+ },
+ {
+  "name": "s12-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s13-walk-fwd-left",
+  "buttons": 0,
+  "lx": -23170,
+  "ly": 23170,
+  "ms": 2000,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s13-walk-attack",
+  "buttons": 16384,
+  "lx": -23170,
+  "ly": 23170,
+  "ms": 800,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s13-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s13-jump",
+  "buttons": 4096,
+  "lx": -23170,
+  "ly": 23170,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s13-interact",
+  "buttons": 32768,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 700
+ },
+ {
+  "name": "s13-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s14-walk-back-left",
+  "buttons": 0,
+  "lx": -23170,
+  "ly": -23170,
+  "ms": 2000,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s14-walk-attack",
+  "buttons": 16384,
+  "lx": -23170,
+  "ly": -23170,
+  "ms": 1100,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s14-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s14-jump",
+  "buttons": 4096,
+  "lx": -23170,
+  "ly": -23170,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s14-ability",
+  "buttons": 8192,
+  "lx": 0,
+  "ly": 0,
+  "ms": 900,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s14-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s15-walk-right",
+  "buttons": 0,
+  "lx": 32767,
+  "ly": 0,
+  "ms": 2000,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s15-walk-attack",
+  "buttons": 16384,
+  "lx": 32767,
+  "ly": 0,
+  "ms": 800,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s15-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s15-jump",
+  "buttons": 4096,
+  "lx": 32767,
+  "ly": 0,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s15-switch",
+  "buttons": 512,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 800
+ },
+ {
+  "name": "s15-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s16-walk-fwd",
+  "buttons": 0,
+  "lx": 0,
+  "ly": 32767,
+  "ms": 2000,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s16-walk-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 32767,
+  "ms": 500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s16-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s16-jump",
+  "buttons": 4096,
+  "lx": 0,
+  "ly": 32767,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s16-ability",
+  "buttons": 8192,
+  "lx": 0,
+  "ly": 0,
+  "ms": 900,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s16-interact",
+  "buttons": 32768,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 700
+ },
+ {
+  "name": "s16-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s17-walk-back-left",
+  "buttons": 0,
+  "lx": -23170,
+  "ly": -23170,
+  "ms": 1500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s17-walk-attack",
+  "buttons": 16384,
+  "lx": -23170,
+  "ly": -23170,
+  "ms": 1100,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s17-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s17-jump",
+  "buttons": 4096,
+  "lx": -23170,
+  "ly": -23170,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s17-special",
+  "buttons": 0,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 255,
+  "wait_after_ms": 700
+ },
+ {
+  "name": "s17-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s18-walk-left",
+  "buttons": 0,
+  "lx": -32768,
+  "ly": 0,
+  "ms": 1200,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s18-walk-attack",
+  "buttons": 16384,
+  "lx": -32768,
+  "ly": 0,
+  "ms": 1100,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s18-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s18-jump",
+  "buttons": 4096,
+  "lx": -32768,
+  "ly": 0,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s18-ability",
+  "buttons": 8192,
+  "lx": 0,
+  "ly": 0,
+  "ms": 900,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s18-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s19-walk-fwd-left",
+  "buttons": 0,
+  "lx": -23170,
+  "ly": 23170,
+  "ms": 1500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s19-walk-attack",
+  "buttons": 16384,
+  "lx": -23170,
+  "ly": 23170,
+  "ms": 800,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s19-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s19-jump",
+  "buttons": 4096,
+  "lx": -23170,
+  "ly": 23170,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s19-interact",
+  "buttons": 32768,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 700
+ },
+ {
+  "name": "s19-switch",
+  "buttons": 512,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 800
+ },
+ {
+  "name": "s19-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s20-walk-right",
+  "buttons": 0,
+  "lx": 32767,
+  "ly": 0,
+  "ms": 1200,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s20-walk-attack",
+  "buttons": 16384,
+  "lx": 32767,
+  "ly": 0,
+  "ms": 1100,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s20-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s20-jump",
+  "buttons": 4096,
+  "lx": 32767,
+  "ly": 0,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s20-ability",
+  "buttons": 8192,
+  "lx": 0,
+  "ly": 0,
+  "ms": 900,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s20-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s21-walk-back-right",
+  "buttons": 0,
+  "lx": 23170,
+  "ly": -23170,
+  "ms": 1800,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s21-walk-attack",
+  "buttons": 16384,
+  "lx": 23170,
+  "ly": -23170,
+  "ms": 1100,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s21-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s21-jump",
+  "buttons": 4096,
+  "lx": 23170,
+  "ly": -23170,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s21-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s22-walk-right",
+  "buttons": 0,
+  "lx": 32767,
+  "ly": 0,
+  "ms": 900,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s22-walk-attack",
+  "buttons": 16384,
+  "lx": 32767,
+  "ly": 0,
+  "ms": 1100,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s22-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s22-jump",
+  "buttons": 4096,
+  "lx": 32767,
+  "ly": 0,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s22-ability",
+  "buttons": 8192,
+  "lx": 0,
+  "ly": 0,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s22-interact",
+  "buttons": 32768,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 700
+ },
+ {
+  "name": "s22-special",
+  "buttons": 0,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 255,
+  "wait_after_ms": 700
+ },
+ {
+  "name": "s22-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s23-walk-back",
+  "buttons": 0,
+  "lx": 0,
+  "ly": -32768,
+  "ms": 1200,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s23-walk-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": -32768,
+  "ms": 1100,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s23-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s23-jump",
+  "buttons": 4096,
+  "lx": 0,
+  "ly": -32768,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s23-switch",
+  "buttons": 512,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 800
+ },
+ {
+  "name": "s23-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s24-walk-right",
+  "buttons": 0,
+  "lx": 32767,
+  "ly": 0,
+  "ms": 1500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s24-walk-attack",
+  "buttons": 16384,
+  "lx": 32767,
+  "ly": 0,
+  "ms": 500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s24-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s24-jump",
+  "buttons": 4096,
+  "lx": 32767,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s24-ability",
+  "buttons": 8192,
+  "lx": 0,
+  "ly": 0,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s24-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s25-walk-fwd-left",
+  "buttons": 0,
+  "lx": -23170,
+  "ly": 23170,
+  "ms": 1200,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s25-walk-attack",
+  "buttons": 16384,
+  "lx": -23170,
+  "ly": 23170,
+  "ms": 500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s25-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s25-jump",
+  "buttons": 4096,
+  "lx": -23170,
+  "ly": 23170,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s25-interact",
+  "buttons": 32768,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 700
+ },
+ {
+  "name": "s25-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s26-walk-back-right",
+  "buttons": 0,
+  "lx": 23170,
+  "ly": -23170,
+  "ms": 1800,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s26-walk-attack",
+  "buttons": 16384,
+  "lx": 23170,
+  "ly": -23170,
+  "ms": 500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s26-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s26-jump",
+  "buttons": 4096,
+  "lx": 23170,
+  "ly": -23170,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s26-ability",
+  "buttons": 8192,
+  "lx": 0,
+  "ly": 0,
+  "ms": 900,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s26-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s27-walk-fwd-right",
+  "buttons": 0,
+  "lx": 23170,
+  "ly": 23170,
+  "ms": 2000,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s27-walk-attack",
+  "buttons": 16384,
+  "lx": 23170,
+  "ly": 23170,
+  "ms": 500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s27-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s27-jump",
+  "buttons": 4096,
+  "lx": 23170,
+  "ly": 23170,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s27-special",
+  "buttons": 0,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 255,
+  "wait_after_ms": 700
+ },
+ {
+  "name": "s27-switch",
+  "buttons": 512,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 800
+ },
+ {
+  "name": "s27-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s28-walk-fwd",
+  "buttons": 0,
+  "lx": 0,
+  "ly": 32767,
+  "ms": 1500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s28-walk-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 32767,
+  "ms": 1100,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s28-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s28-jump",
+  "buttons": 4096,
+  "lx": 0,
+  "ly": 32767,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s28-ability",
+  "buttons": 8192,
+  "lx": 0,
+  "ly": 0,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s28-interact",
+  "buttons": 32768,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 700
+ },
+ {
+  "name": "s28-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s29-walk-left",
+  "buttons": 0,
+  "lx": -32768,
+  "ly": 0,
+  "ms": 900,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s29-walk-attack",
+  "buttons": 16384,
+  "lx": -32768,
+  "ly": 0,
+  "ms": 800,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s29-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s29-jump",
+  "buttons": 4096,
+  "lx": -32768,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s29-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s30-walk-back",
+  "buttons": 0,
+  "lx": 0,
+  "ly": -32768,
+  "ms": 1800,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s30-walk-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": -32768,
+  "ms": 1100,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s30-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s30-jump",
+  "buttons": 4096,
+  "lx": 0,
+  "ly": -32768,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s30-ability",
+  "buttons": 8192,
+  "lx": 0,
+  "ly": 0,
+  "ms": 900,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s30-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s31-walk-fwd-right",
+  "buttons": 0,
+  "lx": 23170,
+  "ly": 23170,
+  "ms": 2000,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s31-walk-attack",
+  "buttons": 16384,
+  "lx": 23170,
+  "ly": 23170,
+  "ms": 800,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s31-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s31-jump",
+  "buttons": 4096,
+  "lx": 23170,
+  "ly": 23170,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s31-interact",
+  "buttons": 32768,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 700
+ },
+ {
+  "name": "s31-switch",
+  "buttons": 512,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 800
+ },
+ {
+  "name": "s31-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s32-walk-fwd-left",
+  "buttons": 0,
+  "lx": -23170,
+  "ly": 23170,
+  "ms": 1800,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s32-walk-attack",
+  "buttons": 16384,
+  "lx": -23170,
+  "ly": 23170,
+  "ms": 1100,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s32-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s32-jump",
+  "buttons": 4096,
+  "lx": -23170,
+  "ly": 23170,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s32-ability",
+  "buttons": 8192,
+  "lx": 0,
+  "ly": 0,
+  "ms": 900,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s32-special",
+  "buttons": 0,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 255,
+  "wait_after_ms": 700
+ },
+ {
+  "name": "s32-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s33-walk-back-right",
+  "buttons": 0,
+  "lx": 23170,
+  "ly": -23170,
+  "ms": 1500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s33-walk-attack",
+  "buttons": 16384,
+  "lx": 23170,
+  "ly": -23170,
+  "ms": 800,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s33-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s33-jump",
+  "buttons": 4096,
+  "lx": 23170,
+  "ly": -23170,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s33-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s34-walk-back-left",
+  "buttons": 0,
+  "lx": -23170,
+  "ly": -23170,
+  "ms": 900,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s34-walk-attack",
+  "buttons": 16384,
+  "lx": -23170,
+  "ly": -23170,
+  "ms": 800,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s34-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s34-jump",
+  "buttons": 4096,
+  "lx": -23170,
+  "ly": -23170,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s34-ability",
+  "buttons": 8192,
+  "lx": 0,
+  "ly": 0,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s34-interact",
+  "buttons": 32768,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 700
+ },
+ {
+  "name": "s34-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s35-walk-fwd-left",
+  "buttons": 0,
+  "lx": -23170,
+  "ly": 23170,
+  "ms": 1200,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s35-walk-attack",
+  "buttons": 16384,
+  "lx": -23170,
+  "ly": 23170,
+  "ms": 500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s35-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s35-jump",
+  "buttons": 4096,
+  "lx": -23170,
+  "ly": 23170,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s35-switch",
+  "buttons": 512,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 800
+ },
+ {
+  "name": "s35-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s36-walk-left",
+  "buttons": 0,
+  "lx": -32768,
+  "ly": 0,
+  "ms": 1500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s36-walk-attack",
+  "buttons": 16384,
+  "lx": -32768,
+  "ly": 0,
+  "ms": 1100,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s36-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s36-jump",
+  "buttons": 4096,
+  "lx": -32768,
+  "ly": 0,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s36-ability",
+  "buttons": 8192,
+  "lx": 0,
+  "ly": 0,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s36-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s37-walk-fwd-left",
+  "buttons": 0,
+  "lx": -23170,
+  "ly": 23170,
+  "ms": 900,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s37-walk-attack",
+  "buttons": 16384,
+  "lx": -23170,
+  "ly": 23170,
+  "ms": 800,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s37-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s37-jump",
+  "buttons": 4096,
+  "lx": -23170,
+  "ly": 23170,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s37-interact",
+  "buttons": 32768,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 700
+ },
+ {
+  "name": "s37-special",
+  "buttons": 0,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 255,
+  "wait_after_ms": 700
+ },
+ {
+  "name": "s37-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s38-walk-fwd-right",
+  "buttons": 0,
+  "lx": 23170,
+  "ly": 23170,
+  "ms": 1800,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s38-walk-attack",
+  "buttons": 16384,
+  "lx": 23170,
+  "ly": 23170,
+  "ms": 500,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s38-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s38-jump",
+  "buttons": 4096,
+  "lx": 23170,
+  "ly": 23170,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s38-ability",
+  "buttons": 8192,
+  "lx": 0,
+  "ly": 0,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s38-confirm",
+  "command": "A"
+ },
+ {
+  "name": "s39-walk-back",
+  "buttons": 0,
+  "lx": 0,
+  "ly": -32768,
+  "ms": 900,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s39-walk-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": -32768,
+  "ms": 800,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s39-attack",
+  "buttons": 16384,
+  "lx": 0,
+  "ly": 0,
+  "ms": 450,
+  "rt": 0,
+  "wait_after_ms": 300
+ },
+ {
+  "name": "s39-jump",
+  "buttons": 4096,
+  "lx": 0,
+  "ly": -32768,
+  "ms": 600,
+  "rt": 0,
+  "wait_after_ms": 500
+ },
+ {
+  "name": "s39-switch",
+  "buttons": 512,
+  "lx": 0,
+  "ly": 0,
+  "ms": 350,
+  "rt": 0,
+  "wait_after_ms": 800
+ },
+ {
+  "name": "s39-confirm",
+  "command": "A"
+ }
+]

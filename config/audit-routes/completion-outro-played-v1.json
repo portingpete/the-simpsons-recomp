@@ -1,0 +1,79 @@
+[
+ {
+  "name": "outro-movie-ready",
+  "buttons": 0,
+  "lx": 0,
+  "ly": 0,
+  "ms": 50,
+  "rt": 0,
+  "wait_after_ms": 2000,
+  "wait_for_log": "[NATIVE MOVIE INPUT] ready owner=",
+  "wait_for_log_occurrence": 2,
+  "wait_for_log_ms": 120000,
+  "capture_after": true
+ },
+ {
+  "name": "outro-playing-1",
+  "buttons": 0,
+  "lx": 0,
+  "ly": 0,
+  "ms": 50,
+  "rt": 0,
+  "wait_after_ms": 30000,
+  "capture_after": true
+ },
+ {
+  "name": "outro-playing-2",
+  "buttons": 0,
+  "lx": 0,
+  "ly": 0,
+  "ms": 50,
+  "rt": 0,
+  "wait_after_ms": 30000,
+  "capture_after": true
+ },
+ {
+  "name": "outro-playing-3",
+  "buttons": 0,
+  "lx": 0,
+  "ly": 0,
+  "ms": 50,
+  "rt": 0,
+  "wait_after_ms": 30000,
+  "capture_after": true
+ },
+ {
+  "name": "results-confirm-1",
+  "command": "A",
+  "wait_after_ms": 6000,
+  "capture_after": true
+ },
+ {
+  "name": "results-confirm-2",
+  "command": "A",
+  "wait_after_ms": 6000,
+  "capture_after": true
+ },
+ {
+  "name": "results-confirm-3",
+  "command": "A",
+  "wait_after_ms": 6000,
+  "capture_after": true
+ },
+ {
+  "name": "results-confirm-4",
+  "command": "A",
+  "wait_after_ms": 15000,
+  "capture_after": true
+ },
+ {
+  "name": "successor-observe",
+  "buttons": 0,
+  "lx": 0,
+  "ly": 0,
+  "ms": 50,
+  "rt": 0,
+  "wait_after_ms": 30000,
+  "capture_after": true
+ }
+]

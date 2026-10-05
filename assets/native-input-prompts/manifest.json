@@ -1,0 +1,627 @@
+{
+  "version": 1,
+  "theme": "yellow",
+  "icon_size": 64,
+  "provenance": "User-supplied yellow sheet with a matching generated supplement; no CC0 license is asserted.",
+  "extraction": {
+    "component_alpha_minimum": 32,
+    "minimum_component_pixels": 1000,
+    "soft_alpha_fringe_pixels": 4,
+    "connectivity": 4,
+    "source_pixels_modified": false
+  },
+  "sources": [
+    {
+      "path": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "origin": "user-supplied-hand-drawn-revision",
+      "sha256": "8cac4b3d396f8d8ed08c1a50d60fe1c5d736d39b92fb7fa537eceda66c23057d",
+      "size": [
+        948,
+        1659
+      ]
+    },
+    {
+      "path": "assets/native-input-prompts/yellow-supplement.png",
+      "origin": "generated-supplement",
+      "sha256": "d2ec270bd8d0880439abe0778c87e4b76afc081e129074a089561f525aa3c028",
+      "size": [
+        1774,
+        887
+      ]
+    }
+  ],
+  "icons": {
+    "W": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        26,
+        79,
+        220,
+        264
+      ],
+      "bounds": [
+        22,
+        76,
+        223,
+        268
+      ],
+      "core_pixels": 34097,
+      "rgba_sha256": "e9e955cfb32bc75b248a3ae0deb9639f9f346ab51a2a599699b95b76563a5f90"
+    },
+    "A": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        258,
+        77,
+        454,
+        264
+      ],
+      "bounds": [
+        256,
+        74,
+        458,
+        268
+      ],
+      "core_pixels": 34904,
+      "rgba_sha256": "7697c22c1b09ee16eb7e3dc1d12a3c352927424a9fd3d3436e02a2823c5245a2"
+    },
+    "S": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        493,
+        77,
+        690,
+        264
+      ],
+      "bounds": [
+        489,
+        75,
+        692,
+        267
+      ],
+      "core_pixels": 35209,
+      "rgba_sha256": "bf6ed41db29fa6f9774d886f1af3b66c63c078dc4eb725e80ecaddbbac2cd47c"
+    },
+    "D": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        730,
+        78,
+        924,
+        265
+      ],
+      "bounds": [
+        727,
+        76,
+        928,
+        269
+      ],
+      "core_pixels": 34447,
+      "rgba_sha256": "ae293ae538dd4450aa73c070c2317d59aef1cecb477aa3359b22a1be46c26191"
+    },
+    "Z": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        28,
+        288,
+        219,
+        475
+      ],
+      "bounds": [
+        26,
+        286,
+        223,
+        479
+      ],
+      "core_pixels": 33980,
+      "rgba_sha256": "dd45b4cf7bde41eeabb8f25022e843fa7783d699bcfec14f56f8e8b52531488b"
+    },
+    "X": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        258,
+        288,
+        455,
+        475
+      ],
+      "bounds": [
+        256,
+        286,
+        458,
+        479
+      ],
+      "core_pixels": 35067,
+      "rgba_sha256": "1391db665372ced6424762d26b3a39683f708cfc0f703c1f04b3bb15111cbe81"
+    },
+    "C": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        494,
+        288,
+        692,
+        475
+      ],
+      "bounds": [
+        492,
+        286,
+        694,
+        479
+      ],
+      "core_pixels": 35325,
+      "rgba_sha256": "1e27de830f6767dc77ada610c635ac3f6dba04441c4743d9c9ce6c4bf7e2ebba"
+    },
+    "V": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        731,
+        288,
+        924,
+        475
+      ],
+      "bounds": [
+        728,
+        286,
+        928,
+        479
+      ],
+      "core_pixels": 34424,
+      "rgba_sha256": "a7c3f143cfbce6ff089ba7ce403834939c3980ee0c7117eb1ed353311d0b54f9"
+    },
+    "E": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        20,
+        503,
+        203,
+        685
+      ],
+      "bounds": [
+        18,
+        499,
+        206,
+        689
+      ],
+      "core_pixels": 31592,
+      "rgba_sha256": "d7f51a28b2e4b915ffb8a5b38a54415348c0aa81caa387ff034cd0969ff8b584"
+    },
+    "F": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        227,
+        502,
+        410,
+        685
+      ],
+      "bounds": [
+        224,
+        499,
+        414,
+        689
+      ],
+      "core_pixels": 31833,
+      "rgba_sha256": "fc71353a4c75af280261e6d08e936565609cf6d85ff14442a5ab4767e59645f5"
+    },
+    "Space": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        424,
+        515,
+        729,
+        680
+      ],
+      "bounds": [
+        420,
+        512,
+        733,
+        683
+      ],
+      "core_pixels": 48864,
+      "rgba_sha256": "6c105c07fa2a186f6547275d73fee32a10615147e6347a123276d6add38ed642"
+    },
+    "Shift": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        742,
+        500,
+        929,
+        685
+      ],
+      "bounds": [
+        738,
+        497,
+        932,
+        689
+      ],
+      "core_pixels": 33060,
+      "rgba_sha256": "b212ddd1875277d3ef216db65ed921965f120d41320401fcb03a23fd87e5f674"
+    },
+    "Ctrl": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        22,
+        723,
+        219,
+        900
+      ],
+      "bounds": [
+        20,
+        720,
+        222,
+        903
+      ],
+      "core_pixels": 33259,
+      "rgba_sha256": "54c238ca13d0e8032f42c4f8e756b920f5700e1bd66c979f66d5d86c84ca010b"
+    },
+    "Tab": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        241,
+        723,
+        431,
+        901
+      ],
+      "bounds": [
+        238,
+        720,
+        433,
+        904
+      ],
+      "core_pixels": 32221,
+      "rgba_sha256": "9c6038dc3efa8082d956f19f8bb63dce0690f437ee64a7a400f49d940f39f934"
+    },
+    "Enter": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        451,
+        723,
+        723,
+        901
+      ],
+      "bounds": [
+        449,
+        720,
+        725,
+        904
+      ],
+      "core_pixels": 46831,
+      "rgba_sha256": "1180873aa0010985aba8acc7f39db5f2f1c9a39167989a673bf23d3155132477"
+    },
+    "Esc": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        740,
+        723,
+        929,
+        901
+      ],
+      "bounds": [
+        737,
+        720,
+        932,
+        903
+      ],
+      "core_pixels": 32178,
+      "rgba_sha256": "50c21e598edac1989ae26bdea1ddea97842c94e297c9aa68b476bae3219d3c8a"
+    },
+    "MouseLeft": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        29,
+        923,
+        205,
+        1162
+      ],
+      "bounds": [
+        27,
+        920,
+        209,
+        1164
+      ],
+      "core_pixels": 35005,
+      "rgba_sha256": "2f6fc02b7d4e0216d9ad21e71d5d1da679c8bd3be9c4ef656eb05569babd34ee"
+    },
+    "MouseRight": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        264,
+        923,
+        440,
+        1162
+      ],
+      "bounds": [
+        260,
+        920,
+        443,
+        1164
+      ],
+      "core_pixels": 34930,
+      "rgba_sha256": "58ae61e540b1367adf3a2b35d286297749d9c48937e564dc6f68c8baf5feedf0"
+    },
+    "MouseMiddle": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        493,
+        923,
+        669,
+        1162
+      ],
+      "bounds": [
+        489,
+        920,
+        673,
+        1164
+      ],
+      "core_pixels": 35185,
+      "rgba_sha256": "2c20f9b3b6f974836d8274ec50340eab654a6c4d8ddebb4f80ec2999b98075fe"
+    },
+    "Q": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        720,
+        948,
+        921,
+        1141
+      ],
+      "bounds": [
+        718,
+        946,
+        923,
+        1143
+      ],
+      "core_pixels": 36945,
+      "rgba_sha256": "02dc0b980376e36a0a489d975d2afeba5e7db67cf4509f852b3e1109db4a548f"
+    },
+    "R": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        25,
+        1183,
+        219,
+        1372
+      ],
+      "bounds": [
+        21,
+        1179,
+        223,
+        1376
+      ],
+      "core_pixels": 35044,
+      "rgba_sha256": "658cb6343ddda9971874ff7a9391095aa35817b4a76b60b29904443409eb6def"
+    },
+    "One": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        258,
+        1183,
+        454,
+        1372
+      ],
+      "bounds": [
+        256,
+        1180,
+        457,
+        1374
+      ],
+      "core_pixels": 35357,
+      "rgba_sha256": "aec48f86f5f5ae9eebb081011c8e50cb5f5fcc3350791ec8cef4d3840b17e061"
+    },
+    "Two": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        494,
+        1183,
+        690,
+        1372
+      ],
+      "bounds": [
+        492,
+        1179,
+        692,
+        1374
+      ],
+      "core_pixels": 35150,
+      "rgba_sha256": "7cc9fa7d1f6715fd6e9eb26f447277fd3ad583298ae301abb1e7e28490a4f1aa"
+    },
+    "Three": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        729,
+        1183,
+        924,
+        1372
+      ],
+      "bounds": [
+        727,
+        1180,
+        928,
+        1374
+      ],
+      "core_pixels": 35067,
+      "rgba_sha256": "6a34644294b5c79b1f6644749aecc071633d8a9d55119ab91fc9dbeb3cd013fe"
+    },
+    "Four": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        33,
+        1394,
+        229,
+        1583
+      ],
+      "bounds": [
+        30,
+        1390,
+        231,
+        1587
+      ],
+      "core_pixels": 35160,
+      "rgba_sha256": "230b1cd9da1867099de22689d5bb31ee9b730f8fcca07bd184c8586c7e60dc89"
+    },
+    "Five": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        264,
+        1394,
+        460,
+        1583
+      ],
+      "bounds": [
+        260,
+        1391,
+        464,
+        1587
+      ],
+      "core_pixels": 35321,
+      "rgba_sha256": "22c4ab8d3cdde5d7999fbcd84427a7ba6431a1d81f059b6a2dc53849e85d3458"
+    },
+    "Six": {
+      "source": "assets/ChatGPT Image Sep 26, 2026, 10_10_55 PM.png",
+      "core_bounds": [
+        496,
+        1394,
+        692,
+        1583
+      ],
+      "bounds": [
+        493,
+        1391,
+        694,
+        1587
+      ],
+      "core_pixels": 35339,
+      "rgba_sha256": "0cbeb30b5a90d874f202ec04dffb3cd199a0306f2eac492e5b20ba8e776a1951"
+    },
+    "Up": {
+      "source": "assets/native-input-prompts/yellow-supplement.png",
+      "core_bounds": [
+        91,
+        89,
+        418,
+        396
+      ],
+      "bounds": [
+        87,
+        86,
+        421,
+        400
+      ],
+      "core_pixels": 95199,
+      "rgba_sha256": "64ffa57313a9e95d2ed1be8e0d62437c554e94ac66be2c12357a2bbfc85e0770"
+    },
+    "Left": {
+      "source": "assets/native-input-prompts/yellow-supplement.png",
+      "core_bounds": [
+        514,
+        89,
+        844,
+        395
+      ],
+      "bounds": [
+        510,
+        86,
+        847,
+        399
+      ],
+      "core_pixels": 96076,
+      "rgba_sha256": "15a3394b44124130335b103191aa4392725b668154809cf7d4feb6bd3f05c33b"
+    },
+    "Down": {
+      "source": "assets/native-input-prompts/yellow-supplement.png",
+      "core_bounds": [
+        933,
+        89,
+        1263,
+        395
+      ],
+      "bounds": [
+        931,
+        85,
+        1266,
+        399
+      ],
+      "core_pixels": 96235,
+      "rgba_sha256": "9ba36a7ff1b74c71c0d8587ea2f0922118ec99c1b4118bad3f313e6646f166bf"
+    },
+    "Right": {
+      "source": "assets/native-input-prompts/yellow-supplement.png",
+      "core_bounds": [
+        1357,
+        88,
+        1686,
+        396
+      ],
+      "bounds": [
+        1355,
+        86,
+        1690,
+        400
+      ],
+      "core_pixels": 96126,
+      "rgba_sha256": "c907668c2d730a88ac4d7ae7894f3774754cadc0179f69a05abf7c6542c2ddf6"
+    },
+    "MouseMove": {
+      "source": "assets/native-input-prompts/yellow-supplement.png",
+      "core_bounds": [
+        105,
+        445,
+        398,
+        819
+      ],
+      "bounds": [
+        103,
+        442,
+        401,
+        823
+      ],
+      "core_pixels": 90664,
+      "rgba_sha256": "658374ff04ece76fa1cf07d579512fda74cc681d84ecf862fa934e5ca9403d8e"
+    },
+    "G": {
+      "source": "assets/native-input-prompts/yellow-supplement.png",
+      "core_bounds": [
+        513,
+        492,
+        842,
+        799
+      ],
+      "bounds": [
+        510,
+        490,
+        845,
+        803
+      ],
+      "core_pixels": 96084,
+      "rgba_sha256": "37578217784fafe90d35bd63875a725887ae33593942d33395d57d76ed6196ab"
+    },
+    "Question": {
+      "source": "assets/native-input-prompts/yellow-supplement.png",
+      "core_bounds": [
+        932,
+        492,
+        1263,
+        799
+      ],
+      "bounds": [
+        929,
+        489,
+        1265,
+        802
+      ],
+      "core_pixels": 96828,
+      "rgba_sha256": "0fb72ffc4bb3428266924b807df64454238997366d3e582108f23b253d420e8e"
+    }
+  },
+  "groups": {
+    "Move": [
+      "W",
+      "A",
+      "S",
+      "D"
+    ],
+    "Directions": [
+      "Up",
+      "Left",
+      "Down",
+      "Right"
+    ]
+  }
+}

@@ -1,0 +1,5 @@
+[
+  {"name":"start-title-observation","command":"START","wait_after_ms":5000,"capture_after":true},
+  {"name":"title-or-menu-select-observation","command":"A","wait_after_ms":15000,"capture_after":true},
+  {"name":"menu-state-observation","buttons":0,"lx":0,"ly":0,"ms":50,"rt":0,"wait_after_ms":5000,"capture_after":true}
+]

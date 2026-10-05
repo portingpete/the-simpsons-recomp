@@ -1,0 +1,64 @@
+[
+  {
+    "lx": 0,
+    "ly": 0,
+    "wait_for_log_occurrence": 1,
+    "ms": 100,
+    "rt": 0,
+    "wait_for_log_ms": 120000,
+    "name": "original-startup-movie-1-Start-skip",
+    "buttons": 16,
+    "wait_for_log": "[NATIVE MOVIE INPUT] armed owner=",
+    "wait_after_ms": 1000,
+    "capture_after": false
+  },
+  {
+    "lx": 0,
+    "ly": 0,
+    "wait_for_log_occurrence": 2,
+    "ms": 100,
+    "rt": 0,
+    "wait_for_log_ms": 120000,
+    "name": "original-startup-movie-2-Start-skip",
+    "buttons": 16,
+    "wait_for_log": "[NATIVE MOVIE INPUT] armed owner=",
+    "wait_after_ms": 1000,
+    "capture_after": false
+  },
+  {
+    "lx": 0,
+    "ly": 0,
+    "wait_for_log_occurrence": 3,
+    "ms": 100,
+    "rt": 0,
+    "wait_for_log_ms": 120000,
+    "name": "original-startup-movie-3-Start-skip",
+    "buttons": 16,
+    "wait_for_log": "[NATIVE MOVIE INPUT] armed owner=",
+    "wait_after_ms": 1000,
+    "capture_after": false
+  },
+  {
+    "lx": 0,
+    "ly": 0,
+    "wait_for_log_occurrence": 4,
+    "ms": 100,
+    "rt": 0,
+    "wait_for_log_ms": 120000,
+    "name": "original-startup-movie-4-Start-skip",
+    "buttons": 16,
+    "wait_for_log": "[NATIVE MOVIE INPUT] armed owner=",
+    "wait_after_ms": 1000,
+    "capture_after": false
+  },
+  {
+    "buttons": 0,
+    "ms": 50,
+    "ly": 0,
+    "wait_after_ms": 5000,
+    "capture_after": true,
+    "name": "observe-after-four-original-movie-completions",
+    "lx": 0,
+    "rt": 0
+  }
+]

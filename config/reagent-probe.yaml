@@ -1,0 +1,54 @@
+# Evidence-only setup for this project's pinned six-function Ghidra export.
+# Candidate acceptance deliberately stays closed until a real candidate build
+# and differential gate have been configured. Do not set require_verified=false.
+project_profile:
+  name: simpsons-ppc64-ilp32-evidence
+  language_standard: C++20
+  source_root: K:/SimpsonsNativeCopy/runtime
+  hook_patterns: []
+  stub_patterns: []
+  stub_markers: []
+  stub_call_prefix: __re_agent_no_stub_prefix__
+  class_macro: ''
+  hooks_csv: null
+  prompt_rules:
+    - Target is big-endian Xbox 360 PowerPC, with 64-bit registers and 32-bit addresses. Host x64 ABI is not the input ABI.
+    - Original words and the independent decoder are authoritative. Ghidra pseudocode and high P-code are unverified evidence.
+    - Only the byte-pinned savegprlr_28 helper has been analyzed inline; other helper ABIs remain unresolved. Do not invent helper return values.
+    - Do not change original assets, reference projects, generated C++, or runtime code as part of this evidence probe.
+    - Preserve unresolved SDK calls as explicit unknowns. No fabricated render-state implementation or guest GPU command-stream model.
+llm:
+  provider: codex
+  cli_path: C:/Users/nacho/AppData/Local/OpenAI/Codex/bin/fd4c151a749f3ab4/codex.exe
+  model: gpt-6-astra
+  timeout_s: 180
+  max_tokens: 4096
+backend:
+  type: ghidra-json
+  export_dir: K:/SimpsonsNativeCopy/analysis/reagent/ppc64-32addr-inline-02/annotated-exports
+  timeout_s: 30
+orchestrator:
+  max_review_rounds: 1
+  max_llm_calls_per_function: 2
+  max_functions_per_class: 1
+  max_attempts_per_function: 1
+  objective_verifier_enabled: true
+  investigation_enabled: false
+parity:
+  enabled: true
+  inline_wrapper_autoskip: false
+  cache_dir: K:/SimpsonsNativeCopy/build/reagent-probe/parity-cache
+validation:
+  enabled: true
+  require_verified: true
+  trust_configured_commands: false
+  project_root: K:/SimpsonsNativeCopy
+  build_commands: []
+  test_commands: []
+  parity_fail_on_red: true
+  parity_fail_on_yellow: true
+output:
+  report_dir: K:/SimpsonsNativeCopy/build/reagent-probe/reports
+  log_dir: K:/SimpsonsNativeCopy/build/reagent-probe/logs
+  session_file: K:/SimpsonsNativeCopy/build/reagent-probe/session.json
+  format: json

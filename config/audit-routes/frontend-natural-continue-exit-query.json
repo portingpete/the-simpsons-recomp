@@ -1,0 +1,166 @@
+[
+  {
+    "capture_after": false,
+    "lx": 0,
+    "ms": 50,
+    "ly": 0,
+    "buttons": 0,
+    "wait_after_ms": 30000,
+    "rt": 0,
+    "name": "original-natural-startup-wait-1"
+  },
+  {
+    "capture_after": false,
+    "lx": 0,
+    "ms": 50,
+    "ly": 0,
+    "buttons": 0,
+    "wait_after_ms": 30000,
+    "rt": 0,
+    "name": "original-natural-startup-wait-2"
+  },
+  {
+    "capture_after": false,
+    "lx": 0,
+    "ms": 50,
+    "ly": 0,
+    "buttons": 0,
+    "wait_after_ms": 30000,
+    "rt": 0,
+    "name": "original-natural-startup-wait-3"
+  },
+  {
+    "capture_after": false,
+    "lx": 0,
+    "ms": 50,
+    "ly": 0,
+    "buttons": 0,
+    "wait_after_ms": 30000,
+    "rt": 0,
+    "name": "original-natural-startup-wait-4"
+  },
+  {
+    "capture_after": true,
+    "lx": 0,
+    "ms": 50,
+    "ly": 0,
+    "buttons": 0,
+    "wait_after_ms": 30000,
+    "rt": 0,
+    "name": "original-natural-startup-wait-5"
+  },
+  {
+    "name": "title-Start",
+    "buttons": 16,
+    "lx": 0,
+    "ly": 0,
+    "ms": 300,
+    "rt": 0,
+    "wait_after_ms": 3000,
+    "capture_after": true
+  },
+  {
+    "name": "storage-notice-Done",
+    "buttons": 4096,
+    "lx": 0,
+    "ly": 0,
+    "ms": 300,
+    "rt": 0,
+    "wait_after_ms": 3000,
+    "capture_after": true
+  },
+  {
+    "name": "native-storage-select-private-folder",
+    "buttons": 4096,
+    "lx": 0,
+    "ly": 0,
+    "ms": 300,
+    "rt": 0,
+    "wait_for_log": "[NATIVE STORAGE UI] visible",
+    "wait_for_log_ms": 60000,
+    "wait_after_ms": 3000,
+    "capture_after": true
+  },
+  {
+    "name": "autosave-notice-Done",
+    "buttons": 4096,
+    "lx": 0,
+    "ly": 0,
+    "ms": 300,
+    "rt": 0,
+    "wait_for_log": "[NATIVE STORAGE UI] completed selected=1",
+    "wait_for_log_ms": 60000,
+    "wait_after_ms": 3000,
+    "capture_after": true
+  },
+  {
+    "name": "select-saved-slot-A",
+    "buttons": 4096,
+    "lx": 0,
+    "ly": 0,
+    "ms": 100,
+    "rt": 0,
+    "wait_after_ms": 1000,
+    "capture_after": true
+  },
+  {
+    "name": "confirm-saved-slot-load",
+    "buttons": 4096,
+    "lx": 0,
+    "ly": 0,
+    "ms": 100,
+    "rt": 0,
+    "wait_after_ms": 1000,
+    "capture_after": true
+  },
+  {
+    "name": "main-menu-Continue-Game",
+    "buttons": 4096,
+    "lx": 0,
+    "ly": 0,
+    "ms": 100,
+    "rt": 0,
+    "wait_after_ms": 15000,
+    "capture_after": true
+  },
+  {
+    "name": "pause-after-continuation",
+    "buttons": 16,
+    "lx": 0,
+    "ly": 0,
+    "ms": 300,
+    "rt": 0,
+    "wait_after_ms": 1000,
+    "capture_after": true
+  },
+  {
+    "name": "pause-menu-first-down",
+    "buttons": 2,
+    "lx": 0,
+    "ly": 0,
+    "ms": 100,
+    "rt": 0,
+    "wait_after_ms": 300,
+    "capture_after": false
+  },
+  {
+    "name": "pause-menu-second-down",
+    "buttons": 2,
+    "lx": 0,
+    "ly": 0,
+    "ms": 100,
+    "rt": 0,
+    "wait_after_ms": 300,
+    "capture_after": true
+  },
+  {
+    "name": "pause-menu-request-selected-exit",
+    "buttons": 4096,
+    "lx": 0,
+    "ly": 0,
+    "ms": 100,
+    "rt": 0,
+    "wait_after_ms": 1000,
+    "capture_after": true
+  }
+]

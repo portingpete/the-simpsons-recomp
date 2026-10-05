@@ -1,0 +1,43 @@
+# Review/merge fragment only. Keep the existing 82400040 commit and 82400278
+# sampler entry hooks. Null 824408E0 stays in the driver's binding-reset scope.
+# 82400D50's entry hook is preflight-only; it MUST continue the original body.
+[[midasm_hook]]
+address = 0x82400D50
+name = "SimpsonsNativeStateRebuildPreflight"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a64863b6559421ff403d6082d1"
+
+[[midasm_hook]]
+address = 0x82400FD8
+name = "SimpsonsNativeStateRebuildMin"
+registers = ["ctx", "base"]
+jump_address = 0x82400FDC
+evidence_hex = "4803aa69"
+
+[[midasm_hook]]
+address = 0x82401004
+name = "SimpsonsNativeStateRebuildMag"
+registers = ["ctx", "base"]
+jump_address = 0x82401008
+evidence_hex = "4803abcd"
+
+[[midasm_hook]]
+address = 0x82401028
+name = "SimpsonsNativeStateRebuildMip"
+registers = ["ctx", "base"]
+jump_address = 0x8240104C
+evidence_hex = "817acaf8915d00207d385a148109048c5148b9d09109048ce94b00187d4acb78f94b0018"
+
+[[midasm_hook]]
+address = 0x82401068
+name = "SimpsonsNativeStateRebuildAddressU"
+registers = ["ctx", "base"]
+jump_address = 0x8240108C
+evidence_hex = "817acaf87d3cba14915dffc07d09582e514854ea7d09592ee94b00187f2a5378f94b0018"
+
+[[midasm_hook]]
+address = 0x824010A8
+name = "SimpsonsNativeStateRebuildAddressV"
+registers = ["ctx", "base"]
+jump_address = 0x824010CC
+evidence_hex = "817acaf87d3cba14915dffd07d09582e51486c247d09592ee94b00187f2a5378f94b0018"
