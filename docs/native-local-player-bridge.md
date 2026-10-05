@@ -63,5 +63,5 @@ malformed-file tests remain in `NativeLocalPlayerOwnership`.
 
 These fixtures support service correctness. They do not establish an original
 profile chooser, controller-to-player association, save/load, or gameplay.
-Integrated build and actual-boot results are recorded in `STATUS.md` only after
+Integrated build and actual-boot results are recorded in local development logs only after
 they have run.

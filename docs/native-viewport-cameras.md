@@ -79,4 +79,4 @@ No new hooks or rendering paths are introduced. Viewport frame children and
 parented-frame cleanup remain outside this fixture. The earlier shadow and
 reflection owners use different teardown paths; their documented cleanup gaps
 are unchanged. The current actual startup boundary and checkpoint are recorded
-in STATUS.md.
+in local development logs.

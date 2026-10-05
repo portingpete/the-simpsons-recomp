@@ -9,7 +9,7 @@ sampling, shadow taps, dirty maps and direct/recorded resource lifetime.
 Original BC1/BC2/BC3 mips retain every authored level. LIVE034 uploads15
 mipmapped textures and reaches `simpsons_rigid_dualtextured`8202AD78, which remains
 unimplemented. No presented gameplay color or character control is verified.
-See [LIVE034 evidence](session-checkpoint-2026-09-13-live034.md).
+See LIVE034 evidence (local development record).
 
 Historical integration checkpoint: live027 completes original rigid activation,
 native recording begin with the original CPU record/cache linkage, all82 scalar

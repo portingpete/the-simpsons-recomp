@@ -35,4 +35,4 @@ implementation. Those existing allocation tests do not establish physical
 console-memory parity. This document alone establishes no movie playback,
 display acceptance, menu or gameplay milestone.
 
-Build185 and actual-run validation are recorded in STATUS.md after execution.
+Build185 and actual-run validation are recorded in local development logs after execution.

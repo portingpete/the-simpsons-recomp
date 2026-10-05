@@ -35,5 +35,5 @@ retained r11=100000000, actual CTR=8284C520, original frame/nonvolatile restorat
 and unchanged input/output bytes. This is an executable regression for the
 observed failure, not an interpreter or replacement of the original parser.
 
-Full build and actual boot results are recorded in `STATUS.md` after execution.
+Full build and actual boot results are recorded in local development logs after execution.
 No original game/reference files or generated translation files were edited.

@@ -31,7 +31,7 @@ underflow, main/worker/callback return and throw, nested callbacks, SEH exit,
 and host arithmetic during destructor unwind. All nine cases failed before
 the fix and passed after it. The fixture is registered as
 `NativeHostFloatingPoint` in CTest. The regenerated full lifecycle run remains
-the integration check; consult `STATUS.md` for its current result.
+the integration check; consult local development logs for its current result.
 
 No generated function was edited. Regeneration is required because every AOT
 translation unit includes the generated copy of the production template.

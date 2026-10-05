@@ -3,7 +3,7 @@
 The original loading camera now selects native attachments, clears the real
 1280x720 RGB10A2/depth/stencil resources, and runs its original CPU begin/end
 bookkeeping. This is a resource operation, not a rendered or presented frame.
-The latest executable observation is recorded in `STATUS.md`.
+The latest executable observation is recorded in local development logs.
 The later viewport extension is documented in `native-viewport-camera-passes.md`;
 the loading-camera-only discussion below records the original bounded milestone.
 
@@ -52,7 +52,7 @@ Real GPU readback checks all pixels, all eight selector combinations, absent
 depth, unchanged attachment components and rejected calls. Separate backend
 tests seed nonzero depth and stencil and verify each independent flag on WARP
 and hardware. The driver fixture also exercises original camera reuse and
-resource destruction; its latest result is reported separately in `STATUS.md`.
+resource destruction; its latest result is reported separately in local development logs.
 
 ## Pipeline state before the screen helper
 

@@ -4,7 +4,6 @@
 /checkpoints/
 /userdata/
 /saved-replays/*
-!/saved-replays/README.md
 /handoff-gpt6.zip
 /.pytest_cache/
 /.mypy_cache/
@@ -78,3 +77,21 @@ __pycache__/
 !.env.sample
 *.pem
 *.key
+
+# Workstation launch shortcuts: the repository ships only the regular launcher.
+/Play*.cmd
+!/Play The Simpsons Game.cmd
+/Render Test*.cmd
+
+# Local development journals, AI handoffs and session checkpoints.
+/HANDOFF*.txt
+/*handoff*.md
+/MODDING_PLAN.md
+/MODLOG.md
+/STATUS.md
+/docs/handoff-*.md
+/docs/session-*.md
+/docs/reach-game-*.md
+/docs/task-stop-deadline.md
+/tools/native_continuation_prompt.txt
+/config/*-probe.yaml

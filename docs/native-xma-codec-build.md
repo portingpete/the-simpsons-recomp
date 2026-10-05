@@ -1,6 +1,6 @@
 # Owned native XMA codec build
 
-Updated2026-09-19: [reach-game301](reach-game-301.md) adds an XMA1/XMA2
+Updated2026-09-19: reach-game301 (local development record) adds an XMA1/XMA2
 exhausted-packet boundary correction. Strict frame validation and compressed
 bytes are retained. This also corrects the corresponding stock-mode packet
 transition. The builder now verifies migration from the previous owned patch
