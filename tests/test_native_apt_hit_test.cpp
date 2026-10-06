@@ -18,6 +18,7 @@
 void SimpsonsNativeAptHitTest(PPCContext&,uint8_t*);
 void SimpsonsNativeMenuMouse(PPCContext&,uint8_t*);
 void SimpsonsNativeMainMenuExit(PPCContext&,uint8_t*);
+bool SimpsonsNativeMainMenuExitQueryCallback(PPCContext&,uint8_t*);
 
 namespace {
 using namespace Simpsons;
@@ -506,12 +507,73 @@ void exerciseMouseDomains(const char* image) {
     need(bridgeCalls==calls&&!rt.window->isMenuMouse()&&!PPC_LOAD_U32(menuManager+84),"Adapter queried or published the obsolete hardcoded domain eight");
     rt.engineDriver.reset();rt.window.reset();
 }
+constexpr uint32_t exitMenuText=0x35000,exitManager=0x36000,exitRequest=0x36100,
+                   exitStringClasses=0x36200,exitQuestionStorage=0x36300,
+                   exitStringPool=0x82DFD8D0,exitStringClass=exitStringClasses+32;
+constexpr char exitQuestion[]="Are you sure you want to exit the game?";
+uint32_t exitAllocations{},exitPrompts{},exitFrees{};
+bool exitAllocationFails{},exitSynchronousDecline{};
+void exitAllocate(PPCContext& c,uint8_t* base) {
+    ++exitAllocations;
+    need(c.r3.u32==96,"Exit confirmation changed the original popup payload size");
+    if(exitAllocationFails){c.r3.u64=0;return;}
+    need(PPC_LOAD_U32(exitStringClass+12)==exitQuestionStorage,
+         "Previous exit question was not returned to the original string pool");
+    std::memset(PPCGuestPointer(base,exitRequest,96,true),0xA5,96);
+    c.r3.u64=exitRequest;
+}
+void exitFree(PPCContext& c,uint8_t* base) {
+    ++exitFrees;
+    need(c.r3.u32==exitRequest,"Exit confirmation freed another popup payload");
+    need(PPC_LOAD_U32(exitStringClass+12)==exitQuestionStorage,
+         "Exit confirmation did not run the original question-string destructor before freeing its payload");
+}
+void exitEnqueue(PPCContext& c,uint8_t* base) {
+    ++exitPrompts;
+    need(c.r3.u32==exitRequest,"Exit confirmation enqueued another popup payload");
+    need(active&&active->nativeMainMenuExitQuery==exitRequest&&!active->nativeMainMenuExitQueryQueued,
+         "Exit confirmation accepted synchronous completion before its popup was queued");
+    need(PPC_LOAD_U32(exitRequest)==0x88&&PPC_LOAD_U32(exitRequest+4)==0&&
+         PPC_LOAD_U32(exitRequest+8)==0&&PPC_LOAD_U32(exitRequest+12)==2&&PPC_LOAD_U32(exitRequest+16)==0,
+         "Exit confirmation changed the original Yes/No type, Yes result, head type or pause-popup flags");
+    need(PPC_LOAD_U32(exitRequest+20)==exitQuestionStorage&&
+         PPC_LOAD_U16(exitRequest+24)==sizeof(exitQuestion)-1&&PPC_LOAD_U16(exitRequest+26)==64&&
+         !std::strcmp(reinterpret_cast<const char*>(PPCGuestPointer(base,exitQuestionStorage,sizeof(exitQuestion),false)),exitQuestion),
+         "Exit confirmation did not construct its question using the original guest string setter");
+    need(PPC_LOAD_U32(exitRequest+92)==0x8239C7B0,"Exit confirmation lost its original free-only callback entry");
+    if(exitSynchronousDecline) {
+        // The real popup owner reports GetSelected(+8) immediately when its
+        // movie is not ready. This unqueued result must release the token.
+        c.r3.u64=PPC_LOAD_U32(exitRequest+8);c.r4.u64=exitRequest;c.r5.u64=0;
+        PPCSafeIndirect(c,base,0x8239C7B0);
+    }
+}
 void exerciseMainMenuExit(const char* image) {
     Runtime rt;PPCContext entry{};rt.load(image);rt.initialize(entry);auto* base=rt.base;
-    constexpr uint32_t menuText=0x35000;rt.map(menuText,0x1000,true,"MainMenu selected ID fixture");
+    rt.map(exitMenuText,0x2000,true,"MainMenu exit confirmation fixture");
     need(PPC_LOAD_U32(0x8239F6F4)==0x3D608200&&PPC_LOAD_U32(0x8239F6F8)==0x38610050&&
          PPC_LOAD_U32(0x8239F6FC)==0x388B1F7C&&PPC_LOAD_U32(0x8239F700)==0x483A2539,
          "Retail MainMenu accepted-selection string comparison changed");
+    // Keep the real popup constructor, setters and destructor. The question
+    // uses the real 64-byte small-string free-list path, without a game heap.
+    PPC_STORE_U32(exitStringPool,exitRequest);PPC_STORE_U32(exitStringPool+12,128);
+    PPC_STORE_U32(exitStringPool+16,exitStringClasses);
+    PPC_STORE_U32(exitStringClass,64);PPC_STORE_U32(exitStringClass+12,exitQuestionStorage);
+    PPC_STORE_U32(exitQuestionStorage,0);
+    struct ExitDispatch {
+        uint8_t* base;std::array<PPCFunc*,3> previous;
+        const std::array<uint32_t,3> addresses{0x8269BD70,0x823A8748,0x8269BEB0};
+        explicit ExitDispatch(uint8_t* memory):base(memory) {
+            constexpr std::array<PPCFunc*,3> mocks{exitAllocate,exitEnqueue,exitFree};
+            for(size_t i=0;i<addresses.size();++i) {
+                previous[i]=PPC_LOOKUP_FUNC(base,addresses[i]);
+                need(previous[i]!=nullptr,"Original exit popup dispatch is absent");
+                PPC_LOOKUP_FUNC(base,addresses[i])=mocks[i];
+            }
+        }
+        ~ExitDispatch(){for(size_t i=0;i<addresses.size();++i)PPC_LOOKUP_FUNC(base,addresses[i])=previous[i];}
+    } dispatch(base);
+    exitAllocations=exitPrompts=exitFrees=0;exitAllocationFails=exitSynchronousDecline=false;
     const auto previous=std::getenv("SIMPSONS_BACKGROUND_WINDOW");
     const bool existed=previous!=nullptr;const std::string saved=previous?previous:"";
     need(!_putenv_s("SIMPSONS_BACKGROUND_WINDOW","1"),"MainMenu Exit fixture environment failed");
@@ -521,7 +583,7 @@ void exerciseMainMenuExit(const char* image) {
     auto invoke=[&](const char* text) {
         // Place the terminator at the final byte of this guest mapping. Short
         // stock IDs must not trigger a full native-exit-literal extent probe.
-        const auto length=uint32_t(std::strlen(text)+1),address=menuText+0x1000-length;
+        const auto length=uint32_t(std::strlen(text)+1),address=exitMenuText+0x1000-length;
         std::memcpy(rt.pointer(address,length,true),text,length);PPC_STORE_U32(c.r1.u32+80,address);
         const auto before=c;const auto hostFp=PPCFPSCRRegister::getcsr();const auto previousContext=currentContext;SetLastError(0x6192);
         std::array<uint8_t,0xC0> frame{};std::memcpy(frame.data(),rt.pointer(c.r1.u32,uint32_t(frame.size()),false),frame.size());
@@ -534,7 +596,52 @@ void exerciseMainMenuExit(const char* image) {
     for(const auto text:{"Continue","Options","Extras","ExitGame","NativeExitGameExtra","nativeexitgame",""}) {
         invoke(text);need(!rt.stopping.load()&&!rt.window->closed.load(),"Unrelated menu ID closed the native game");
     }
-    invoke("NativeExitGame");need(rt.stopping.load()&&rt.stopReason=="Native window closed","MainMenu Exit did not synchronously cancel through the native window-close path");
+    need(!exitAllocations&&!exitPrompts,"Unrelated menu ID constructed an exit confirmation");
+    PPC_STORE_U32(0x82D08E60,0);invoke("NativeExitGame");
+    need(!exitAllocations&&!exitPrompts&&!rt.stopping.load(),"Missing popup owner created an unowned request or closed the game");
+    PPC_STORE_U32(0x82D08E60,exitManager);PPC_STORE_U32(exitManager+128,5);invoke("NativeExitGame");
+    need(!exitAllocations&&!exitPrompts&&!rt.stopping.load(),"Full popup queue created an unowned request or closed the game");
+    PPC_STORE_U32(exitManager+128,0);exitAllocationFails=true;invoke("NativeExitGame");
+    need(exitAllocations==1&&!exitPrompts&&!rt.stopping.load(),"Failed popup allocation closed the game or enqueued a null request");
+    exitAllocationFails=false;invoke("NativeExitGame");
+    need(exitAllocations==2&&exitPrompts==1&&!exitFrees&&rt.nativeMainMenuExitQuery==exitRequest&&rt.nativeMainMenuExitQueryQueued&&
+         !rt.stopping.load()&&!rt.window->closed.load(),
+         "MainMenu Exit closed immediately instead of retaining its confirmation");
+    invoke("NativeExitGame");
+    need(exitAllocations==2&&exitPrompts==1,"Repeated Exit selection stacked a duplicate confirmation");
+    auto reply=[&](uint32_t choice,uint32_t aborted,uint32_t request=exitRequest,bool generated=true) {
+        auto callback=seeded(entry,choice);callback.r4.u64=request;callback.r5.u64=aborted;
+        const auto before=callback;const auto hostFp=PPCFPSCRRegister::getcsr();const auto previousContext=currentContext;SetLastError(0x6192);
+        std::array<uint8_t,0xC0> frame{};std::memcpy(frame.data(),rt.pointer(callback.r1.u32,uint32_t(frame.size()),false),frame.size());
+        bool handled=true;
+        if(generated)PPCSafeIndirect(callback,base,0x8239C7B0);
+        else handled=SimpsonsNativeMainMenuExitQueryCallback(callback,base);
+        need(!std::memcmp(&callback,&before,sizeof(callback)),"Exit confirmation callback changed original popup PPC state");
+        need(currentContext==previousContext&&PPCFPSCRRegister::getcsr()==hostFp&&GetLastError()==0x6192,
+             "Exit confirmation callback changed host FP/error/current context");
+        need(!std::memcmp(frame.data(),rt.pointer(callback.r1.u32,uint32_t(frame.size()),false),frame.size()),
+             "Exit confirmation callback changed original popup frame");
+        return handled;
+    };
+    need(!reply(0,0,exitRequest+128,false)&&!exitFrees&&rt.nativeMainMenuExitQuery==exitRequest&&rt.nativeMainMenuExitQueryQueued&&!rt.stopping.load(),
+         "Exit confirmation accepted or freed another popup's callback");
+    reply(1,0);
+    need(exitFrees==1&&!rt.nativeMainMenuExitQuery&&!rt.nativeMainMenuExitQueryQueued&&!rt.stopping.load()&&!rt.window->closed.load(),
+         "No closed the game or retained its exit request");
+    need(!reply(0,0,exitRequest,false)&&exitFrees==1&&!rt.stopping.load(),
+         "A stale exit callback closed the game or freed its request twice");
+    invoke("NativeExitGame");reply(0,1);
+    need(exitPrompts==2&&exitFrees==2&&!rt.nativeMainMenuExitQuery&&!rt.nativeMainMenuExitQueryQueued&&!rt.stopping.load()&&!rt.window->closed.load(),
+         "Back/abort on Yes closed the game or retained its exit request");
+    exitSynchronousDecline=true;invoke("NativeExitGame");
+    need(exitPrompts==3&&exitFrees==3&&!rt.nativeMainMenuExitQuery&&!rt.nativeMainMenuExitQueryQueued&&!rt.stopping.load()&&!rt.window->closed.load(),
+         "A popup movie that was not ready treated its synchronous result as an exit");
+    exitSynchronousDecline=false;invoke("NativeExitGame");
+    need(exitPrompts==4&&exitFrees==3&&rt.nativeMainMenuExitQueryQueued&&!rt.stopping.load(),
+         "Declining synchronously prevented a later confirmation");
+    reply(0,0x100); // The original abort argument is its low byte.
+    need(exitFrees==4&&!rt.nativeMainMenuExitQuery&&!rt.nativeMainMenuExitQueryQueued&&rt.stopping.load()&&rt.stopReason=="Native window closed",
+         "Yes did not free its request then synchronously cancel through the native window-close path");
     for(unsigned i=0;i<100&&!rt.window->closed.load();++i)Sleep(10);
     need(rt.window->closed.load(),"MainMenu Exit did not deliver WM_CLOSE to its owned window thread");
     rt.window.reset();
@@ -543,6 +650,6 @@ void exerciseMainMenuExit(const char* image) {
 int main(int argc,char** argv) {
     try {
         need(argc==2,"Original image required");exercise(argv[1]);exerciseConstantReload(argv[1]);exerciseMouseDomains(argv[1]);exerciseCloseFailurePriority(argv[1]);exerciseMainMenuExit(argv[1]);
-        std::printf("PASS original Apt hitTest: %zu checks; real text/movie bounds, original point oracle, nested transforms, visibility, edges, original Boolean allocation, original constant unload/reload, original controller mapper/publisher, receiver ownership, arguments and PPC/host ABI\n",checks);return 0;
+        std::printf("PASS original Apt hitTest: %zu checks; real text/movie bounds, original point oracle, nested transforms, visibility, edges, original Boolean allocation, original constant unload/reload, original controller mapper/publisher, receiver ownership, exit confirmation, arguments and PPC/host ABI\n",checks);return 0;
     } catch(const std::exception& error){std::fprintf(stderr,"FAIL original Apt hitTest: %s\n",error.what());return 1;}
 }

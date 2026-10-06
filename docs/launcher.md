@@ -51,7 +51,8 @@ See [native input prompts](native-input-prompts.md) and
 [controller setup](native-controllers.md) for input bindings and device behavior.
 Use **Options → Controls** for [keyboard/mouse bindings and mouse options](native-control-settings.md).
 The game loads saved [Video preferences](native-video-settings.md).
-Choose **Exit Game** from the main menu to close the game.
+Choose **Exit Game** from the main menu, then **Yes** to close the game.
+**No** or **Back** returns to the menu.
 [Steam Input](steam-input.md) describes the supported Steam configuration.
 
 ## Logs and errors

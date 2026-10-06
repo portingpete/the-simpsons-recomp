@@ -204,6 +204,9 @@ public:
     std::filesystem::path controlSettingsPath;
     NativeCameraProjectionState nativeCameraProjection;
     bool videoSettingsPending=true;
+    // Owned by the original frontend thread; discarded with its guest memory.
+    uint32_t nativeMainMenuExitQuery=0;
+    bool nativeMainMenuExitQueryQueued=false;
     std::filesystem::path videoSettingsPath,nativeFrontendRoot;
     uint64_t nativePresentationTimebase=0; // Real time sampled at the most recent native presentation entry.
     FramePacer framePacer; // Even-cadence presentation limiter state.

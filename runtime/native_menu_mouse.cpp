@@ -11,6 +11,7 @@
 #include <cstring>
 
 namespace {
+constexpr uint32_t exitQueryCallback=0x8239C7B0;
 struct HostState {
     const uint32_t fp=PPCFPSCRRegister::getcsr();const DWORD error=GetLastError();
     HostState(){PPCFPSCRRegister::restoreHostCSR(PPCFPSCRRegister::DefaultCSR);}
@@ -95,11 +96,63 @@ void SimpsonsNativeMainMenuExit(PPCContext& ctx,uint8_t* base) {
         const auto at=uint64_t(text)+i;
         if(at>UINT32_MAX||*PPCGuestPointer(base,uint32_t(at),1,false)!=uint8_t(selection[i]))return;
     }
-    // Match Alt+F4/WM_CLOSE: cancel guest execution before window teardown,
-    // then let the window thread restore capture and destroy its own HWND.
-    rt->requestStop("Native window closed");
-    if(const auto window=rt->window->handle())PostMessageW(window,WM_CLOSE,0,0);
-    std::fprintf(stderr,"[NATIVE MAIN MENU] Exit Game selected; graceful window close requested\n");
+    if(rt->nativeMainMenuExitQuery)return;
+    const auto manager=PPC_LOAD_U32(0x82D08E60);
+    if(!manager)return;
+    rt->probe(manager,160,false);
+    // The original popup owner has five slots. Do not create an unowned
+    // request when its enqueue path cannot retain it.
+    if(PPC_LOAD_U32(manager+128)>=5)return;
+    Simpsons::EngineCpuCalls cpu(ctx,base);
+    const auto request=cpu.invoke(0x8269BD70,96);
+    if(!request)return;
+    cpu.invoke(0x823A7E28,request);
+    constexpr char question[]="Are you sure you want to exit the game?";
+    const auto textOut=cpu.registers().r1.u32+0x80;
+    std::memcpy(PPCGuestPointer(base,textOut,sizeof(question),true),question,sizeof(question));
+    cpu.invoke(0x823A70D8,request,textOut);
+    cpu.invoke(0x823A7218,request,2); // Original Yes/No popup type.
+    cpu.invoke(0x823A7250,request,0);
+    cpu.invoke(0x823A7278,request,1);
+    cpu.invoke(0x823A72C8,request,1);
+    cpu.invoke(0x823A73E0,request,0);
+    // Type two has separate No/Yes buttons; its Yes shortcut forwards the
+    // constructor's selected value zero. Only a successfully queued popup
+    // may confirm, since the not-ready path also calls back with zero.
+    PPC_STORE_U32(request+92,exitQueryCallback);
+    rt->nativeMainMenuExitQuery=request;
+    rt->nativeMainMenuExitQueryQueued=false;
+    std::fprintf(stderr,"[NATIVE MAIN MENU] Exit Game selected; confirmation requested\n");
+    // Enqueue owns the payload and may synchronously invoke its callback.
+    // Do not dereference it after this call.
+    cpu.invoke(0x823A8748,request);
+    if(rt->nativeMainMenuExitQuery==request)rt->nativeMainMenuExitQueryQueued=true;
+}
+
+bool SimpsonsNativeMainMenuExitQueryCallback(PPCContext& ctx,uint8_t* base) {
+    HostState host;auto* rt=Simpsons::active;
+    if(!rt||base!=rt->base||!rt->nativeMainMenuExitQuery||
+       ctx.r4.u32!=rt->nativeMainMenuExitQuery)return false;
+    const bool accepted=rt->nativeMainMenuExitQueryQueued&&ctx.r3.u32==0&&ctx.r5.u8==0;
+    const auto request=rt->nativeMainMenuExitQuery;rt->nativeMainMenuExitQuery=0;
+    rt->nativeMainMenuExitQueryQueued=false;
+    // Match the original free-only callback's string and allocation cleanup.
+    // Cancel/back and popup-owner teardown both release the pending token.
+    Simpsons::EngineCpuCalls cpu(ctx,base);
+    cpu.invoke(0x82390610,request);
+    cpu.invoke(0x8269BEB0,request);
+    if(accepted&&rt->window) {
+        // Cancel guest execution before the window thread tears down its HWND.
+        rt->requestStop("Native window closed");
+        if(const auto window=rt->window->handle())PostMessageW(window,WM_CLOSE,0,0);
+    }
+    std::fprintf(stderr,"[NATIVE MAIN MENU] Exit Game confirmation %s\n",accepted?"accepted":"cancelled");
+    return true;
+}
+
+PPC_FUNC_IMPL(__imp__sub_8239C7B0);
+PPC_FUNC(sub_8239C7B0) {
+    if(!SimpsonsNativeMainMenuExitQueryCallback(ctx,base))__imp__sub_8239C7B0(ctx,base);
 }
 
 void SimpsonsNativeMenuMouse(PPCContext& ctx,uint8_t* base) {
