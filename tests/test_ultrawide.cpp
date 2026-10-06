@@ -85,6 +85,58 @@ struct NativeUltrawideProbe {
         }
         std::puts("Verified Im2D preserveAspect, both pixel centers, immediate/batch coverage and viewport restoration");
     }
+    static void uiBackdrop() {
+        for(const auto extent:{std::array<uint32_t,2>{1280,720},{2560,1080},{3440,1440},{5120,1440}}) {
+            NativeBackend backend(true,false);backend.configureRendering(extent[0],extent[1],1);
+            auto color=backend.createTarget(128,72,TargetFormat::RGB10A2,TargetScale::Scene);
+            auto depth=backend.createDepthTarget(128,72,TargetScale::Scene);
+            backend.bindTargets({color,nullptr,nullptr,nullptr},depth);backend.setViewport({0,0,128,72,0,1});
+            const auto original=viewport(backend);
+            const auto white=backend.createTexture(1,1,TextureFormat::RGBA8,std::array<uint8_t,4>{255,255,255,255});
+            for(bool half:{false,true})for(bool list:{false,true})for(bool batch:{false,true}) {
+                auto dim=quad(true,half);dim.blendWord=0x07060706;dim.expandedBlend=1;
+                // The collectible GrayOut rectangle overhangs the Apt stage.
+                for(auto& v:dim.vertices){v.color={0,0,0,.5f};v.position[0]=v.position[0]<64?-25.5f:153.5f;}
+                if(list){const auto strip=dim.vertices;dim.primitiveType=3;dim.vertices={strip[0],strip[1],strip[2],strip[2],strip[1],strip[3]};}
+                const auto authored=dim.vertices;
+                need(isFullCanvasUiFill(dim),"Authored uniform full-canvas dimmer was not recognized");
+                dim.preserveAspect=!isFullCanvasUiFill(dim);
+                backend.clearTarget(color,{1,0,0,1});
+                if(batch)backend.queueIm2D(color,depth,dim);else backend.drawIm2D(color,depth,dim);
+                backend.flushIm2D();
+                const auto bytes=backend.readbackTarget(color);const auto width=color->pixelWidth(),height=color->pixelHeight();
+                const auto center=pixel(bytes,width,width/2,height/2);
+                need((center&1023)>400 && (center&1023)<700,"UI backdrop did not alpha-dim the actual scene");
+                for(uint32_t x:{0u,4u,width/2,width-5,width-1})
+                    need(pixel(bytes,width,x,height/2)==center,"UI backdrop left an undimmed ultrawide edge");
+                need(dim.vertices.size()==authored.size() && std::memcmp(dim.vertices.data(),authored.data(),authored.size()*sizeof(Im2DVertex))==0,
+                     "UI aspect policy changed authored vertices");
+                need(same(viewport(backend),original),"UI backdrop failed to restore the scene viewport");
+                // Textured artwork still occupies the centered original UI.
+                auto art=quad(true,half);art.texture=white;
+                need(!isFullCanvasUiFill(art),"Textured UI artwork was treated as a backdrop");
+                backend.clearTarget(color,{1,0,0,1});
+                if(batch){backend.queueIm2D(color,depth,dim);backend.queueIm2D(color,depth,art);backend.flushIm2D();}
+                else{backend.drawIm2D(color,depth,dim);backend.drawIm2D(color,depth,art);}
+                const auto decorated=backend.readbackTarget(color);
+                need(pixel(decorated,width,width/2,height/2)==0xc00ffc00,"Centered artwork lost its original color or draw order");
+                if(extent[0]*9>extent[1]*16)
+                    need(pixel(decorated,width,0,height/2)==center && pixel(decorated,width,width-1,height/2)==center,
+                         "Centered artwork stretched over the ultrawide dimmer");
+                need(same(viewport(backend),original),"Centered artwork failed to restore the viewport after backdrop");
+            }
+        }
+        auto panel=quad(true,true);for(auto& v:panel.vertices)v.position[0]=v.position[0]<64?32.5f:96.5f;
+        need(!isFullCanvasUiFill(panel),"Partial UI panel was treated as a full-screen fill");
+        auto gradient=quad(true,true);gradient.vertices[3].color[0]=.5f;
+        need(!isFullCanvasUiFill(gradient),"Authored gradient was treated as a uniform fill");
+        auto overlap=quad(true,true);const auto strip=overlap.vertices;overlap.primitiveType=3;
+        overlap.vertices={strip[0],strip[1],strip[2],strip[0],strip[1],strip[3]};
+        need(!isFullCanvasUiFill(overlap),"Overlapping triangles passed a bounding-box-only backdrop check");
+        auto crossed=quad(true,true);std::swap(crossed.vertices[1],crossed.vertices[3]);
+        need(!isFullCanvasUiFill(crossed),"Crossed strip was treated as a complete rectangle");
+        std::puts("Verified full-screen UI dimming and centered artwork at 16:9/ultrawide extents, both topologies/pixel centers, immediate/queued ordering and panel rejection");
+    }
     static void movie() {
         NativeBackend backend(true,false);backend.configureRendering(2560,1080,1);
         auto color=backend.createTarget(128,72,TargetFormat::RGB10A2,TargetScale::Scene);
@@ -147,6 +199,6 @@ struct NativeUltrawideProbe {
 };
 }
 int main() {
-    try {NativeUltrawideProbe::sceneExtents();NativeUltrawideProbe::im2d();NativeUltrawideProbe::movie();NativeUltrawideProbe::presentation();return 0;}
+    try {NativeUltrawideProbe::sceneExtents();NativeUltrawideProbe::im2d();NativeUltrawideProbe::uiBackdrop();NativeUltrawideProbe::movie();NativeUltrawideProbe::presentation();return 0;}
     catch(const std::exception& error){std::fprintf(stderr,"%s\n",error.what());return 1;}
 }

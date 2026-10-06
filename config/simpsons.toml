@@ -21,6 +21,33 @@ restvmx_64_address = 0x82a4463c
 nonlocal_setjmp_address = 0x82A43E50
 functions = [{ address = 0x82242e48, size = 0xec }]
 
+# Raw native mouse displacement reaches the final original angular consumers.
+# Physical controllers and legacy replay remain on the original stick path.
+# These sites follow stick deadzone, speed*time, inversion and angle threshold.
+[[midasm_hook]]
+address = 0x82A1A748
+name = "SimpsonsNativeMouseCameraDispatch"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbe1fff0dbe1ffe8"
+
+[[midasm_hook]]
+address = 0x8295CA1C
+name = "SimpsonsNativeMouseCameraEligibility"
+registers = ["ctx", "base"]
+evidence_hex = "7c7e1b782b1e0006419a01703d60821e"
+
+[[midasm_hook]]
+address = 0x8295CB18
+name = "SimpsonsNativeMouseOrbit"
+registers = ["ctx", "base"]
+evidence_hex = "c0010068fc000210ff00f00041990014"
+
+[[midasm_hook]]
+address = 0x8296099C
+name = "SimpsonsNativeMouseLook"
+registers = ["ctx", "base"]
+evidence_hex = "fc00e210ff00f00041990010fc00ea10"
+
 # Publish the main camera's native window before original frustum rebuilding.
 # Scene visibility copies these planes before render begin, so widened FOV
 # must already be present here to keep objects in the additional visible area.
@@ -46,6 +73,14 @@ name = "SimpsonsNativeAptHitTest"
 registers = ["ctx", "base"]
 return = true
 evidence_hex = "3d6082e0806b1c7c4e800020"
+
+# Retail MainMenu Select has passed its input gate and copied the selected ID
+# into its stack string. Close only the appended native Exit Game choice.
+[[midasm_hook]]
+address = 0x8239F6F4
+name = "SimpsonsNativeMainMenuExit"
+registers = ["ctx", "base"]
+evidence_hex = "3d60820038610050388b1f7c483a2539"
 
 [[midasm_hook]]
 address = 0x823A206C
@@ -100,6 +135,28 @@ registers = ["ctx", "base"]
 evidence_hex = "2f1e0006"
 
 # Observe the original Apt input gate after its boolean result is computed.
+# Native Controls population and Save callback retain the same Apt string bridge.
+[[midasm_hook]]
+address = 0x823A54F0
+name = "SimpsonsNativeControlsPopulate"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff89421ffa04bfffc55"
+
+[[midasm_hook]]
+address = 0x823A5518
+name = "SimpsonsNativeControlsSave"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a69181fff89421ffa04bfffcc5"
+
+# Controls event6 selects a binding or accepts; event7 cancels the preview.
+[[midasm_hook]]
+address = 0x823A5A00
+name = "SimpsonsNativeControlsLeave"
+registers = ["ctx", "base"]
+evidence_hex = "2f1e0006409a002c7fe3fb784bfff7dd"
+
 # Retain the gate and epilogue; this diagnoses a blocked menu after Video.
 [[midasm_hook]]
 address = 0x823AC2E4

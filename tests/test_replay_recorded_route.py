@@ -98,6 +98,33 @@ class RecordedRouteTests(unittest.TestCase):
         self.assertEqual((result["playback_start_scene"], result["planned_stop_scene"],
                           result["recorded_polls"], result["events"]), (263, 1175, 3548, []))
 
+    def test_raw_mouse_motion_requires_direct_playback(self):
+        with tempfile.TemporaryDirectory(prefix="simpsons-mouse-replay-") as directory:
+            folder = Path(directory)
+            rows = [{"type": "header", "version": 1, "boundary": "returned_controller_state",
+                     "mouse_camera": "raw_counts_per_slot0_poll"}]
+            for slot in range(4):
+                rows.append({"type": "input", "seq": slot, "t_us": slot,
+                             "consumer": "game", "slot": slot, "status": 0 if slot == 0 else 1167,
+                             "packet": 1 if slot == 0 else 0, "buttons": 0, "lt": 0, "rt": 0,
+                             "lx": 0, "ly": 0, "rx": 0, "ry": 0,
+                             "mouse_native": int(slot == 0), "mouse_x": 7 if slot == 0 else 0,
+                             "mouse_y": -9 if slot == 0 else 0})
+            rows.append({"type": "end", "samples": 4, "t_us": 20, "reason": "user"})
+            recording = folder / "inputs-mouse.jsonl"
+            recording.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+            (folder / "game.log").write_text(
+                "[NATIVE VIEWPORT DEPTH COPY] count=7\n"
+                "[INPUT RECORDING] START file=inputs-mouse.jsonl\n"
+                "[NATIVE VIEWPORT DEPTH COPY] count=10\n"
+                "[INPUT RECORDING] SAVED samples=4\n", encoding="utf-8")
+            events, metadata = route.route_from_recording(folder, keyboard=False)
+            self.assertEqual(events, [])
+            self.assertEqual(metadata["recorded_polls"], 4)
+            self.assertEqual(metadata["recording_sha256"], route.sha256(recording))
+            with self.assertRaisesRegex(ValueError, "raw mouse motion requires direct"):
+                route.route_from_recording(folder, keyboard=True)
+
     def test_direct_playback_does_not_require_keyboard_mappable_controls(self):
         with tempfile.TemporaryDirectory(prefix="simpsons-replay-recording-") as directory:
             folder = Path(directory)

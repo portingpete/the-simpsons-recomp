@@ -79,6 +79,8 @@ class HostFPTests(unittest.TestCase):
             ("runtime/ppc_context.template.h", "ppc_context.h"),
             ("runtime/engine_cpu_calls.h", "engine_cpu_calls.h"),
             ("runtime/guest_runner.cpp", "guest_runner.cpp"),
+            ("runtime/stall_profiler.h", "stall_profiler.h"),
+            ("runtime/stall_profiler.cpp", "stall_profiler.cpp"),
             ("tests/test_host_fp.cpp", "test_host_fp.cpp"),
         ):
             shutil.copyfile(ROOT / source, cls.build / destination)
@@ -93,7 +95,7 @@ class HostFPTests(unittest.TestCase):
             str(compiler), "/nologo", "/std:c++20", "/EHsc", "/O2", "/fp:strict",
             "/clang:-mssse3", "/DNOMINMAX", "/DWIN32_LEAN_AND_MEAN", "/I.",
             f"/I{ROOT / 'third_party/XenonRecomp/thirdparty/simde'}",
-            "test_host_fp.cpp", "guest_runner.cpp", "/Fe:host_fp.exe"],
+            "test_host_fp.cpp", "guest_runner.cpp", "stall_profiler.cpp", "/Fe:host_fp.exe"],
             cwd=cls.build, env=cls.env, capture_output=True, text=True, timeout=90)
         if result.returncode:
             raise AssertionError(result.stdout + result.stderr)

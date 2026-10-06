@@ -6,12 +6,16 @@ row and click its left or right half to decrease or increase it; the wheel also
 changes the selected setting. Accept and Cancel are clickable. The screen uses the
 original game's Apt display list, font, pulsing buttons and controller navigation.
 
-The menu contains the original Brightness slider and twelve native controls:
+The menu contains the original Brightness slider and fifteen native controls.
+The first row changes between **Display** and **Effects** pages with Left/Right,
+the mouse halves, or the wheel. Each page has nine selectable rows and retains
+the original Accept/Cancel footer. Page changes keep all previews and settings;
+Accept and Cancel apply to the complete menu session.
 
 | Setting | Choices |
 | --- | --- |
 | Render resolution (restart) | 1280 × 720, 1600 × 900, 1920 × 1080, 2560 × 1080 (Ultrawide), 2560 × 1440, 3440 × 1440 (Ultrawide), 3840 × 1600 (Ultrawide), 3840 × 2160, 5120 × 1440 (Ultrawide) |
-| Window size | 1280 × 720, 1600 × 900, 1920 × 1080; ultrawide: 2560 × 1080, 3440 × 1440, 3840 × 1600, 5120 × 1440 |
+| Window size | 1280 × 720, 1600 × 900, 1920 × 1080, 2560 × 1440, 3840 × 2160; ultrawide: 2560 × 1080, 3440 × 1440, 3840 × 1600, 5120 × 1440 |
 | Display mode | Windowed, borderless fullscreen |
 | VSync | Off, On |
 | Frame limit | 30, 60, 90, 120, 144, 165, 240 FPS, Unlimited |
@@ -22,8 +26,11 @@ The menu contains the original Brightness slider and twelve native controls:
 | Bloom | On, Off |
 | Depth of field | On, Off |
 | Motion blur | On, Off |
+| Atmospheric fog | On, Off |
+| Color grading | On, Off |
+| Cinematic bars | On, Off |
 
-Window size, display mode, VSync, frame limit, FOV and the three effect toggles
+Window size, display mode, VSync, frame limit, FOV and the six effect toggles
 apply live. Render resolution, render scale, texture filtering and antialiasing
 apply when the game is relaunched; these rows say `(restart)` in the native menu.
 Accept saves the preferences; Cancel restores their values from when the menu
@@ -56,11 +63,14 @@ Defaults remain 100% scale and Original FOV.
 Below 100%, the outline and smoothing filters retain their original texel
 sampling span so downscaling keeps the game's ink edges.
 
-Bloom, depth of field and motion blur default to On, retaining the original
+Bloom, depth of field, motion blur, atmospheric fog, color grading and cinematic
+bars default to On, retaining the original
 effects. Off suppresses only the corresponding native draw; the original
 effect preparation, validation, target copies and state restoration continue.
 Motion-blur history refreshes even while disabled so re-enabling it cannot
-blend with an old frame. Fog, cel shading, outlines and color treatment retain
+blend with an old frame. Atmospheric fog controls the original depth-based fog
+screen pass; color grading controls its saturation/color treatment pass;
+cinematic bars control the letterbox pass. Cel shading and ink outlines keep
 their existing behavior. These controls only affect effects requested by the
 current scene; an unrequested effect has no visible change.
 
@@ -124,7 +134,10 @@ to `userdata/local-profiles`. Keeping this small file outside the profile
 directory preserves the engine's strict profile-file validation. Missing or
 invalid preferences use 720p internally and windowed, original filtering and
 antialiasing, VSync off, a 120 FPS limit, Original FOV, 100% render scale and
-enabled original effects. Version 5 adds FOV, scale and the three effect flags
+enabled original effects. Version 6 appends atmospheric fog, color grading and
+cinematic bars flags, and adds the two standard window sizes at new IDs without
+changing older window extent IDs. Versions 1–5 retain their existing fields and
+enable those three new effects. Version 5 adds FOV, scale and the first three effect flags
 after the original eight fields. Versions 1–4 retain their existing fields and
 use the original defaults for the new controls. Version 4 adds the ultrawide extents
 without changing existing resolution indices or the preference-field order.
@@ -152,8 +165,9 @@ and mocked launches, without running gameplay.
 
 `tools/build_native_video_menu.py` produces separate derived packages for both
 copies of `options.swf` under the executable's `native-assets` directory.
-Retail assets remain unchanged. Only Options is replaced; other resources,
-Audio, Controls and Credits retain their original data and behavior.
+Retail assets remain unchanged. The derived Options package adds Video pages
+and the native Controls extensions; Audio and Credits retain their original
+data and behavior.
 
 GPU verification checks actual D3D11 color/depth descriptors, physical scene
 viewports, proportional post targets, packed draw/readback extents at all five

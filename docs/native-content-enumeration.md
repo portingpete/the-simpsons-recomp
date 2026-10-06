@@ -1,7 +1,7 @@
 # Native marketplace-content enumeration
 
 The original startup request now uses a real Windows filesystem snapshot.
-The default local store is `userdata/content` beside the game-data folder;
+The default local store is `root/saves` in the game folder;
 `--content-store <directory>` selects another installed-content root.
 Both that root and the original game's `Content` directory are searched under
 `0000000000000000/45410809/00000002`. Missing directories mean no installed

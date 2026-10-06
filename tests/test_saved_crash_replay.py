@@ -308,6 +308,34 @@ class SavedCrashReplayTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "leave at least one"):
                 replay.play(root, "ball-homer-j", timeout=5, skip_polls=8)
 
+    def test_trim_preserves_raw_mouse_fields_and_refuses_to_skip_motion(self):
+        with tempfile.TemporaryDirectory(prefix="saved mouse replay ") as directory:
+            root = Path(directory)
+            source = self.fixture(root) / "inputs-fixture.jsonl"
+            rows = [json.loads(line) for line in source.read_text(encoding="utf-8").splitlines()]
+            rows[0]["mouse_camera"] = "raw_counts_per_slot0_poll"
+            for row in rows[1:-1]:
+                row.update(mouse_native=int(row["slot"] == 0), mouse_x=0, mouse_y=0)
+            rows[5].update(mouse_x=-123, mouse_y=456)
+            source.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+            self.assertEqual(replay.recording_info(source)["polls"], 8)
+            target = root / "trimmed.jsonl"
+            replay.copy_trimmed_recording(source, target, 4)
+            kept = [json.loads(line) for line in target.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(kept[0]["mouse_camera"], "raw_counts_per_slot0_poll")
+            self.assertEqual((kept[1]["mouse_native"], kept[1]["mouse_x"], kept[1]["mouse_y"]),
+                             (1, -123, 456))
+            self.assertEqual((kept[1]["seq"], kept[-1]["samples"]), (0, 4))
+            original_target = target.read_bytes()
+            for axis in ("mouse_x", "mouse_y"):
+                with self.subTest(axis=axis):
+                    rows[1].update(mouse_x=0, mouse_y=0)
+                    rows[1][axis] = 1
+                    source.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "neutral four-slot input"):
+                        replay.copy_trimmed_recording(source, target, 4)
+                    self.assertEqual(target.read_bytes(), original_target)
+
     def test_play_candidate_executable_uses_same_archived_input_and_stores(self):
         with tempfile.TemporaryDirectory(prefix="saved crash replay ") as directory:
             root = Path(directory)

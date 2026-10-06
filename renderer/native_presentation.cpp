@@ -1,5 +1,6 @@
 #include "native_backend.h"
 #include "d3d_call_stats.h"
+#include "runtime/stall_profiler.h"
 #include "presentation_window.h"
 #include <algorithm>
 #include <cstdio>
@@ -29,17 +30,23 @@ void noPredication(ID3D11DeviceContext* context) {
 }
 ComPtr<ID3D11Query> eventQuery(ID3D11Device* device) {
     D3D11_QUERY_DESC desc{D3D11_QUERY_EVENT,0};ComPtr<ID3D11Query> query;
+    StallProfiler::Scope profile(StallProfiler::Section::Rendering,"D3D11.CreateQuery.presentation",nullptr,reinterpret_cast<uintptr_t>(device));
     check(device->CreateQuery(&desc,&query),"completion query creation");return query;
 }
 bool eventComplete(ID3D11DeviceContext* context,ID3D11Query* query) {
     BOOL complete=FALSE;
-    const HRESULT result=context->GetData(query,&complete,sizeof(complete),D3D11_ASYNC_GETDATA_DONOTFLUSH);
+    HRESULT result{};
+    {
+        StallProfiler::Scope profile(StallProfiler::Section::Wait,"D3D11.GetData.completionQuery",nullptr,reinterpret_cast<uintptr_t>(query));
+        result=context->GetData(query,&complete,sizeof(complete),D3D11_ASYNC_GETDATA_DONOTFLUSH);
+    }
     check(result,"completion query");
     if(result==S_FALSE) return false;
     if(result!=S_OK || complete!=TRUE) throw Error("Native completion query returned an invalid event result");
     return true;
 }
 void boundedWait(const NativeBackend& backend,ID3D11DeviceContext* context,ID3D11Query* query) {
+    StallProfiler::Scope waitProfile(StallProfiler::Section::Wait,"D3D11.completionQuery",nullptr,reinterpret_cast<uintptr_t>(query));
     // A Sleep(1) poll can consume an entire scheduler tick for each of the
     // frame's completion queries. This timer only paces polling; GetData is
     // still the sole evidence of GPU completion, with the same deadline.
@@ -72,7 +79,10 @@ void boundedWait(const NativeBackend& backend,ID3D11DeviceContext* context,ID3D1
         // Copies no longer Flush at submission. Submit queued commands once
         // before polling with DONOTFLUSH, so a still-unsubmitted event cannot
         // sit in the command buffer until the deadline.
-        if(!flushed) {context->Flush();flushed=true;continue;}
+        if(!flushed) {
+            StallProfiler::Scope profile(StallProfiler::Section::Rendering,"D3D11.Flush.completionQuery",nullptr,reinterpret_cast<uintptr_t>(query));
+            context->Flush();flushed=true;continue;
+        }
         if(GetTickCount64()-start>=waitMilliseconds)
             throw Error("Native GPU completion timed out after 5000 ms; submitted work cannot be rolled back");
         if(spinning) {

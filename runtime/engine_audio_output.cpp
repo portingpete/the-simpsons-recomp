@@ -1,6 +1,7 @@
 #include "engine_audio_output.h"
 #include "engine_audio.h"
 #include "engine_cpu_calls.h"
+#include "stall_profiler.h"
 #include "audio/native_audio_output.h"
 #include "audio/dac_processor.h"
 #include "audio/dac_pcm.h"
@@ -330,7 +331,9 @@ void EngineAudioOutput::wait(PPCContext& ctx,uint8_t* base) {
             if(PPC_LOAD_U32(c.event+4)) {PPC_STORE_U32(c.event+4,0);ctx.r3.u64=0;ctx.lr=0x82346130;return;}
         }
         HANDLE handles[]={s.processor->wakeHandle(),s.runtime.stopEvent};
+        StallProfiler::Scope wakeProfile(StallProfiler::Section::Wait,"EngineAudioOutput::wait.wake",&ctx,reinterpret_cast<uintptr_t>(handles[0]));
         const DWORD status=WaitForMultipleObjects(2,handles,FALSE,INFINITE);
+        wakeProfile.finish();
         if(status==WAIT_OBJECT_0+1) s.runtime.checkRunning();
         require(status==WAIT_OBJECT_0,"Dac0 native wake wait failed");
     }
@@ -391,10 +394,12 @@ void EngineAudioOutput::startup(PPCContext& ctx,uint8_t* base) {
     require(s.construction && s.construction->active && PPC_LOAD_U32(ctx.r31.u32+0x348)==s.construction->root,
             "Dac0 startup publication does not match the original root");
     const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+    StallProfiler::Scope startupProfile(StallProfiler::Section::Wait,"EngineAudioOutput::startup.worker",&ctx,s.construction->root);
     while(!s.construction->worker) {
         require(s.changed.wait_until(lock,deadline)!=std::cv_status::timeout,"Original Dac0 worker did not enter after startup release");
         s.runtime.checkRunning();
     }
+    startupProfile.finish();
     const auto& c=*s.construction;
     std::fprintf(stderr,"[NATIVE AUDIO] original Dac0 startup released root=%08X owner=%08X worker=%u; graph and source active\n",c.root,c.owner,c.workerId);
 }
@@ -407,7 +412,9 @@ void EngineAudioOutput::rootJoin(PPCContext& ctx,uint8_t* base) {
         worker=c.worker;
     }
     HANDLE handles[]={worker->native,s.runtime.stopEvent};
+    StallProfiler::Scope joinProfile(StallProfiler::Section::Wait,"EngineAudioOutput::rootJoin",&ctx,reinterpret_cast<uintptr_t>(worker->native));
     const DWORD status=WaitForMultipleObjects(2,handles,FALSE,30000);
+    joinProfile.finish();
     if(status==WAIT_OBJECT_0+1) s.runtime.checkRunning();
     require(status==WAIT_OBJECT_0,"Original Dac0 OS worker did not join at outer root teardown");
     std::lock_guard lock(s.mutex);auto& c=*s.construction;

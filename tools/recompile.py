@@ -10,6 +10,7 @@ import sys
 import tomllib
 from prepare_image import digest, GAME_SHA
 import generator_identity
+import stall_profile_generation
 
 ROOT=Path(__file__).resolve().parents[1]
 OUT=ROOT/'build/generated'
@@ -18,7 +19,8 @@ def native_sources():
     return [ROOT/name for name in json.loads((ROOT/'config/native_sources.json').read_text(encoding='utf-8'))]
 
 def inputs():
-    result=[Path(__file__), ROOT/'tools/prepare_image.py', ROOT/'tools/generator_identity.py', ROOT/'config/simpsons.toml',
+    result=[Path(__file__), ROOT/'tools/prepare_image.py', ROOT/'tools/generator_identity.py',
+            ROOT/'tools/stall_profile_generation.py', ROOT/'config/simpsons.toml',
             ROOT/'runtime/ppc_context.template.h', ROOT/'analysis/simpsons.unencrypted.xex',
             ROOT/'analysis/simpsons.pe', ROOT/'analysis/executable.json', ROOT/'analysis/switch_tables.toml',
             ROOT/'config/switch_overrides.toml']
@@ -115,11 +117,13 @@ def main():
     chunks=[f'ppc_recomp.{i}.cpp' for i in range(int(units[-1]))]
     header=(OUT/'ppc_recomp_shared.h').read_text(encoding="utf-8")
     names=set(re.findall(r'PPC_EXTERN_FUNC\((__imp__\w+)\)',header))
-    native='\n'.join(f.read_text(encoding="utf-8") for f in native_sources())
+    native_texts={f.relative_to(ROOT).as_posix():f.read_text(encoding="utf-8") for f in native_sources()}
+    native='\n'.join(native_texts.values())
     implemented=set(re.findall(r'PPC_FUNC\((__imp__\w+)\)',native))
     missing=sorted(names-implemented)
     (OUT/'ppc_imports.cpp').write_text('#include "ppc_context.h"\n'+''.join(
         f'PPC_FUNC({n}) {{ PPC_RECOMP_FAILURE(ctx, uint32_t(ctx.lr), "unimplemented import {n}"); }}\n' for n in missing))
+    profiling=stall_profile_generation.instrument_generated(OUT,chunks,native_texts)
     descriptors=info['imports']
     code={(d['library'],d['ordinal']) for d in descriptors if d['kind']==1}
     data=[d for d in descriptors if d['kind']==0 and (d['library'],d['ordinal']) not in code]
@@ -137,19 +141,21 @@ def main():
         if d['kind']==0 and target is not None: meta+=f'{{0x{d["address"]:08x},0x{target:08x}}},\n'
     meta+='};\n'
     (OUT/'ppc_image_metadata.h').write_text(meta, encoding="utf-8")
-    files=[OUT/n for n in chunks+['ppc_func_mapping.cpp','ppc_imports.cpp']]+sorted(OUT.glob('ppc_*.h'))
+    generated_sources=chunks+['ppc_func_mapping.cpp','ppc_imports.cpp',stall_profile_generation.SOURCE_NAME]
+    files=[OUT/n for n in generated_sources]+sorted(OUT.glob('ppc_*.h'))
     for f in files:
         if re.search(r'// ERROR(?:\s|:)',f.read_text(encoding="utf-8")):
             raise RuntimeError(f'Silent translation error in {f}')
     (OUT/'sources.cmake').write_text('set(SIMPSONS_PPC_SOURCES\n'+''.join(
-        f'  "${{SIMPSONS_GENERATED_DIR}}/{n}"\n' for n in chunks+['ppc_func_mapping.cpp','ppc_imports.cpp'])+')\n')
+        f'  "${{SIMPSONS_GENERATED_DIR}}/{n}"\n' for n in generated_sources)+')\n')
     files += [OUT/'sources.cmake', OUT/'generation.toml']
     if generation_inputs!={f.relative_to(ROOT).as_posix():digest(f) for f in inputs()}:
         raise RuntimeError('Inputs changed during AOT generation; rerun after edits settle')
     generator_identity.verify(a.generator,a.analyser)
     manifest=dict(format=1, semantic_diagnostics=semantic, profile='diagnostic' if semantic else 'zero-reported-diagnostics',
                   generator_sha256=digest(a.generator),analyser_sha256=digest(a.analyser),
-                  missing_imports=missing,inputs={f.relative_to(ROOT).as_posix():digest(f) for f in inputs()},
+                  missing_imports=missing,stall_profiler_coverage=profiling,
+                  inputs={f.relative_to(ROOT).as_posix():digest(f) for f in inputs()},
                   outputs={f.name:digest(f) for f in files})
     (OUT/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n', encoding="utf-8")
     for f in files:

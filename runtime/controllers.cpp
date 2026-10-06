@@ -106,6 +106,19 @@ NativeInputPlayback::NativeInputPlayback(const std::filesystem::path& path,uint6
             pad.sThumbLY=playbackRange<SHORT>(row,"ly",-32768,32767);
             pad.sThumbRX=playbackRange<SHORT>(row,"rx",-32768,32767);
             pad.sThumbRY=playbackRange<SHORT>(row,"ry",-32768,32767);
+            const bool hasMouse=row.find("\"mouse_native\":")!=std::string_view::npos;
+            const bool hasMouseX=row.find("\"mouse_x\":")!=std::string_view::npos;
+            const bool hasMouseY=row.find("\"mouse_y\":")!=std::string_view::npos;
+            if(hasMouse||hasMouseX||hasMouseY) {
+                if(!hasMouse||!hasMouseX||!hasMouseY)
+                    throw Failure("Input playback has an incomplete native mouse snapshot");
+                poll.mouse.active=playbackRange<uint32_t>(row,"mouse_native",0,1)!=0;
+                poll.mouse.x=playbackRange<int32_t>(row,"mouse_x",INT32_MIN,INT32_MAX);
+                poll.mouse.y=playbackRange<int32_t>(row,"mouse_y",INT32_MIN,INT32_MAX);
+                if((!poll.mouse.active&&(poll.mouse.x||poll.mouse.y)) ||
+                   (poll.mouse.active&&(poll.slot!=0||poll.status!=ERROR_SUCCESS||pad.sThumbRX||pad.sThumbRY)))
+                    throw Failure("Input playback has an invalid native mouse snapshot");
+            }
             if(poll.status==ERROR_DEVICE_NOT_CONNECTED &&
                (poll.state.dwPacketNumber || pad.wButtons || pad.bLeftTrigger || pad.bRightTrigger ||
                 pad.sThumbLX || pad.sThumbLY || pad.sThumbRX || pad.sThumbRY))
@@ -113,7 +126,7 @@ NativeInputPlayback::NativeInputPlayback(const std::filesystem::path& path,uint6
             if ((poll.slot==0 && poll.status!=ERROR_SUCCESS) ||
                 (poll.slot!=0 && poll.status!=ERROR_DEVICE_NOT_CONNECTED) ||
                 pad.wButtons || pad.bLeftTrigger || pad.bRightTrigger ||
-                pad.sThumbLX || pad.sThumbLY || pad.sThumbRX || pad.sThumbRY)
+                pad.sThumbLX || pad.sThumbLY || pad.sThumbRX || pad.sThumbRY || poll.mouse.x || poll.mouse.y)
                 neutralPrefix=false;
             polls.push_back(poll);
         } else if(row.find("\"type\":\"end\"")!=std::string_view::npos) {
@@ -146,23 +159,27 @@ bool NativeInputPlayback::handoffReady(uint32_t slot) const {
         static_cast<unsigned long long>(difference));
     return true;
 }
-DWORD NativeInputPlayback::sample(uint32_t slot,XINPUT_STATE& result) {
+DWORD NativeInputPlayback::sample(uint32_t slot,XINPUT_STATE& result,NativeMouseMotion* mouse) {
+    if(mouse)*mouse={};
     if(!started) {
         started=true;
         std::fprintf(stderr,"[INPUT PLAYBACK] START scene=%llu polls=%zu\n",
             static_cast<unsigned long long>(scene.load()),polls.size());
+        std::fflush(stderr);
     }
     if(cursor==polls.size()) {
         if(!ended) {
             ended=true;
             std::fprintf(stderr,"[INPUT PLAYBACK] END scene=%llu; returning neutral controller state\n",
                 static_cast<unsigned long long>(scene.load()));
+            std::fflush(stderr);
         }
         result={};return slot==0?ERROR_SUCCESS:ERROR_DEVICE_NOT_CONNECTED;
     }
     const auto& row=polls[cursor];
     if(row.slot!=slot)throw Failure("Input playback poll order diverged at sequence "+std::to_string(cursor));
     result=row.state;
+    if(mouse)*mouse=row.mouse;
     if(slot==0 && (result.dwPacketNumber!=previous.dwPacketNumber ||
             std::memcmp(&result.Gamepad,&previous.Gamepad,sizeof(result.Gamepad)))) {
         const auto& pad=result.Gamepad;
@@ -278,57 +295,111 @@ WORD keyboardButton(uint32_t code) {
     default:return 0;
     }
 }
-uint32_t integerSquareRoot(uint64_t value) {
-    uint32_t low=0,high=65536;
-    while(low+1<high) {
-        const uint32_t middle=low+(high-low)/2;
-        if(uint64_t(middle)*middle<=value)low=middle;else high=middle;
-    }
-    return low;
-}
-void mouseStick(int32_t x,int32_t y,SHORT& rightX,SHORT& rightY) {
-    const auto distance=integerSquareRoot(uint64_t(int64_t(x)*x+int64_t(y)*y));
-    if(!distance) {rightX=rightY=0;return;}
-    // Mouse counts express intended camera movement rather than stick drift.
-    // Add a radial deadzone offset so gentle motion survives the game's stick
-    // filtering, preserving direction and limiting diagonal magnitude as well.
-    const uint32_t magnitude=(std::min)(uint32_t(32767),distance+XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE);
-    const auto project=[&](int32_t axis) {
-        const auto value=int64_t(axis)*magnitude/distance;
-        return SHORT(value<=-32767?-32768:value>=32767?32767:value);
-    };
-    rightX=project(x);rightY=project(y);
-}
 }
 void NativeKeyboard::focus(bool active) {
-    std::lock_guard lock(mutex);focused=active;
+    std::lock_guard lock(mutex);if(focused!=active)++mouseGeneration;focused=active;
     if(!active) {
         held.fill(false);pressed.fill(false);mouseHeld=mousePressed=0;
+        physicalHeld.fill(false);blocked.fill(false);
+        if(capturing)rebindResults.push_back({captureAction,captureSlot,NativeRebindStatus::Cancelled,0});
+        capturing=false;captureRelease=0;captureResult.reset();
         mouseX=mouseY=0;mouseCaptured=false;movieEnterHeld=false;
         pointerInside=false;pointer={};pointerHeld=0;
     }
 }
 bool NativeKeyboard::key(uint32_t code,bool down) {
     if(code>=held.size())return false;
-    if(!keyboardButton(code)&&code!=VK_LSHIFT&&code!=VK_CONTROL&&code!=VK_LCONTROL&&code!=VK_RCONTROL&&
-       code!='W'&&code!='S'&&code!='A'&&code!='D')return false;
     std::lock_guard lock(mutex);
+    bool mapped=keyboardButton(code)||code=='W'||code=='S'||code=='A'||code=='D';
+    for(const auto& action:controlSettings.bindings)for(const auto binding:action)mapped=mapped||(binding&&binding==code);
+    // The generic control code is retained for existing direct-query callers;
+    // actual window messages identify the physical left or right key.
+    if(code==VK_CONTROL)for(const auto binding:controlSettings.bindings[uint32_t(ControlAction::LeftTrigger)])
+        mapped=mapped||binding==VK_LCONTROL||binding==VK_RCONTROL;
     if(focused) {
+        const bool wasHeld=physicalHeld[code];physicalHeld[code]=down;
+        if(blocked[code]) {
+            if(!down)blocked[code]=false;
+            if(capturing)captureInput(code,down,wasHeld);
+            return true;
+        }
+        if(capturing)return captureInput(code,down,wasHeld);
+        if(!mapped)return false;
         if(code==VK_RETURN&&(!down||!held[code]))movieEnterHeld=false;
         if(down) {pressed[code]=pressed[code]||!held[code];held[code]=true;}
         else held[code]=false;
     }
+    return mapped;
+}
+NativeControlSettings NativeKeyboard::controls(){std::lock_guard lock(mutex);return controlSettings;}
+void NativeKeyboard::configureControls(const NativeControlSettings& settings) {
+    if(!settings.valid())throw Failure("Invalid native keyboard controls");
+    std::lock_guard lock(mutex);controlSettings=settings;
+    held.fill(false);pressed.fill(false);blocked=physicalHeld;
+    mouseHeld=mousePressed=0;mouseX=mouseY=0;
+}
+void NativeKeyboard::beginRebind(ControlAction action,uint32_t slot) {
+    if(uint32_t(action)>=NativeControlSettings::actionCount||slot>=NativeControlSettings::slotCount)
+        throw Failure("Invalid native rebind slot");
+    std::lock_guard lock(mutex);if(capturing)return;
+    captureAction=action;captureSlot=slot;capturing=true;captureRelease=0;captureResult.reset();rebindResults.clear();
+    blocked=physicalHeld;held.fill(false);pressed.fill(false);mouseHeld=mousePressed=0;mouseX=mouseY=0;
+    pointer.pressed=0;pointer.wheel=0;
+}
+void NativeKeyboard::cancelRebind() {
+    std::lock_guard lock(mutex);if(!capturing)return;
+    rebindResults.push_back({captureAction,captureSlot,NativeRebindStatus::Cancelled,0});
+    capturing=false;captureRelease=0;captureResult.reset();blocked=physicalHeld;
+    held.fill(false);pressed.fill(false);mouseHeld=mousePressed=0;pointer.pressed=0;pointer.wheel=0;
+}
+bool NativeKeyboard::rebindActive(){std::lock_guard lock(mutex);return capturing;}
+std::optional<NativeRebindResult> NativeKeyboard::takeRebindResult() {
+    std::lock_guard lock(mutex);if(rebindResults.empty())return {};
+    const auto value=rebindResults.front();rebindResults.pop_front();return value;
+}
+bool NativeKeyboard::captureInput(uint32_t code,bool down,bool wasHeld) {
+    if(captureRelease) {
+        if(code==captureRelease&&!down) {
+            if(captureResult) {
+                if(captureResult->status==NativeRebindStatus::Bound||captureResult->status==NativeRebindStatus::Cleared)
+                    controlSettings.setBinding(captureAction,captureSlot,captureResult->code);
+                rebindResults.push_back(*captureResult);
+            }
+            capturing=false;captureRelease=0;captureResult.reset();
+        }
+        return true;
+    }
+    if(!down||wasHeld||blocked[code])return true;
+    blocked[code]=true;
+    if(NativeControlSettings::reservedKey(code)||!NativeControlSettings::validKey(code)) {
+        rebindResults.push_back({captureAction,captureSlot,NativeRebindStatus::Rejected,code});return true;
+    }
+    NativeRebindStatus status=NativeRebindStatus::Bound;
+    if(code==VK_ESCAPE)status=NativeRebindStatus::Cancelled;
+    else if(code==VK_DELETE||code==VK_BACK)status=NativeRebindStatus::Cleared;
+    captureRelease=code;captureResult=NativeRebindResult{captureAction,captureSlot,status,status==NativeRebindStatus::Bound?code:0};
     return true;
 }
 void NativeKeyboard::captureMouse(bool active) {
-    std::lock_guard lock(mutex);mouseCaptured=active&&focused&&!menuMouse;
+    std::lock_guard lock(mutex);++mouseGeneration;mouseCaptured=active&&focused&&!menuMouse;
     mouseHeld=mousePressed=0;mouseX=mouseY=0;
+    for(const uint32_t code:{VK_LBUTTON,VK_RBUTTON,VK_MBUTTON,VK_XBUTTON1,VK_XBUTTON2})held[code]=pressed[code]=false;
 }
 bool NativeKeyboard::mouseButton(uint32_t code,bool down) {
-    const uint8_t bit=code==VK_LBUTTON?1:code==VK_RBUTTON?2:code==VK_MBUTTON?4:0;
+    const uint8_t bit=code==VK_LBUTTON?1:code==VK_RBUTTON?2:code==VK_MBUTTON?4:code==VK_XBUTTON1?8:code==VK_XBUTTON2?16:0;
     if(!bit)return false;
     std::lock_guard lock(mutex);
+    bool mapped=code==VK_LBUTTON||code==VK_RBUTTON||code==VK_MBUTTON;
+    for(const auto& action:controlSettings.bindings)for(const auto binding:action)mapped=mapped||(binding&&binding==code);
     if(focused) {
+        const bool wasHeld=physicalHeld[code];physicalHeld[code]=down;
+        if(blocked[code]) {
+            if(!down)blocked[code]=false;
+            if(capturing)captureInput(code,down,wasHeld);
+            return true;
+        }
+        if(capturing)return captureInput(code,down,wasHeld);
+        if(!mapped)return false;
         if(menuMouse) {
             if(down) {
                 if(!(pointerHeld&bit)&&pointerInside) {
@@ -340,15 +411,18 @@ bool NativeKeyboard::mouseButton(uint32_t code,bool down) {
             else pointerHeld&=uint8_t(~bit);
             return true;
         }
+        if(down){pressed[code]=pressed[code]||!held[code];held[code]=true;}
+        else held[code]=false;
         if(down) {mousePressed|=uint8_t(bit&~mouseHeld);mouseHeld|=bit;}
         else mouseHeld&=uint8_t(~bit);
     }
-    return true;
+    return mapped;
 }
 void NativeKeyboard::menuMode(bool active) {
     std::lock_guard lock(mutex);
     if(menuMouse==active)return;
-    menuMouse=active;mouseHeld=mousePressed=0;mouseX=mouseY=0;
+    ++mouseGeneration;menuMouse=active;mouseHeld=mousePressed=0;mouseX=mouseY=0;
+    for(const uint32_t code:{VK_LBUTTON,VK_RBUTTON,VK_MBUTTON,VK_XBUTTON1,VK_XBUTTON2})held[code]=pressed[code]=false;
     pointer.pressed=0;pointer.wheel=0;pointerHeld=0;
     pointer.moved=pointerInside;
     if(active)mouseCaptured=false;
@@ -364,13 +438,13 @@ void NativeKeyboard::pointerLeave() {
 }
 void NativeKeyboard::pointerWheel(int32_t delta) {
     std::lock_guard lock(mutex);
-    if(!focused||!menuMouse||!pointerInside)return;
+    if(!focused||!menuMouse||!pointerInside||capturing)return;
     const auto sum=int64_t(pointer.wheel)+delta;
     pointer.wheel=int32_t(sum<-12000?-12000:sum>12000?12000:sum);
 }
 NativeMenuPointer NativeKeyboard::menuPointer() {
     std::lock_guard lock(mutex);
-    auto out=pointer;out.active=focused&&menuMouse&&pointerInside;
+    auto out=pointer;out.active=focused&&menuMouse&&pointerInside&&!capturing;
     if(pointer.pressed) {
         out.x=pressPosition.x;out.y=pressPosition.y;out.width=pressPosition.width;out.height=pressPosition.height;
         pointer.moved=pointer.x!=out.x||pointer.y!=out.y||pointer.width!=out.width||pointer.height!=out.height;
@@ -380,40 +454,81 @@ NativeMenuPointer NativeKeyboard::menuPointer() {
 }
 void NativeKeyboard::mouseMotion(int32_t x,int32_t y) {
     std::lock_guard lock(mutex);
-    if(!focused||!mouseCaptured)return;
-    // Integer-only conversion avoids changing guest/host floating-point state.
-    // Raw motion is a one-poll impulse, bounded at the native stick endpoints.
-    const auto bounded=[](int64_t value){return int32_t(value < -32768?-32768:value > 32767?32767:value);};
-    mouseX=bounded(int64_t(mouseX)+int64_t(x)*1024);
-    mouseY=bounded(int64_t(mouseY)-int64_t(y)*1024);
+    if(!focused||!mouseCaptured||capturing)return;
+    // Keep device displacement intact. A mouse is not a bounded stick velocity;
+    // conversion, radial deadzones and per-message clipping lose fast motion.
+    const auto bounded=[](int64_t value){return int32_t(value<INT32_MIN?INT32_MIN:value>INT32_MAX?INT32_MAX:value);};
+    mouseX=bounded(int64_t(mouseX)+x);
+    mouseY=bounded(int64_t(mouseY)+y);
 }
-XINPUT_STATE NativeKeyboard::sample(bool movie,WORD* directionPresses) {
+bool NativeKeyboard::mouseCaptureActive(uint64_t generation) {
+    std::lock_guard lock(mutex);return generation==mouseGeneration&&focused&&mouseCaptured&&!menuMouse&&!capturing;
+}
+XINPUT_STATE NativeKeyboard::sample(bool movie,WORD* directionPresses,NativeMouseMotion* motion,uint64_t* generation,WORD* directionHeld) {
     std::lock_guard lock(mutex);
     XINPUT_GAMEPAD value{};
-    const auto active=[&](uint32_t code){return held[code]||pressed[code];};
-    for(uint32_t code=0;code<held.size();++code)if(code!=VK_RETURN&&active(code))value.wButtons|=keyboardButton(code);
+    const auto active=[&](uint32_t code){return !capturing&&!blocked[code]&&(held[code]||pressed[code]);};
+    const auto actionActive=[&](ControlAction action) {
+        for(const auto code:controlSettings.bindings[uint32_t(action)]) {
+            if(!code||(menuMouse&&(code==VK_LBUTTON||code==VK_RBUTTON||code==VK_MBUTTON||code==VK_XBUTTON1||code==VK_XBUTTON2)))continue;
+            if(code==VK_RETURN&&(movie||movieEnterHeld))continue;
+            if(active(code))return true;
+            if((code==VK_LCONTROL||code==VK_RCONTROL)&&active(VK_CONTROL))return true;
+        }
+        return false;
+    };
+    if(menuMouse) {
+        // The original menu bindings remain stable when gameplay is rebound.
+        for(uint32_t code=0;code<held.size();++code)if(code!=VK_RETURN&&active(code))
+            value.wButtons|=code==VK_ESCAPE?XINPUT_GAMEPAD_B:keyboardButton(code);
+    } else {
+        constexpr std::array<std::pair<ControlAction,WORD>,10> buttons{{
+            {ControlAction::Jump,XINPUT_GAMEPAD_A},{ControlAction::Attack,XINPUT_GAMEPAD_X},
+            {ControlAction::Special,XINPUT_GAMEPAD_B},{ControlAction::Action,XINPUT_GAMEPAD_Y},
+            {ControlAction::SwitchCharacter,XINPUT_GAMEPAD_LEFT_SHOULDER},{ControlAction::TargetLock,XINPUT_GAMEPAD_RIGHT_SHOULDER},
+            {ControlAction::LeftStick,XINPUT_GAMEPAD_LEFT_THUMB},{ControlAction::RightStick,XINPUT_GAMEPAD_RIGHT_THUMB},
+            {ControlAction::CharacterMenu,XINPUT_GAMEPAD_BACK},{ControlAction::Pause,XINPUT_GAMEPAD_START}
+        }};
+        for(const auto& [action,button]:buttons)if(actionActive(action))value.wButtons|=button;
+        // Arrows are the fixed native D-pad and Escape remains a recovery path
+        // even if the user clears or moves the optional Pause binding.
+        for(const uint32_t code:{VK_ESCAPE,VK_UP,VK_DOWN,VK_LEFT,VK_RIGHT})if(active(code))value.wButtons|=keyboardButton(code);
+        value.bRightTrigger=actionActive(ControlAction::SpecialPower)?255:0;
+        value.bLeftTrigger=actionActive(ControlAction::LeftTrigger)?255:0;
+    }
     // Enter confirms normally and retains the existing movie skip action. A
     // movie-held Enter must release before it can confirm the following menu.
     if(!active(VK_RETURN))movieEnterHeld=false;
     else if(movie) {value.wButtons|=XINPUT_GAMEPAD_START;movieEnterHeld=held[VK_RETURN];}
-    else if(!movieEnterHeld)value.wButtons|=XINPUT_GAMEPAD_A;
-    const auto mouse=menuMouse?uint8_t(0):uint8_t(mouseHeld|mousePressed);
-    if(mouse&1)value.wButtons|=XINPUT_GAMEPAD_X;
-    if(mouse&2)value.wButtons|=XINPUT_GAMEPAD_B;
-    if(mouse&4)value.wButtons|=XINPUT_GAMEPAD_RIGHT_THUMB;
-    value.bRightTrigger=active(VK_LSHIFT)?255:0;
-    value.bLeftTrigger=active(VK_CONTROL)||active(VK_LCONTROL)||active(VK_RCONTROL)?255:0;
-    const bool left=active('A'),right=active('D'),up=active('W'),down=active('S');
+    else if(menuMouse&&!movieEnterHeld)value.wButtons|=XINPUT_GAMEPAD_A;
+    const bool left=menuMouse?active('A'):actionActive(ControlAction::MoveLeft);
+    const bool right=menuMouse?active('D'):actionActive(ControlAction::MoveRight);
+    const bool up=menuMouse?active('W'):actionActive(ControlAction::MoveForward);
+    const bool down=menuMouse?active('S'):actionActive(ControlAction::MoveBackward);
     value.sThumbLX=left==right?0:(right?32767:-32768);
     value.sThumbLY=up==down?0:(up?32767:-32768);
     if(directionPresses) {
         *directionPresses=0;
-        if(left&&!right&&pressed['A'])*directionPresses|=XINPUT_GAMEPAD_DPAD_LEFT;
-        if(right&&!left&&pressed['D'])*directionPresses|=XINPUT_GAMEPAD_DPAD_RIGHT;
-        if(up&&!down&&pressed['W'])*directionPresses|=XINPUT_GAMEPAD_DPAD_UP;
-        if(down&&!up&&pressed['S'])*directionPresses|=XINPUT_GAMEPAD_DPAD_DOWN;
+        if(!capturing) {
+            const bool navLeft=active('A')||active(VK_LEFT),navRight=active('D')||active(VK_RIGHT);
+            const bool navUp=active('W')||active(VK_UP),navDown=active('S')||active(VK_DOWN);
+            if(navLeft&&!navRight&&(pressed['A']||pressed[VK_LEFT]))*directionPresses|=XINPUT_GAMEPAD_DPAD_LEFT;
+            if(navRight&&!navLeft&&(pressed['D']||pressed[VK_RIGHT]))*directionPresses|=XINPUT_GAMEPAD_DPAD_RIGHT;
+            if(navUp&&!navDown&&(pressed['W']||pressed[VK_UP]))*directionPresses|=XINPUT_GAMEPAD_DPAD_UP;
+            if(navDown&&!navUp&&(pressed['S']||pressed[VK_DOWN]))*directionPresses|=XINPUT_GAMEPAD_DPAD_DOWN;
+        }
     }
-    mouseStick(mouseX,mouseY,value.sThumbRX,value.sThumbRY);
+    if(directionHeld) {
+        *directionHeld=0;
+        const bool navLeft=active('A')||active(VK_LEFT),navRight=active('D')||active(VK_RIGHT);
+        const bool navUp=active('W')||active(VK_UP),navDown=active('S')||active(VK_DOWN);
+        if(navLeft&&!navRight)*directionHeld|=XINPUT_GAMEPAD_DPAD_LEFT;
+        if(navRight&&!navLeft)*directionHeld|=XINPUT_GAMEPAD_DPAD_RIGHT;
+        if(navUp&&!navDown)*directionHeld|=XINPUT_GAMEPAD_DPAD_UP;
+        if(navDown&&!navUp)*directionHeld|=XINPUT_GAMEPAD_DPAD_DOWN;
+    }
+    if(motion)*motion=focused&&mouseCaptured&&!menuMouse&&!movie&&!capturing?NativeMouseMotion{true,mouseX,mouseY}:NativeMouseMotion{};
+    if(generation)*generation=mouseGeneration;
     pressed.fill(false);mousePressed=0;mouseX=mouseY=0;
     if(std::memcmp(&value,&last,sizeof(value))) {
         ++packet;last=value;
@@ -428,7 +543,7 @@ void NativeKeyboard::discard(bool pointerEvents) {
     if(pointerEvents) {pointer.pressed=0;pointer.wheel=0;}
 }
 void NativeControllers::attachKeyboard(const std::shared_ptr<NativeKeyboard>& source) {
-    std::lock_guard lock(mutex);keyboard=source;
+    std::lock_guard lock(mutex);keyboard=source;mouse={};mousePlayback=false;
     navigation={};navigationPrevious=0;
     keyboardMouseSource.store(bool(source)&&previous[0]!=ERROR_SUCCESS,std::memory_order_relaxed);
 }
@@ -440,6 +555,7 @@ void NativeControllers::attachRecording(const std::shared_ptr<NativeInputRecordi
 }
 void NativeControllers::attachPlayback(const std::shared_ptr<NativeInputPlayback>& source) {
     std::lock_guard lock(mutex);
+    mouse={};mousePlayback=false;
     if(auto keys=keyboard.lock())keys->discard();
     playback=source;
 }
@@ -456,6 +572,7 @@ DWORD NativeControllers::state(uint32_t slot,XINPUT_STATE& result,NativeMovieSta
     if(slot>=kMaxControllers)throw Failure("Native controller slot is outside the qualified range0..3");
     if(observation)*observation={};
     std::lock_guard lock(mutex);
+    if(slot==0){mouse={};mousePlayback=false;}
     if(playback && playback->handoffReady(slot)) {
         if(auto keys=keyboard.lock())keys->discard();
         playback.reset();
@@ -463,12 +580,13 @@ DWORD NativeControllers::state(uint32_t slot,XINPUT_STATE& result,NativeMovieSta
     if(playback && playback->ready(slot) && (!modalToken || playback->active())) {
         if(slot==0){navigation={};navigationPrevious=0;}
         if(modalToken)throw Failure("Input playback reached an unrecorded native modal dialog");
-        const auto status=playback->sample(slot,result);
+        const auto status=playback->sample(slot,result,slot==0?&mouse:nullptr);
+        if(slot==0)mousePlayback=true;
         // Recordings contain controller-shaped values, not device identity.
         // Keep the selected live prompt set until ordinary input resumes.
         if(recording) {
             recording->maybeStart(slot);
-            recording->sample(slot,status,result);
+            recording->sample(slot,status,result,false,mouse);
         }
         return status;
     }
@@ -491,6 +609,7 @@ DWORD NativeControllers::state(uint32_t slot,XINPUT_STATE& result,NativeMovieSta
         const bool released=status!=ERROR_SUCCESS||(!pad.wButtons&&!pad.bLeftTrigger&&!pad.bRightTrigger&&
             !pad.sThumbLX&&!pad.sThumbLY&&!pad.sThumbRX&&!pad.sThumbRY);
         result.Gamepad={};if(released)releaseAfterModal[slot]=false;
+        if(slot==0)mouse={};
     }
     const bool start=status==ERROR_SUCCESS&&(result.Gamepad.wButtons&XINPUT_GAMEPAD_START);
     if(movieOwner){
@@ -508,13 +627,14 @@ DWORD NativeControllers::state(uint32_t slot,XINPUT_STATE& result,NativeMovieSta
         result.Gamepad.wButtons&=WORD(~XINPUT_GAMEPAD_START);
         if(!start)releaseMovieStart[slot]=false;
     }
-    if(recording)recording->sample(slot,status,result);
+    if(slot==0&&movieOwner)mouse={};
+    if(recording)recording->sample(slot,status,result,false,mouse);
     return status;
 }
 void NativeControllers::beginMovie(uint32_t owner){
     std::lock_guard lock(mutex);
     if(!owner)throw Failure("Absent movie input owner");
-    movieOwner=owner;movieSkipPending=false;movieArmed.fill(false);
+    movieOwner=owner;movieSkipPending=false;movieArmed.fill(false);mouse={};
     if(auto keys=keyboard.lock())keys->discard();
 }
 bool NativeControllers::takeMovieSkip(uint32_t owner){
@@ -523,7 +643,7 @@ bool NativeControllers::takeMovieSkip(uint32_t owner){
     movieSkipPending=false;return true;
 }
 void NativeControllers::endMovie(){
-    std::lock_guard lock(mutex);movieOwner=0;movieSkipPending=false;movieArmed.fill(false);
+    std::lock_guard lock(mutex);movieOwner=0;movieSkipPending=false;movieArmed.fill(false);mouse={};
     if(auto keys=keyboard.lock())keys->discard();
 }
 DWORD NativeControllers::queryState(uint32_t slot,XINPUT_STATE* result){
@@ -545,13 +665,8 @@ DWORD NativeControllers::stateUnlocked(uint32_t slot,XINPUT_STATE& result){
         const auto keys=keyboard.lock();
         keyboardMouseSource.store(status==ERROR_DEVICE_NOT_CONNECTED&&bool(keys),std::memory_order_relaxed);
         if(status==ERROR_DEVICE_NOT_CONNECTED && (keys || commands)) {
-            WORD directionPresses=0;
-            XINPUT_GAMEPAD gamepad=keys?keys->sample(movieOwner&&!modalToken,&directionPresses).Gamepad:XINPUT_GAMEPAD{};
-            WORD directions=0;
-            if(gamepad.sThumbLX<0)directions|=XINPUT_GAMEPAD_DPAD_LEFT;
-            if(gamepad.sThumbLX>0)directions|=XINPUT_GAMEPAD_DPAD_RIGHT;
-            if(gamepad.sThumbLY<0)directions|=XINPUT_GAMEPAD_DPAD_DOWN;
-            if(gamepad.sThumbLY>0)directions|=XINPUT_GAMEPAD_DPAD_UP;
+            WORD directionPresses=0,directions=0;
+            XINPUT_GAMEPAD gamepad=keys?keys->sample(movieOwner&&!modalToken,&directionPresses,modalToken?nullptr:&mouse,&mouseCaptureGeneration,&directions).Gamepad:XINPUT_GAMEPAD{};
             bool commandStick=false;
             if(commands){
                 const auto command=commands->sample();gamepad.wButtons|=command.wButtons;
@@ -585,11 +700,19 @@ NativeMenuPointer NativeControllers::menuPointer(){
     return movieOwner||modalToken||releaseAfterModal[0]||(playback&&playback->active())?
         NativeMenuPointer{}:pointer;
 }
+NativeMouseMotion NativeControllers::takeMouseMotion(){
+    std::lock_guard lock(mutex);
+    const auto keys=keyboard.lock();
+    if(movieOwner||modalToken||releaseAfterModal[0]||(!mousePlayback&&(!keys||!keys->mouseCaptureActive(mouseCaptureGeneration)))) {
+        mouse={};return {};
+    }
+    const auto value=mouse;mouse.x=mouse.y=0;return value;
+}
 uint64_t NativeControllers::beginModal(uint32_t slot){
     if(slot>=4)throw Failure("Invalid native UI controller slot");std::lock_guard lock(mutex);
     if(playback && playback->active())throw Failure("Input playback reached an unrecorded native modal dialog");
     if(modalToken||!nextModalToken)throw Failure("Native controller input already belongs to a UI");
-    movieSkipPending=false;movieArmed.fill(false);
+    movieSkipPending=false;movieArmed.fill(false);mouse={};
     // Commands queued before the dialog opened must not choose a destination.
     if(commands)commands->discard();if(auto keys=keyboard.lock())keys->discard();
     XINPUT_STATE state{};const auto status=stateUnlocked(slot,state);

@@ -1,6 +1,9 @@
 #pragma once
 #include "native_backend.h"
 #include "im2d_vertices.h"
+#include <algorithm>
+#include <bit>
+#include <cmath>
 
 namespace Simpsons::Graphics {
 
@@ -37,6 +40,45 @@ struct Im2DDraw {
     D3D11_SAMPLER_DESC sampler{};
     bool preserveAspect=false; // Frozen at the original Apt/UI draw boundary.
 };
+
+// A flat, uniform canvas rectangle is a backdrop, rather than authored UI
+// content. Only complete rectangles qualify: a bounding box alone would also
+// match two overlapping triangles or a partial panel. Keep the original
+// vertices, color, depth and blend state; select the full scene viewport only.
+inline bool isFullCanvasUiFill(const Im2DDraw& draw) {
+    const auto count=draw.vertices.size();
+    if(draw.texture || !draw.rasterWidth || !draw.rasterHeight ||
+       !((draw.primitiveType==4 && count==4) || (draw.primitiveType==3 && count==6)))return false;
+    const auto& first=draw.vertices.front();
+    float left=first.position[0],right=left,top=first.position[1],bottom=top;
+    for(const auto& v:draw.vertices) {
+        if(v.color!=first.color || v.position[2]!=first.position[2])return false;
+        for(size_t i=0;i<3;++i)if(!std::isfinite(v.position[i]))return false;
+        for(float channel:v.color)if(!std::isfinite(channel))return false;
+        left=std::min(left,v.position[0]);right=std::max(right,v.position[0]);
+        top=std::min(top,v.position[1]);bottom=std::max(bottom,v.position[1]);
+    }
+    // GrayOut is deliberately wider than its Apt stage. Preserve that authored
+    // overhang; half-pixel conventions can put an edge at dimension +/- 0.5.
+    const float width=float(draw.rasterWidth),height=float(draw.rasterHeight);
+    if(left>0.5f || top>0.5f || right<width-0.5f || bottom<height-0.5f ||
+       left>=right || top>=bottom)return false;
+    std::array<unsigned,6> corners{};
+    for(size_t i=0;i<count;++i) {
+        const auto& p=draw.vertices[i].position;
+        if((p[0]!=left && p[0]!=right) || (p[1]!=top && p[1]!=bottom))return false;
+        corners[i]=unsigned(p[0]==right) | (unsigned(p[1]==bottom)<<1);
+    }
+    if(draw.primitiveType==4) {
+        unsigned mask=0;for(size_t i=0;i<4;++i)mask|=1u<<corners[i];
+        return mask==15 && (corners[1]^corners[2])==3;
+    }
+    unsigned a=0,b=0;
+    for(size_t i=0;i<3;++i){a|=1u<<corners[i];b|=1u<<corners[i+3];}
+    if(std::popcount(a)!=3 || std::popcount(b)!=3 || (a|b)!=15)return false;
+    const auto shared=a&b;
+    return shared==((1u<<0)|(1u<<3)) || shared==((1u<<1)|(1u<<2));
+}
 
 // Native raster coverage/float filtering and round-to-even target packing are
 // explicit policies, not proof of console subpixel, blend or filtering precision.

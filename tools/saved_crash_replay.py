@@ -129,7 +129,7 @@ def failure_line(path: Path) -> str:
 
 
 def copy_trimmed_recording(source: Path, target: Path, skip_polls: int) -> None:
-    """Remove only complete, neutral controller cycles before a later scene gate."""
+    """Remove only complete cycles with neutral controls and no mouse motion."""
     if skip_polls < 0 or skip_polls % 4:
         raise ValueError("Skipped polls must be a nonnegative multiple of four")
     if not skip_polls:
@@ -142,7 +142,8 @@ def copy_trimmed_recording(source: Path, target: Path, skip_polls: int) -> None:
     for seq, row in enumerate(polls[:skip_polls]):
         if (row["slot"] != seq % 4 or
                 row["status"] != (0 if seq % 4 == 0 else 1167) or
-                any(row[field] for field in ("buttons", "lt", "rt", "lx", "ly", "rx", "ry"))):
+                any(row[field] for field in ("buttons", "lt", "rt", "lx", "ly", "rx", "ry")) or
+                row.get("mouse_x", 0) or row.get("mouse_y", 0)):
             raise ValueError(f"Skipped poll {seq} is not a neutral four-slot input")
     kept = polls[skip_polls:]
     for seq, row in enumerate(kept):

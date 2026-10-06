@@ -72,7 +72,8 @@ void NativeInputRecording::begin() {
         char header[512]{};
         const int count=std::snprintf(header,sizeof(header),
             "{\"type\":\"header\",\"version\":1,\"pid\":%lu,\"started_utc\":\"%04u-%02u-%02uT%02u:%02u:%02u.%03uZ\","
-            "\"clock\":\"qpc_microseconds\",\"boundary\":\"returned_controller_state\",\"start_scene\":%llu,\"save_state_captured\":false}\n",
+            "\"clock\":\"qpc_microseconds\",\"boundary\":\"returned_controller_state\",\"start_scene\":%llu,\"save_state_captured\":false,"
+            "\"mouse_camera\":\"raw_counts_per_slot0_poll\"}\n",
             GetCurrentProcessId(),unsigned(utc.wYear),unsigned(utc.wMonth),unsigned(utc.wDay),unsigned(utc.wHour),
             unsigned(utc.wMinute),unsigned(utc.wSecond),unsigned(utc.wMilliseconds),
             static_cast<unsigned long long>(scene?scene->load(std::memory_order_acquire):0));
@@ -85,18 +86,23 @@ void NativeInputRecording::begin() {
         std::fprintf(stderr,"[INPUT RECORDING] Cannot start: %s\n",e.what());failed(ERROR_OPEN_FAILED);
     }
 }
-void NativeInputRecording::sample(uint32_t slot,DWORD result,const XINPUT_STATE& state,bool modal) {
+void NativeInputRecording::sample(uint32_t slot,DWORD result,const XINPUT_STATE& state,bool modal,
+        const NativeMouseMotion& mouse) {
     std::lock_guard lock(mutex);
     if(file==INVALID_HANDLE_VALUE)return;
     // XInput output is undefined on disconnect; record the ABI's zero state.
     const XINPUT_STATE value=result==ERROR_SUCCESS?state:XINPUT_STATE{};
+    const NativeMouseMotion motion=slot==0 && result==ERROR_SUCCESS && !modal && mouse.active?
+        mouse:NativeMouseMotion{};
     const auto& pad=value.Gamepad;
     char line[512]{};
     const int count=std::snprintf(line,sizeof(line),
         "{\"type\":\"input\",\"seq\":%llu,\"t_us\":%llu,\"consumer\":\"%s\",\"slot\":%u,\"status\":%lu,\"packet\":%lu,"
-        "\"buttons\":%u,\"lt\":%u,\"rt\":%u,\"lx\":%d,\"ly\":%d,\"rx\":%d,\"ry\":%d}\n",
+        "\"buttons\":%u,\"lt\":%u,\"rt\":%u,\"lx\":%d,\"ly\":%d,\"rx\":%d,\"ry\":%d,"
+        "\"mouse_native\":%u,\"mouse_x\":%d,\"mouse_y\":%d}\n",
         sequence,elapsed(),modal?"modal":"game",slot,result,value.dwPacketNumber,unsigned(pad.wButtons),
-        unsigned(pad.bLeftTrigger),unsigned(pad.bRightTrigger),int(pad.sThumbLX),int(pad.sThumbLY),int(pad.sThumbRX),int(pad.sThumbRY));
+        unsigned(pad.bLeftTrigger),unsigned(pad.bRightTrigger),int(pad.sThumbLX),int(pad.sThumbLY),int(pad.sThumbRX),int(pad.sThumbRY),
+        unsigned(motion.active),int(motion.x),int(motion.y));
     if(count<=0||size_t(count)>=sizeof(line)){failed(ERROR_INSUFFICIENT_BUFFER);return;}
     if(write({line,size_t(count)})) {
         ++sequence;

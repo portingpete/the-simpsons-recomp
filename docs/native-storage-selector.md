@@ -12,24 +12,45 @@ and the public request82CA3968 explicitly supplies0. Whole processor82CA3D28
 calls8285CED8 at82CA4000/LR82CA4004. The native import now admits exactly
 flags0/100/200/300 for active slots0..3 and type1. Unsupported bits and nonzero
 event/callback completions still reject. All admitted flags retain this native
-platform's real modal folder choice; no console automatic-device policy is claimed.
+platform's real modal save decision; no console automatic-device policy is claimed.
 
-The selector is an actual owned Win32 window with the real profile name,
-configured folder, actual caller-available capacity, and Use this folder/A and
-Continue without saving/B buttons. Enter accepts the focused/default choice;
-Escape cancels. The owned game window is disabled during the dialog and its
-client extent/rendering remain unchanged. Native controls use DPI-scaled layout
-and a real Segoe UI font. No console UI, dummy HDD or selected-device object is
-fabricated. The native installed-folder identifier is1, as in content enumeration.
+The selector is an in-game Save Storage screen with the real profile name,
+the statement "Saves are stored in root/saves", actual caller-available capacity,
+and Continue and Continue without saving choices. It shows no absolute folder
+path or location picker. D3D11 draws the latest completed TV-background
+frame and the original retail Highlander title/body fonts on a borderless child
+surface covering the owned game client. Generated font fixtures stay under
+build/native-assets and are prepared from the user's unchanged original package.
+The centered 1280x720 layout and mouse hit regions scale together on ultrawide
+displays. Capacity refusal dims the first choice and shows its reason. The native
+installed-folder identifier is1, as in content enumeration.
 
-The configured folder must already exist on a fixed local volume. Its ancestors
+The original storage import runs on a native worker. Its one-shot background
+request is serviced by the driver's submission thread at the next actual
+presentation. The worker receives owned RGBA bytes, with no foreign-thread D3D
+access. A bounded condition-variable wait observes Runtime cancellation; a
+separate lifetime lock prevents driver retirement from destroying the request.
+
+Up/Down, W/S, a controller stick, or mouse hover selects a row. Enter/Space/A
+accepts that row; Escape/B or right click continues without saving. Clicking a
+row chooses it directly. Keyboard/controller prompts follow the actual source.
+The game keeps keyboard focus, avoiding an internal focus transfer that could
+turn a held initiating key's auto-repeat into premature acceptance. The modal
+controller token keeps game queries neutral; the owner's enablement and desktop
+focus remain unchanged. Stop, close and synchronous mouse-message completion
+wake the modal loop and retire the child renderer and input token.
+
+Normal launches use the game root's `saves` folder; the application creates
+that default folder when necessary. Explicit `--content-store` overrides remain
+available for private diagnostic runs. The configured folder must exist on a
+fixed local volume before selection. Its ancestors
 remain pinned. inspectNativeStorage reads real64-bit volume capacity and verifies
 exclusive temporary-file write/flush/delete access, as documented in
 native-save-catalog.md. Insufficient capacity disables acceptance. Acceptance
 rechecks the actual folder/capacity and the same active full-GUID profile before
 returning a choice. A failed access or changed profile is an explicit failure.
-Available bytes are a snapshot, not a reservation or a claim that game payload
-writing is implemented. No save or profile is created by this selector.
+Available bytes are a snapshot, not a reservation. The original save bridge
+writes and publishes payloads afterward; this selector creates no save or profile.
 
 NativeControllers grants one host token exclusive UI consumption of the selected
 controller. Ordinary game input queries report neutral input while preserving
@@ -50,8 +71,8 @@ preserved. Window shutdown/Runtime stop retires UI/input ownership and throws,
 without reporting a successful selection. Callback exceptions stay inside the
 native window callback boundary and are rethrown on the requesting thread.
 
-Notification9/true is published only after the actual window is visible.
-After its window is destroyed and completion is published, notification9/false
+Notification9/true is published only after the actual in-game screen is visible.
+After its child window is destroyed and completion is published, notification9/false
 is queued. Original8285C868 consumes those transitions: while owner+328 says
 UI is open it returns15; after closing it reads the actual extended error and
 updates owner+360 from owner+31C only on success. It maps cancellation1223

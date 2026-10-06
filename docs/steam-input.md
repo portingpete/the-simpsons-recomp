@@ -28,7 +28,7 @@ so the entry does not depend on the caller working directory.
 App name:    The Simpsons Game (Native)
 Target:      "K:\SimpsonsNativeCopy\build\native\SimpsonsNative.exe"
 Start in:    K:\SimpsonsNativeCopy
-Launch opts: --image K:\SimpsonsNativeCopy\analysis\simpsons.pe --frame-rate 60 --profile-store K:\SimpsonsNativeCopy\build\mainmenu-profile-204 --content-store K:\SimpsonsNativeCopy\build\mainmenu-content-204 --local-profile 0:575cf79a-3815-45f7-a6f7-e8d709d16298
+Launch opts: --image K:\SimpsonsNativeCopy\analysis\simpsons.pe --frame-rate 60 --profile-store K:\SimpsonsNativeCopy\build\mainmenu-profile-204 --content-store K:\SimpsonsNativeCopy\saves --local-profile 0:575cf79a-3815-45f7-a6f7-e8d709d16298
 ```
 
 Recorded selection behind the launch options
@@ -37,7 +37,7 @@ Recorded selection behind the launch options
 
 ```text
 profile_store=build/mainmenu-profile-204
-content_store=build/mainmenu-content-204
+content_store=saves
 profile_id=575cf79a-3815-45f7-a6f7-e8d709d16298
 save_index=save-index/575cf79a-3815-45f7-a6f7-e8d709d16298/45410809/SIMPSONS_SLOT1.save
 ```

@@ -2,6 +2,7 @@
 #include "ppc_context.h"
 #include "player_telemetry.h"
 #include "native_video_settings.h"
+#include "native_control_settings.h"
 #include "native_ultrawide_camera.h"
 #include "resource_audit.h"
 #include "../common/guest_write_watch.h"
@@ -56,6 +57,9 @@ struct KernelHandle {
     std::shared_ptr<Platform::ContentEnumeration> content;
     std::shared_ptr<Platform::NativeSaveFile> saveFile;
     std::mutex stateMutex;
+    // Profiler observation only: high word is the last observed native owner,
+    // low word is its saved guest call site. Never used to govern ownership.
+    std::atomic<uint64_t> stallMutantOwner{};
     int32_t priorityIncrement=0;
     Type type;
     KernelHandle(HANDLE h,Type t):native(h),type(t) {}
@@ -137,6 +141,9 @@ public:
     std::unordered_map<uint32_t,HeldObject> objectReferences;
     std::shared_ptr<KernelHandle> mainThreadHandle;
     std::unique_ptr<NativeWindow> window;
+    // A platform worker borrows the driver's lifetime only while requesting
+    // a copied menu frame. Publication/retirement use the same lock.
+    std::mutex engineDriverMutex;
     std::shared_ptr<EngineDriver> engineDriver;
     // Provenance published only after the actual original CPU FX-pool constructor.
     // Native FX leases are separate from that SDK root's reference count.
@@ -165,7 +172,7 @@ public:
     std::vector<GraphicsStorageReservation> graphicsStorage;
     std::unordered_map<uint32_t,GraphicsPresentReceipt> graphicsPresentReceipts;
     std::filesystem::path gameRoot;
-    std::filesystem::path contentRoot; // Optional native common-content store, outside original assets.
+    std::filesystem::path contentRoot; // Native common-content store; defaults to the game root's saves folder.
     std::filesystem::path frameCaptureDirectory; // Opt-in raw presented-frame evidence; disabled by default.
     PlayerTelemetry playerTelemetry; // Per-present original character-pose observation.
     bool captureOnRequest=false;
@@ -192,6 +199,9 @@ public:
     bool vsyncEnabled=false; // Normal launches use sync interval zero; --vsync selects interval one.
     NativeVideoSettings videoSettings;
     NativeVideoSettings videoSettingsBeforeMenu;
+    NativeControlSettings controlSettings;
+    NativeControlSettings controlSettingsBeforeMenu;
+    std::filesystem::path controlSettingsPath;
     NativeCameraProjectionState nativeCameraProjection;
     bool videoSettingsPending=true;
     std::filesystem::path videoSettingsPath,nativeFrontendRoot;

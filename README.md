@@ -32,7 +32,9 @@ compiled output, replay payloads, and private saves stay outside Git.
 For an existing configured workstation build, use
 [Play The Simpsons Game.cmd](Play%20The%20Simpsons%20Game.cmd).
 See [launcher help](docs/launcher.md), [native input prompts](docs/native-input-prompts.md),
-[architecture](docs/architecture.md), and [development checklist](docs/checklist.md).
+[native control settings](docs/native-control-settings.md),
+[architecture](docs/architecture.md), [runtime stall profiling](docs/runtime-stall-profiler.md),
+and [development checklist](docs/checklist.md).
 
 ## Dependencies and credits
 

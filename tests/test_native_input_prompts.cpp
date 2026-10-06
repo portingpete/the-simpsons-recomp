@@ -1,4 +1,5 @@
 #include "renderer/native_input_prompts.h"
+#include "runtime/native_control_settings.h"
 #include "renderer/im2d_draw.h"
 #include "renderer/native_prompt_icons.generated.h"
 #include <algorithm>
@@ -147,6 +148,33 @@ int main(int argc,char** argv){try{
     need(atlas==prompts.texture(backend),"Prompt atlas uploaded twice");
     const auto pixels=keyboardMousePromptPixels();
     need(backend.readback(atlas)==pixels,"GPU prompt upload lost RGBA/alpha bytes");
+    Simpsons::NativeControlSettings controls;
+    need(keyboardMousePromptLayout(controls)==defaultKeyboardMousePromptLayout(),"Default controls changed prompt identities");
+    controls.bindings[uint32_t(Simpsons::ControlAction::Jump)]={'Z',0};
+    controls.bindings[uint32_t(Simpsons::ControlAction::MoveForward)]={0x26,0};
+    const auto customLayout=keyboardMousePromptLayout(controls);
+    const auto customAtlas=prompts.texture(backend,customLayout);
+    need(customAtlas!=atlas&&customAtlas==prompts.texture(backend,customLayout),"Rebound prompt cache did not update once");
+    need(backend.readback(customAtlas)==keyboardMousePromptPixels(customLayout),"Rebound prompt upload lost artwork bytes");
+    auto customQuad=promptDraw(11,1005,626,40,40);
+    need(enlargeInputPromptGlyphs(customQuad,customLayout)==1,"Rebound physical-key glyph bounds were not recognized");
+    need(prompts.texture(backend)!=customAtlas,"Returning to fixed menu prompts did not restore the atlas");
+    {
+        using NativePromptIcons::Icon;
+        constexpr std::array keys{0x5Du,5u,6u,0x6Cu,0x7Cu,0xE2u};
+        constexpr std::array expected{Icon::Menu,Icon::Question,Icon::Question,
+            Icon::Question,Icon::Question,Icon::Question};
+        for(size_t i=0;i<keys.size();++i) {
+            auto rebound=controls;rebound.bindings[uint32_t(Simpsons::ControlAction::Jump)]={keys[i],0};
+            const auto layout=keyboardMousePromptLayout(rebound);
+            need(layout[11]==uint8_t(expected[i]),"Menu or unsupported physical-key prompt identity differs");
+            const auto reboundPixels=keyboardMousePromptPixels(layout);
+            const auto artwork=NativePromptIcons::lookup(expected[i]);
+            for(size_t y=0;y<64;++y)
+                need(std::equal(artwork.rgba.begin()+y*64*4,artwork.rgba.begin()+(y+1)*64*4,
+                    reboundPixels.begin()+((128+y)*256+192)*4),"Rebound Menu or fallback artwork differs");
+        }
+    }
     // Keep an independently bound original atlas throughout replacement draws.
     // Switching the input source must never replace the engine's cached owner.
     const std::vector<uint8_t> originalPixels(256*256*4,127);

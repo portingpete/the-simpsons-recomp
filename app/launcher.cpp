@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -26,7 +27,7 @@ constexpr wchar_t kTitle[] = L"The Simpsons Game";
 
 struct Failure { std::wstring message; };
 
-enum class LaunchMode { Normal, FirstMissionCompletion, BartmanBegins };
+enum class LaunchMode { Normal, FirstMissionCompletion, BartmanBegins, StallProfile };
 enum class LauncherAction { DispatchGame, SelfTest };
 
 struct LauncherOptions {
@@ -41,7 +42,9 @@ LauncherOptions parseOptions(const std::vector<std::wstring>& arguments) {
         return {LaunchMode::FirstMissionCompletion, LauncherAction::DispatchGame};
     if (arguments.size() == 2 && arguments[1] == L"--bartman-begins")
         return {LaunchMode::BartmanBegins, LauncherAction::DispatchGame};
-    throw Failure{L"Usage: SimpsonsLauncher.exe [--first-mission-completion | --bartman-begins | --self-test]"};
+    if (arguments.size() == 2 && arguments[1] == L"--stall-profile")
+        return {LaunchMode::StallProfile, LauncherAction::DispatchGame};
+    throw Failure{L"Usage: SimpsonsLauncher.exe [--first-mission-completion | --bartman-begins | --stall-profile | --self-test]"};
 }
 
 class Handle {
@@ -140,7 +143,7 @@ constexpr wchar_t kLocalProfile[] = L"0:575cf79a-3815-45f7-a6f7-e8d709d16298";
 GamePaths pathsAt(const fs::path& root) {
     return {root, root / L"build" / L"native" / L"SimpsonsNative.exe",
         root / L"analysis" / L"simpsons.pe", root / L"build" / L"mainmenu-profile-204",
-        root / L"build" / L"mainmenu-content-204", root / L"build" / L"launcher-logs"};
+        root / L"saves", root / L"build" / L"launcher-logs"};
 }
 
 // Only the launcher's own ancestors are searched; the caller's working directory
@@ -426,6 +429,30 @@ private:
     LPPROC_THREAD_ATTRIBUTE_LIST list_ = nullptr;
 };
 
+std::vector<wchar_t> stallProfileEnvironment(const wchar_t* inherited) {
+    constexpr std::wstring_view variable = L"SIMPSONS_STALL_PROFILE=";
+    std::vector<std::wstring> entries;
+    for (auto entry = inherited; *entry != L'\0'; entry += wcslen(entry) + 1) {
+        std::wstring value(entry);
+        if (value.size() >= variable.size() && CompareStringOrdinal(value.data(), static_cast<int>(variable.size()),
+                variable.data(), static_cast<int>(variable.size()), TRUE) == CSTR_EQUAL) continue;
+        entries.push_back(std::move(value));
+    }
+    entries.emplace_back(L"SIMPSONS_STALL_PROFILE=1");
+    // Keep all inherited entries, including Windows' hidden =C: drive entries.
+    // CreateProcess receives its own sorted, double-NUL-terminated Unicode block.
+    std::sort(entries.begin(), entries.end(), [](const auto& left, const auto& right) {
+        return CompareStringOrdinal(left.c_str(), -1, right.c_str(), -1, TRUE) == CSTR_LESS_THAN;
+    });
+    std::vector<wchar_t> block;
+    for (const auto& entry : entries) {
+        block.insert(block.end(), entry.begin(), entry.end());
+        block.push_back(L'\0');
+    }
+    block.push_back(L'\0');
+    return block;
+}
+
 Handle startGame(const GamePaths& paths, LogFile& log, LaunchMode mode) {
     auto command = gameCommand(paths, mode); // CreateProcessW requires writable storage.
     writeText(log.handle.get(), L"The Simpsons Game - native development build\r\n"
@@ -446,10 +473,18 @@ Handle startGame(const GamePaths& paths, LogFile& log, LaunchMode mode) {
     startup.StartupInfo.hStdError = log.handle.get();
     startup.lpAttributeList = attributes.get();
     PROCESS_INFORMATION process{};
+    std::vector<wchar_t> environment;
+    DWORD creationFlags = CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT;
+    if (mode == LaunchMode::StallProfile) {
+        std::unique_ptr<wchar_t, decltype(&FreeEnvironmentStringsW)> inherited(GetEnvironmentStringsW(), &FreeEnvironmentStringsW);
+        if (!inherited) failWindows(L"Could not read the game environment");
+        environment = stallProfileEnvironment(inherited.get());
+        creationFlags |= CREATE_UNICODE_ENVIRONMENT;
+    }
     // No job object, timeout, hidden-window hint, or shutdown linkage. Suppress
     // only the console: the game's native window retains its normal visibility.
     if (!CreateProcessW(paths.executable.c_str(), command.data(), nullptr, nullptr, TRUE,
-            CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, paths.root.c_str(),
+            creationFlags, environment.empty() ? nullptr : environment.data(), paths.root.c_str(),
             &startup.StartupInfo, &process)) {
         const auto failure = windowsError(L"The game could not start");
         writeText(log.handle.get(), failure + L"\r\n");
@@ -472,12 +507,15 @@ PreparedLaunch prepareLaunch(const GamePaths& source, LaunchMode mode, const SYS
         throw Failure{L"The recorded Player profile or save is missing. Restore the main-menu profile/content data before launching.\n\n"
             L"Required files:\n" + profile.native() + L"\n" + save.native()};
     auto launchPaths = source;
+    if (mode == LaunchMode::StallProfile) launchPaths.logs = source.root / L"build" / L"stall-profiler-logs";
     std::optional<PrivateRun> privateRun;
     if (mode == LaunchMode::FirstMissionCompletion || mode == LaunchMode::BartmanBegins) {
         privateRun = createPrivateRun(source, time, mode);
         launchPaths = privateRun->paths;
     }
     auto log = createLog(launchPaths.logs, time);
+    if (mode == LaunchMode::StallProfile)
+        writeText(log.handle.get(), L"Runtime stall profiling launch. SIMPSONS_STALL_PROFILE=1 for this game process.\r\n");
     if (privateRun) {
         const auto label = mode == LaunchMode::BartmanBegins ? L"Bartman Begins direct launch." : L"First-mission completion launch.";
         writeText(log.handle.get(), std::wstring(label) + L" Original stores remain unchanged.\r\n"
@@ -628,6 +666,7 @@ int selfTest() {
     TestDirectory fixture(ownExecutable.parent_path());
     const auto root = fixture.path / L"Game space \u00e9\u6e2c\u8a66 & (test)!";
     const auto paths = pathsAt(root);
+    require(paths.contentStore == root / L"saves", L"default saves escaped the game root");
     const auto launcher = paths.executable.parent_path() / L"SimpsonsLauncher.exe";
     fixtureFile(launcher);
     fixtureFile(paths.executable);
@@ -658,6 +697,18 @@ int selfTest() {
     const auto bartmanOption = parseOptions({L"launcher.exe", L"--bartman-begins"});
     require(bartmanOption.mode == LaunchMode::BartmanBegins && bartmanOption.action == LauncherAction::DispatchGame,
         L"Bartman Begins launch option not selected for direct dispatch");
+    const auto stallOption = parseOptions({L"launcher.exe", L"--stall-profile"});
+    require(stallOption.mode == LaunchMode::StallProfile && stallOption.action == LauncherAction::DispatchGame,
+        L"stall profiling launch option not selected for direct dispatch");
+    require(splitCommand(gameCommand(paths, LaunchMode::StallProfile)) == command,
+        L"stall profiling altered the normal game command");
+    const wchar_t inheritedEnvironment[] = L"Z_LAST=keep\0simpsons_stall_profile=0\0=C:=C:\\fixture\0"
+        L"UNICODE=\u00e9\u6e2c\u8a66\0SIMPSONS_STALL_PROFILE=other\0SIMPSONS_STALL_PROFILE_EXTRA=keep\0";
+    const auto profileEnvironment = stallProfileEnvironment(inheritedEnvironment);
+    const wchar_t expectedEnvironment[] = L"=C:=C:\\fixture\0SIMPSONS_STALL_PROFILE=1\0"
+        L"SIMPSONS_STALL_PROFILE_EXTRA=keep\0UNICODE=\u00e9\u6e2c\u8a66\0Z_LAST=keep\0";
+    require(profileEnvironment == std::vector<wchar_t>(std::begin(expectedEnvironment), std::end(expectedEnvironment)),
+        L"stall profile environment lost entries, duplicate overrides, ordering or double terminator");
     require(parseOptions({L"launcher.exe", L"--self-test"}).action == LauncherAction::SelfTest, L"self-test option not selected");
     for (const auto& rejected : std::vector<std::vector<std::wstring>>{
         {}, {L"launcher.exe", L"--unknown"},
@@ -668,7 +719,10 @@ int selfTest() {
         {L"launcher.exe", L"--bartman-begins", L"--first-mission-completion"},
         {L"launcher.exe", L"--first-mission-completion", L"--bartman-begins"},
         {L"launcher.exe", L"--bartman-begins", L"--self-test"},
-        {L"launcher.exe", L"--self-test", L"--bartman-begins"}}) {
+        {L"launcher.exe", L"--self-test", L"--bartman-begins"},
+        {L"launcher.exe", L"--stall-profile", L"--stall-profile"},
+        {L"launcher.exe", L"--stall-profile", L"--self-test"},
+        {L"launcher.exe", L"--stall-profile", L"--bartman-begins"}}) {
         bool refused = false;
         try { parseOptions(rejected); } catch (const Failure&) { refused = true; }
         require(refused, L"unknown, duplicate or combined launcher option accepted");
@@ -733,6 +787,12 @@ int selfTest() {
         require(normalLaunch.paths.profileStore == paths.profileStore && normalLaunch.paths.contentStore == paths.contentStore &&
             normalLaunch.paths.logs == paths.logs && regularFile(normalLaunch.log.path), L"direct normal launch preparation changed stores or logs");
         require(splitCommand(gameCommand(normalLaunch.paths)) == command, L"direct normal launch command changed");
+        auto profilingLaunch = prepareLaunch(paths, LaunchMode::StallProfile, time);
+        require(profilingLaunch.paths.profileStore == paths.profileStore && profilingLaunch.paths.contentStore == paths.contentStore &&
+            profilingLaunch.paths.logs == root / L"build" / L"stall-profiler-logs" && regularFile(profilingLaunch.log.path),
+            L"stall profiling changed the stores or failed to create its separate log");
+        require(fixtureContents(profilingLaunch.log.path).find("SIMPSONS_STALL_PROFILE=1") != std::string::npos,
+            L"stall profiling log is missing its environment mode");
         auto completionLaunch = prepareLaunch(paths, LaunchMode::FirstMissionCompletion, time);
         require(completionLaunch.paths.profileStore != paths.profileStore && completionLaunch.paths.contentStore != paths.contentStore &&
             regularFile(completionLaunch.log.path), L"direct completion launch preparation did not isolate stores or create its log");

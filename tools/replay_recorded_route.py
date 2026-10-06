@@ -87,6 +87,8 @@ def route_from_recording(reference: Path, *, keyboard: bool = True) -> tuple[lis
             raise ValueError(f"Recording control is out of range at sequence {sequence}")
         if row["status"] == 1167 and any(controls):
             raise ValueError(f"Disconnected poll has nonzero state at sequence {sequence}")
+        if keyboard and (row.get("mouse_x", 0) or row.get("mouse_y", 0)):
+            raise ValueError("Recorded raw mouse motion requires direct input playback")
         if row["slot"] == 0:
             state = (row["buttons"], row["rt"], row["lx"], row["ly"])
             if state != previous:

@@ -1,5 +1,6 @@
 #include "native_window.h"
 #include "runtime.h"
+#include "stall_profiler.h"
 #include "native_controllers.h"
 #include "native_input_recording.h"
 #include <bit>
@@ -18,26 +19,40 @@ void NativeWindow::setMenuMouse(bool active) {
     if(menuMouse.load(std::memory_order_relaxed)==active)return;
     keyboard->menuMode(active);
     menuMouse.store(active,std::memory_order_relaxed);
-    if(const auto window=handle())PostMessageW(window,menuMouseMessage,0,0);
+    // Preserve each transition even if a menu opens and closes before the
+    // window thread dispatches it. Entering must release its existing capture.
+    if(const auto window=handle())PostMessageW(window,menuMouseMessage,active?1:0,0);
 }
 void NativeWindow::configureVideo(uint32_t outputWidth,uint32_t outputHeight,bool fullscreen) {
-    if(!SendMessageW(handle(),videoMessage,WPARAM(outputWidth)|(WPARAM(outputHeight)<<16),fullscreen?1:0))
+    const HWND window=handle();
+    StallProfiler::Scope messageProfile(StallProfiler::Section::Wait,"NativeWindow::configureVideo.SendMessage",nullptr,reinterpret_cast<uintptr_t>(window));
+    if(!SendMessageW(window,videoMessage,WPARAM(outputWidth)|(WPARAM(outputHeight)<<16),fullscreen?1:0))
         throw Failure("Native video window change failed");
 }
 NativeWindow::NativeWindow(std::shared_ptr<Platform::NativeInputRecording> recording):keyboard(std::make_shared<Platform::NativeKeyboard>()),inputRecording(std::move(recording)) {
     ui=std::thread([this]{run();});
     std::unique_lock lock(mutex);
+    StallProfiler::Scope readyProfile(StallProfiler::Section::Wait,"NativeWindow::initialize",nullptr,reinterpret_cast<uintptr_t>(&ready));
     ready.wait(lock,[this]{return initialized;});
-    if(!error.empty()) {lock.unlock();ui.join();throw Failure(error);}
+    readyProfile.finish();
+    if(!error.empty()) {
+        lock.unlock();
+        StallProfiler::Scope joinProfile(StallProfiler::Section::Wait,"NativeWindow::initialize.failureJoin",nullptr,reinterpret_cast<uintptr_t>(ui.native_handle()));
+        ui.join();joinProfile.finish();throw Failure(error);
+    }
 }
 NativeWindow::~NativeWindow() {
     if(HWND window=hwnd.load()) PostMessageW(window,WM_CLOSE,0,0);
-    if(ui.joinable()) ui.join();
+    if(ui.joinable()) {
+        StallProfiler::Scope joinProfile(StallProfiler::Section::Wait,"NativeWindow::~NativeWindow.join",nullptr,reinterpret_cast<uintptr_t>(ui.native_handle()));
+        ui.join();
+    }
 }
 void NativeWindow::captureMouse(HWND window,bool active) {
     if(active==mouseCaptured)return;
     if(active) {
         if(isMenuMouse())return;
+        if(!IsWindowEnabled(window)||(GetWindowLongPtrW(window,GWL_EXSTYLE)&WS_EX_NOACTIVATE))return;
         if(GetFocus()!=window||GetForegroundWindow()!=window)return;
         RECT client{};POINT origin{};
         if(!GetClientRect(window,&client)||!ClientToScreen(window,&origin))return;
@@ -49,7 +64,7 @@ void NativeWindow::captureMouse(HWND window,bool active) {
         if(!ClipCursor(&client)) {ReleaseCapture();return;}
         cursorHideCalls=0;
         do {++cursorHideCalls;}while(ShowCursor(FALSE)>=0);
-        mouseCaptured=true;keyboard->captureMouse(true);
+        mouseCaptured=true;resumeMouseAfterMenu=true;keyboard->captureMouse(true);
     } else {
         // ReleaseCapture sends WM_CAPTURECHANGED synchronously.
         mouseCaptured=false;keyboard->captureMouse(false);
@@ -70,20 +85,32 @@ LRESULT CALLBACK NativeWindow::procedure(HWND window,UINT message,WPARAM wparam,
         self=static_cast<NativeWindow*>(create->lpCreateParams);
         SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(self));
     }
+    if(message==WM_CLOSE && self) {
+        // DefWindowProc destroys the HWND synchronously, sending focus/capture
+        // callbacks before WM_DESTROY. Stop guest execution before that teardown.
+        if(Simpsons::active&&Simpsons::active->window.get()==self)
+            Simpsons::active->requestStop("Native window closed");
+        self->closed=true;
+        return DefWindowProcW(window,message,wparam,lparam);
+    }
     if(message==WM_DESTROY) {
         KillTimer(window,fpsTimerId);
         if(self) {
-            self->captureMouse(window,false);self->keyboard->focus(false);self->closed=true;self->hwnd=nullptr;
-            // Guest code no longer polls the window on every memory access: raise the stop
-            // request now so every original function entry and wait observes it.
-            if(Simpsons::active&&Simpsons::active->window.get()==self)Simpsons::active->requestStop("Native window closed");
+            // Also cover direct DestroyWindow and initialization failure. Keep
+            // cancellation ahead of reentrant cursor/input cleanup here too.
+            if(Simpsons::active&&Simpsons::active->window.get()==self)
+                Simpsons::active->requestStop("Native window closed");
+            self->closed=true;
+            self->resumeMouseAfterMenu=false;
+            self->captureMouse(window,false);self->keyboard->focus(false);self->hwnd=nullptr;
         }
         PostQuitMessage(0);
         return 0;
     }
     if(self) {
         if(message==menuMouseMessage) {
-            self->captureMouse(window,false);
+            if(wparam)self->captureMouse(window,false);
+            else if(!self->isMenuMouse()&&self->resumeMouseAfterMenu)self->captureMouse(window,true);
             SendMessageW(window,WM_TIMER,fpsTimerId,0);
             return 0;
         }
@@ -119,6 +146,7 @@ LRESULT CALLBACK NativeWindow::procedure(HWND window,UINT message,WPARAM wparam,
             // unless its actual output extent or display mode must change.
             // Window-size preferences do not change a fullscreen desktop.
             if(full==self->fullscreen && EqualRect(&bounds,&previous))return 1;
+            self->resumeMouseAfterMenu=false;
             self->captureMouse(window,false);
             if(full&&!self->fullscreen)self->windowedRect=previous;
             self->videoWindowExtent={bounds.right-bounds.left,bounds.bottom-bounds.top};
@@ -150,9 +178,15 @@ LRESULT CALLBACK NativeWindow::procedure(HWND window,UINT message,WPARAM wparam,
             return 0;
         }
         if(message==WM_SETFOCUS) self->keyboard->focus(true);
-        if(message==WM_KILLFOCUS) {self->captureMouse(window,false);self->keyboard->focus(false);}
+        if(message==WM_KILLFOCUS) {
+            self->resumeMouseAfterMenu=false;self->captureMouse(window,false);self->keyboard->focus(false);
+        }
         if(message==WM_CANCELMODE||message==WM_ENTERSIZEMOVE||
-           (message==WM_CAPTURECHANGED&&reinterpret_cast<HWND>(lparam)!=window))self->captureMouse(window,false);
+           (message==WM_CAPTURECHANGED&&self->mouseCaptured&&reinterpret_cast<HWND>(lparam)!=window)) {
+            // Our ReleaseCapture reenters with mouseCaptured already false.
+            // External capture loss cancels automatic resume; a pause does not.
+            self->resumeMouseAfterMenu=false;self->captureMouse(window,false);
+        }
         if(message==WM_SETCURSOR&&self->mouseCaptured) {SetCursor(nullptr);return TRUE;}
         const auto pointerPosition=[&](LPARAM position) {
             RECT client{};
@@ -191,16 +225,26 @@ LRESULT CALLBACK NativeWindow::procedure(HWND window,UINT message,WPARAM wparam,
             case WM_RBUTTONUP:button=VK_RBUTTON;break;
             case WM_MBUTTONDOWN:button=VK_MBUTTON;down=true;break;
             case WM_MBUTTONUP:button=VK_MBUTTON;break;
+            case WM_XBUTTONDOWN:button=HIWORD(wparam)==XBUTTON1?VK_XBUTTON1:VK_XBUTTON2;down=true;break;
+            case WM_XBUTTONUP:button=HIWORD(wparam)==XBUTTON1?VK_XBUTTON1:VK_XBUTTON2;break;
             }
             if(button) {
                 pointerPosition(lparam);
-                if(down&&!self->mouseCaptured)self->captureMouse(window,true);
+                if(down&&!self->mouseCaptured&&!self->keyboard->rebindActive())self->captureMouse(window,true);
                 self->keyboard->mouseButton(button,down);
-                return 0;
+                return message==WM_XBUTTONDOWN||message==WM_XBUTTONUP?TRUE:0;
             }
         }
+        if((message==WM_KEYDOWN||message==WM_KEYUP)&&self->keyboard->rebindActive()&&
+           (wparam==VK_F6||wparam==VK_F8||wparam==VK_F9)) {
+            self->keyboard->key(UINT(wparam),message==WM_KEYDOWN);return 0;
+        }
         if((message==WM_KEYDOWN||message==WM_KEYUP)&&wparam==VK_F6) {
-            if(message==WM_KEYDOWN&&!(lparam&(LPARAM(1)<<30)))self->captureMouse(window,!self->mouseCaptured);
+            if(message==WM_KEYDOWN&&!(lparam&(LPARAM(1)<<30))) {
+                if(self->mouseCaptured||self->resumeMouseAfterMenu) {
+                    self->resumeMouseAfterMenu=false;self->captureMouse(window,false);
+                } else self->captureMouse(window,true);
+            }
             return 0;
         }
         if(self->inputRecording && (wparam==VK_F8||wparam==VK_F9) &&
@@ -213,14 +257,18 @@ LRESULT CALLBACK NativeWindow::procedure(HWND window,UINT message,WPARAM wparam,
             }
             return 0;
         }
-        if(message==WM_KEYDOWN || message==WM_KEYUP) {
-            if(message==WM_KEYDOWN&&wparam==VK_ESCAPE)self->captureMouse(window,false);
+        if(message==WM_KEYDOWN || message==WM_KEYUP || message==WM_SYSKEYDOWN || message==WM_SYSKEYUP) {
+            const bool down=message==WM_KEYDOWN||message==WM_SYSKEYDOWN;
+            // Preserve the window manager's Alt+F4 close command.
+            if((message==WM_SYSKEYDOWN||message==WM_SYSKEYUP)&&wparam==VK_F4)return DefWindowProcW(window,message,wparam,lparam);
+            if(down&&wparam==VK_ESCAPE)self->captureMouse(window,false);
             // Window key messages use generic VK_SHIFT; the scan code identifies
             // the left key without mapping the right key to a game action.
             const auto code=wparam==VK_SHIFT?
                 MapVirtualKeyW(UINT((lparam>>16)&0xFF),MAPVK_VSC_TO_VK_EX):
-                wparam==VK_CONTROL?((lparam&(LPARAM(1)<<24))?VK_RCONTROL:VK_LCONTROL):UINT(wparam);
-            if(self->keyboard->key(code,message==WM_KEYDOWN))return 0;
+                wparam==VK_CONTROL?((lparam&(LPARAM(1)<<24))?VK_RCONTROL:VK_LCONTROL):
+                wparam==VK_MENU?((lparam&(LPARAM(1)<<24))?VK_RMENU:VK_LMENU):UINT(wparam);
+            if(self->keyboard->key(code,down))return 0;
         }
     }
     return DefWindowProcW(window,message,wparam,lparam);
@@ -290,6 +338,7 @@ PPC_FUNC(__imp__XGetVideoMode) {
     PPCGuestPointer(base,output,48,true);
     if(!rt.window) {
         rt.window=std::make_unique<Simpsons::NativeWindow>(rt.inputRecording);
+        rt.window->keyboard->configureControls(rt.controlSettings);
         // A connection or storage query can create the controller source before
         // video initialization. Publish this window's input in either order.
         rt.controllerSource()->attachKeyboard(rt.window->keyboard);

@@ -11,13 +11,16 @@
 #include <string>
 #include <vector>
 #include <type_traits>
+#include <optional>
+#include "native_mouse_input.h"
+#include "native_control_settings.h"
 
 namespace Simpsons::Platform {
 class NativeInputRecording;
 // Replays the exact returned XInput polls from a version-one input recording.
 // It activates at the first slot-zero poll after the requested scene count.
 class NativeInputPlayback {
-    struct Poll {uint32_t slot;DWORD status;XINPUT_STATE state;};
+    struct Poll {uint32_t slot;DWORD status;XINPUT_STATE state;NativeMouseMotion mouse;};
     std::vector<Poll> polls;
     const std::atomic<uint64_t>& scene;
     uint64_t startScene;
@@ -31,7 +34,7 @@ public:
     bool ready(uint32_t slot) const;
     bool active() const{return started;}
     bool handoffReady(uint32_t slot) const;
-    DWORD sample(uint32_t slot,XINPUT_STATE& result);
+    DWORD sample(uint32_t slot,XINPUT_STATE& result,NativeMouseMotion* mouse=nullptr);
     size_t count() const{return polls.size();}
 };
 // Explicitly enabled local command stream. Commands are button/stick taps consumed
@@ -64,14 +67,30 @@ struct NativeMenuPointer {
     uint32_t width=0,height=0;
     uint8_t pressed=0;
 };
+enum class NativeRebindStatus { Bound,Cleared,Cancelled,Rejected };
+struct NativeRebindResult {
+    ControlAction action;
+    uint32_t slot;
+    NativeRebindStatus status;
+    uint32_t code;
+};
 class NativeKeyboard {
     std::mutex mutex;
     // Track each physical key independently: releasing an alias must not release
     // another key or mouse button which supplies the same game action.
     std::array<bool,256> held{},pressed{};
+    std::array<bool,256> physicalHeld{},blocked{};
+    NativeControlSettings controlSettings{};
+    bool capturing=false;
+    ControlAction captureAction=ControlAction::MoveForward;
+    uint32_t captureSlot=0,captureRelease=0;
+    std::optional<NativeRebindResult> captureResult;
+    std::deque<NativeRebindResult> rebindResults;
+    bool captureInput(uint32_t code,bool down,bool wasHeld);
     uint8_t mouseHeld=0,mousePressed=0;
     int32_t mouseX=0,mouseY=0;
     bool mouseCaptured=false;
+    uint64_t mouseGeneration=1;
     XINPUT_GAMEPAD last{};
     DWORD packet=1;
     bool focused=false;
@@ -90,13 +109,20 @@ public:
     bool key(uint32_t code,bool down);
     void captureMouse(bool active);
     bool mouseButton(uint32_t code,bool down);
+    NativeControlSettings controls();
+    void configureControls(const NativeControlSettings& settings);
+    void beginRebind(ControlAction action,uint32_t slot);
+    void cancelRebind();
+    bool rebindActive();
+    std::optional<NativeRebindResult> takeRebindResult();
     void mouseMotion(int32_t x,int32_t y);
+    bool mouseCaptureActive(uint64_t generation);
     void menuMode(bool active);
     void pointerMove(int32_t x,int32_t y,uint32_t width,uint32_t height);
     void pointerLeave();
     void pointerWheel(int32_t delta);
     NativeMenuPointer menuPointer();
-    XINPUT_STATE sample(bool movie=false,WORD* directionPresses=nullptr);
+    XINPUT_STATE sample(bool movie=false,WORD* directionPresses=nullptr,NativeMouseMotion* motion=nullptr,uint64_t* generation=nullptr,WORD* directionHeld=nullptr);
     void discard(bool pointerEvents=true);
 };
 // Stack-owned receipt for this poll's exact fresh movie Start acceptance.
@@ -131,6 +157,9 @@ class NativeControllers {
     XINPUT_GAMEPAD fallbackLast{};
     DWORD fallbackPacket=1;
     NativeKeyboardNavigation navigation{};
+    NativeMouseMotion mouse{};
+    uint64_t mouseCaptureGeneration=0;
+    bool mousePlayback=false;
     WORD navigationPrevious=0;
     DWORD stateUnlocked(uint32_t slot,XINPUT_STATE& result);
     // XInputGetState on an empty slot enumerates devices: it costs 0.1 ms to several ms, in
@@ -161,6 +190,9 @@ public:
     bool usesKeyboardMouse() const noexcept {return keyboardMouseSource.load(std::memory_order_relaxed);}
     NativeKeyboardNavigation keyboardNavigation();
     NativeMenuPointer menuPointer();
+    // The camera consumes this poll's raw displacement once. Subsequent camera
+    // updates remain native/neutral, so controller easing cannot create a tail.
+    NativeMouseMotion takeMouseMotion();
     // Connection-only probes must not consume pending buttons or mouse motion.
     DWORD connectionStatus(uint32_t slot);
     DWORD state(uint32_t slot,XINPUT_STATE& result,NativeMovieStartObservation* observation=nullptr);

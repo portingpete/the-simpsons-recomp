@@ -1,4 +1,5 @@
 #include "skin_mesh.h"
+#include "runtime/stall_profiler.h"
 #include "common/geometry_extent.h"
 #include "immutable_depth_constants.h"
 #include "mesh_upload_cache.h"
@@ -441,7 +442,9 @@ void NativeBackend::drawSkinMesh(const std::shared_ptr<RenderTarget>& target,con
         if(shadowed)for(UINT i=0;i<2;++i){auto* sampler=samplers[i].Get();context->PSSetSamplers(i,1,&sampler);}
         else if(material)for(UINT i=0;i<(profile.second?2u:1u);++i){auto* sampler=samplers[i].Get();context->PSSetSamplers(i,1,&sampler);}
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        StallProfiler::Scope drawProfile(StallProfiler::Section::Rendering,"D3D11.DrawIndexed.skin",nullptr,reinterpret_cast<uintptr_t>(m.indices.Get()));
         forEachOriginalR16StripChunk(d.startIndex,d.indexCount,[&](uint32_t n,uint32_t first){context->DrawIndexed(n,first,d.baseVertex);});
+        drawProfile.finish();
         ++skinMeshDraws;
     }
     bindings();requireOwner();
@@ -553,8 +556,14 @@ void NativeBackend::recordSkinMesh(const std::shared_ptr<NativeRecordingPayload>
         inheritSkin(material.vertex,draw->live->state->vertex,material.inputMask,0);
         inheritSkin(material.pixel,draw->live->state->pixel,material.inputMask,8);
         finite(material.vertex);finite(material.pixel);
-        immediate->UpdateSubresource(draw->vertexConstants.Get(),0,nullptr,material.vertex.data(),0,0);
-        immediate->UpdateSubresource(draw->pixelConstants.Get(),0,nullptr,material.pixel.data(),0,0);
+        {
+            StallProfiler::Scope updateProfile(StallProfiler::Section::Rendering,"D3D11.UpdateSubresource.skinVertex",nullptr,reinterpret_cast<uintptr_t>(draw->vertexConstants.Get()));
+            immediate->UpdateSubresource(draw->vertexConstants.Get(),0,nullptr,material.vertex.data(),0,0);
+        }
+        {
+            StallProfiler::Scope updateProfile(StallProfiler::Section::Rendering,"D3D11.UpdateSubresource.skinPixel",nullptr,reinterpret_cast<uintptr_t>(draw->pixelConstants.Get()));
+            immediate->UpdateSubresource(draw->pixelConstants.Get(),0,nullptr,material.pixel.data(),0,0);
+        }
     };
     recordRecordingDraw(payload,std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&data),sizeof(data)),draw,std::move(prepare),
         [draw](ID3D11DeviceContext* deferred){draw->record(deferred);});

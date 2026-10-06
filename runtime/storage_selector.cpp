@@ -4,8 +4,11 @@
 #include "native_controllers.h"
 #include "native_local_players.h"
 #include "native_notifications.h"
+#include "engine_driver.h"
+#include "renderer/native_storage_screen.h"
 #include <cstdio>
 #include <exception>
+#include <fstream>
 #include <optional>
 
 namespace {
@@ -43,8 +46,8 @@ struct HostState {
     HostState(){PPCFPSCRRegister::restoreHostCSR(PPCFPSCRRegister::DefaultCSR);}
     ~HostState(){PPCFPSCRRegister::restoreHostCSR(fp);SetLastError(error);}
 };
-// A real Win32 platform window. It owns host values only; the import's original
-// output pointers never enter a callback or survive the import's stack frame.
+// A GPU-rendered child surface inside the actual game window. Original guest
+// outputs remain on the import stack; only host values enter its callback.
 struct Selector {
     Runtime& rt;
     const Platform::LocalProfile profile;
@@ -53,22 +56,59 @@ struct Selector {
     Platform::NativeStorage storage;
     std::shared_ptr<Platform::NativeControllers> input;
     std::shared_ptr<Platform::NativeNotifications> notifications;
+    std::unique_ptr<Graphics::NativeStorageScreen> screen;
     uint64_t token=0;
-    HWND window=nullptr,owner=nullptr,accept=nullptr;
-    HFONT font=nullptr;
+    HWND window=nullptr,owner=nullptr;
     DPI_AWARENESS_CONTEXT previousDpi=nullptr;
-    bool closed=false,selected=false,published=false,disabledOwner=false;
+    unsigned row=0;
+    WORD previousButtons=0;
+    bool closed=false,selected=false,published=false,previousMenuMouse=false,menuOwned=false;
     std::exception_ptr error;
     Selector(Runtime& runtime,Platform::LocalProfile player,uint32_t user,uint64_t bytes,Platform::NativeStorage destination)
         :rt(runtime),profile(std::move(player)),slot(user),requested(bytes),storage(std::move(destination)),
          input(rt.controllerSource()),notifications(rt.notificationSource()){}
     ~Selector(){
-        if(window)DestroyWindow(window);
-        if(disabledOwner&&IsWindow(owner))EnableWindow(owner,TRUE);
-        if(font)DeleteObject(font);
+        screen.reset();if(window)DestroyWindow(window);
+        if(menuOwned&&rt.window&&!rt.window->closed)rt.window->setMenuMouse(previousMenuMouse);
         if(previousDpi)SetThreadDpiAwarenessContext(previousDpi);
         if(token)try{input->endModal(token);}catch(...){rt.requestStop("Native storage UI input cleanup failed");}
         if(published)try{notifications->publish({9,0});}catch(...){rt.requestStop("Native storage UI close notification failed");}
+    }
+    void render(){
+        if(!screen)return;
+        Graphics::NativeStorageScreenState state;
+        state.player=std::filesystem::path(profile.name).wstring();state.folder=storage.path.wstring();
+        state.availableBytes=storage.availableBytes;state.requiredBytes=requested;
+        // Inspection proved folder access; capacity is a separate refusal.
+        state.selectedRow=row;state.storageAvailable=true;
+        state.controller=slot!=0||!input->usesKeyboardMouse();
+        // Occlusion/minimize can decline DXGI display acceptance while the
+        // owned screen and input remain live. Real GPU errors still throw.
+        if(screen->render(state))rt.window->recordPresentedFrame();
+    }
+    void capture(const std::filesystem::path& path){
+        const auto rgba=screen->readbackRGBA();const uint32_t w=screen->width(),h=screen->height();
+        need(rgba.size()==size_t(w)*h*4,"screen capture extent differs");
+        auto bgra=rgba;for(size_t at=0;at<bgra.size();at+=4)std::swap(bgra[at],bgra[at+2]);
+        BITMAPINFOHEADER info{};info.biSize=sizeof(info);info.biWidth=LONG(w);info.biHeight=-LONG(h);
+        info.biPlanes=1;info.biBitCount=32;info.biCompression=BI_RGB;
+        BITMAPFILEHEADER header{};header.bfType=0x4D42;header.bfOffBits=sizeof(header)+sizeof(info);
+        header.bfSize=header.bfOffBits+DWORD(bgra.size());
+        std::ofstream out(path,std::ios::binary|std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(&header),sizeof(header));out.write(reinterpret_cast<const char*>(&info),sizeof(info));
+        out.write(reinterpret_cast<const char*>(bgra.data()),std::streamsize(bgra.size()));out.close();
+        need(bool(out),"screen capture write failed");
+    }
+    void choose(bool useFolder){
+        if(useFolder){
+            if(!storage.fits(requested))return;
+            auto refreshed=Platform::inspectNativeStorage(storage.path);
+            if(!refreshed.fits(requested)){storage=std::move(refreshed);row=1;render();return;}
+            const auto current=rt.localPlayerSource()->profile(slot);
+            need(current&&current->id==profile.id,"active player changed during selection");
+            storage=std::move(refreshed);selected=true;
+        }
+        DestroyWindow(window);
     }
     static LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM wparam,LPARAM lparam){
         auto* self=reinterpret_cast<Selector*>(GetWindowLongPtrW(hwnd,GWLP_USERDATA));
@@ -77,93 +117,112 @@ struct Selector {
         if(!self)return DefWindowProcW(hwnd,message,wparam,lparam);
         try{
             if(message==WM_CLOSE){DestroyWindow(hwnd);return 0;}
-            if(message==WM_DESTROY){self->closed=true;self->window=nullptr;return 0;}
-            if(message==WM_COMMAND&&(LOWORD(wparam)==IDOK||LOWORD(wparam)==IDCANCEL)){
-                if(LOWORD(wparam)==IDOK){
-                    if(!IsWindowEnabled(self->accept))return 0;
-                    auto refreshed=Platform::inspectNativeStorage(self->storage.path);
-                    if(!refreshed.fits(self->requested)){
-                        EnableWindow(self->accept,FALSE);SetWindowTextW(GetDlgItem(hwnd,103),L"There is no longer enough space in this folder.");return 0;
-                    }
-                    const auto current=self->rt.localPlayerSource()->profile(self->slot);
-                    need(current&&current->id==self->profile.id,"active player changed during selection");
-                    self->storage=std::move(refreshed);self->selected=true;
+            if(message==WM_DESTROY){
+                self->closed=true;self->window=nullptr;
+                // A synchronous SendMessage can destroy the child while
+                // GetMessage is dispatching sent messages internally. Wake
+                // that wait so it can observe closed even with no timer left.
+                PostThreadMessageW(GetCurrentThreadId(),WM_NULL,0,0);return 0;
+            }
+            if(message==WM_ERASEBKGND)return 1;
+            if(message==WM_PAINT){PAINTSTRUCT paint{};BeginPaint(hwnd,&paint);EndPaint(hwnd,&paint);self->render();return 0;}
+            // Keep keyboard focus on the game owner: transferring it to this
+            // child would clear held keys and could turn auto-repeat into a
+            // fresh acceptance before the initiating key is released.
+            if(message==WM_MOUSEACTIVATE)return MA_NOACTIVATE;
+            if(message==WM_KEYDOWN||message==WM_KEYUP||message==WM_SYSKEYDOWN||message==WM_SYSKEYUP){
+                if(wparam==VK_F4&&(message==WM_SYSKEYDOWN||message==WM_SYSKEYUP)){
+                    if(message==WM_SYSKEYDOWN)PostMessageW(self->owner,WM_CLOSE,0,0);return 0;
                 }
-                DestroyWindow(hwnd);return 0;
+                const bool down=message==WM_KEYDOWN||message==WM_SYSKEYDOWN;
+                if(wparam==VK_TAB){if(down&&!(lparam&(LPARAM(1)<<30))){self->row=self->row?0:1;self->render();}return 0;}
+                self->rt.window->keyboard->key(uint32_t(wparam),down);return 0;
+            }
+            if(message==WM_COMMAND&&(LOWORD(wparam)==IDOK||LOWORD(wparam)==IDCANCEL)){
+                self->choose(LOWORD(wparam)==IDOK);return 0;
+            }
+            if(message==WM_RBUTTONDOWN){self->choose(false);return 0;}
+            if((message==WM_MOUSEMOVE||message==WM_LBUTTONDOWN)&&self->screen){
+                const int row=self->screen->hitTest(int(short(LOWORD(lparam))),int(short(HIWORD(lparam))));
+                if(row>=0){const auto value=unsigned(row);if(value!=self->row){self->row=value;self->render();}
+                    if(message==WM_LBUTTONDOWN)self->choose(value==0);}
+                return 0;
             }
             if(message==WM_TIMER){
-                if(WaitForSingleObject(self->rt.stopEvent,0)==WAIT_OBJECT_0){DestroyWindow(hwnd);return 0;}
+                if(WaitForSingleObject(self->rt.stopEvent,0)==WAIT_OBJECT_0||self->rt.window->closed){DestroyWindow(hwnd);return 0;}
+                RECT client{};need(GetClientRect(self->owner,&client)!=FALSE,"game client extent query failed");
+                if(self->screen&&(self->screen->width()!=uint32_t(client.right)||self->screen->height()!=uint32_t(client.bottom))&&client.right>0&&client.bottom>0){
+                    need(SetWindowPos(hwnd,nullptr,0,0,client.right,client.bottom,SWP_NOACTIVATE|SWP_NOZORDER)!=FALSE,"screen extent change failed");
+                    self->screen->resize(uint32_t(client.right),uint32_t(client.bottom));self->render();
+                }
                 XINPUT_STATE state{};
                 if(self->input->modalState(self->token,state)==ERROR_SUCCESS){
-                    if(state.Gamepad.wButtons&XINPUT_GAMEPAD_B)SendMessageW(hwnd,WM_COMMAND,IDCANCEL,0);
-                    else if(state.Gamepad.wButtons&XINPUT_GAMEPAD_A)SendMessageW(hwnd,WM_COMMAND,IDOK,0);
+                    auto buttons=state.Gamepad.wButtons;
+                    if(state.Gamepad.sThumbLY>16000)buttons|=XINPUT_GAMEPAD_DPAD_UP;
+                    if(state.Gamepad.sThumbLY<-16000)buttons|=XINPUT_GAMEPAD_DPAD_DOWN;
+                    const auto pressed=WORD(buttons&~self->previousButtons);self->previousButtons=buttons;
+                    if(pressed&XINPUT_GAMEPAD_B)self->choose(false);
+                    else if(pressed&XINPUT_GAMEPAD_A)self->choose(self->row==0);
+                    else if(pressed&(XINPUT_GAMEPAD_DPAD_UP|XINPUT_GAMEPAD_DPAD_DOWN)){
+                        self->row=self->row?0:1;self->render();
+                    }
                 }
                 return 0;
             }
         }catch(...){self->error=std::current_exception();if(IsWindow(hwnd))DestroyWindow(hwnd);return 0;}
         return DefWindowProcW(hwnd,message,wparam,lparam);
     }
-    HWND control(const wchar_t* type,const wchar_t* text,DWORD style,int x,int y,int w,int h,int id,int dpi){
-        HWND child=CreateWindowExW(0,type,text,WS_CHILD|WS_VISIBLE|style,MulDiv(x,dpi,96),MulDiv(y,dpi,96),MulDiv(w,dpi,96),MulDiv(h,dpi,96),
-            window,reinterpret_cast<HMENU>(INT_PTR(id)),GetModuleHandleW(nullptr),nullptr);
-        need(child!=nullptr,"control creation failed");SendMessageW(child,WM_SETFONT,reinterpret_cast<WPARAM>(font),TRUE);return child;
-    }
     bool run(){
         need(rt.window&&rt.window->handle()&&!rt.window->closed,"owned game window is absent");owner=rt.window->handle();
         DWORD process{};need(GetWindowThreadProcessId(owner,&process)!=0&&process==GetCurrentProcessId(),"game window ownership differs");
         previousDpi=SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        need(previousDpi!=nullptr,"native UI DPI context failed");const int dpi=int(GetDpiForWindow(owner));need(dpi>0,"native UI DPI query failed");
+        need(previousDpi!=nullptr,"native UI DPI context failed");RECT client{};
+        need(GetClientRect(owner,&client)&&client.right>0&&client.bottom>0,"game client extent is empty");
         WNDCLASSW type{};type.lpfnWndProc=procedure;type.hInstance=GetModuleHandleW(nullptr);type.lpszClassName=L"SimpsonsNativeStorageSelector";
-        type.hCursor=LoadCursorW(nullptr,MAKEINTRESOURCEW(32512));type.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_WINDOW+1);
-        need(RegisterClassW(&type)!=0||GetLastError()==ERROR_CLASS_ALREADY_EXISTS,"native UI class registration failed");
-        font=CreateFontW(-MulDiv(10,dpi,72),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,DEFAULT_QUALITY,DEFAULT_PITCH,L"Segoe UI");
-        need(font!=nullptr,"native UI font creation failed");
-        constexpr DWORD style=WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU;RECT bounds{0,0,MulDiv(700,dpi,96),MulDiv(285,dpi,96)},parent{};
-        need(AdjustWindowRectExForDpi(&bounds,style,FALSE,WS_EX_DLGMODALFRAME,UINT(dpi))&&GetWindowRect(owner,&parent),"native UI layout query failed");
-        const int width=bounds.right-bounds.left,height=bounds.bottom-bounds.top;
+        type.hCursor=LoadCursorW(nullptr,MAKEINTRESOURCEW(32512));
+        need(RegisterClassW(&type)!=0||GetLastError()==ERROR_CLASS_ALREADY_EXISTS,"in-game screen class registration failed");
+        previousMenuMouse=rt.window->isMenuMouse();rt.window->setMenuMouse(true);menuOwned=true;
+        Graphics::StorageScreenBackground backdrop;
+        {
+            std::lock_guard lifetime(rt.engineDriverMutex);
+            if(rt.engineDriver)backdrop.rgba=rt.engineDriver->readbackMenuFrame(backdrop.width,backdrop.height);
+        }
         token=input->beginModal(slot);
-        HWND created=CreateWindowExW(WS_EX_DLGMODALFRAME|WS_EX_CONTROLPARENT,type.lpszClassName,L"The Simpsons Game — Save storage",style,
-            parent.left+(parent.right-parent.left-width)/2,parent.top+(parent.bottom-parent.top-height)/2,width,height,owner,nullptr,type.hInstance,this);
-        need(created!=nullptr,"native UI window creation failed");
-        control(L"STATIC",L"Choose where to save",0,24,18,650,28,100,dpi);
-        const std::wstring player=L"Player: "+std::wstring(profile.name.begin(),profile.name.end());
-        control(L"STATIC",player.c_str(),0,24,53,650,23,101,dpi);
-        control(L"EDIT",storage.path.c_str(),ES_READONLY|ES_MULTILINE|ES_AUTOVSCROLL|WS_VSCROLL|WS_TABSTOP|WS_BORDER,24,82,650,70,102,dpi);
-        wchar_t capacity[256]{};swprintf_s(capacity,L"Available: %.1f GB     Needed: %.1f MB",double(storage.availableBytes)/1000000000.0,double(requested)/1000000.0);
-        control(L"STATIC",capacity,0,24,162,650,25,103,dpi);
-        if(!storage.fits(requested))SetWindowTextW(GetDlgItem(window,103),L"There is not enough space in this folder.");
-        accept=control(L"BUTTON",L"Use this folder (A)",BS_DEFPUSHBUTTON|WS_TABSTOP,24,221,280,36,IDOK,dpi);
-        control(L"BUTTON",L"Continue without saving (B)",BS_PUSHBUTTON|WS_TABSTOP,326,221,348,36,IDCANCEL,dpi);
-        EnableWindow(accept,storage.fits(requested));
+        need(CreateWindowExW(WS_EX_NOACTIVATE,type.lpszClassName,L"Save Storage",WS_CHILD,
+            0,0,client.right,client.bottom,owner,nullptr,type.hInstance,this)!=nullptr,"in-game screen creation failed");
+        wchar_t executable[32768]{};const DWORD length=GetModuleFileNameW(nullptr,executable,DWORD(std::size(executable)));
+        need(length&&length<std::size(executable),"native asset directory lookup failed");
+        const auto assets=std::filesystem::path(executable).parent_path()/L"native-assets"/L"storage-screen";
+        screen=std::make_unique<Graphics::NativeStorageScreen>(window,uint32_t(client.right),uint32_t(client.bottom),std::move(backdrop),assets);
+        row=storage.fits(requested)?0u:1u;
         need(SetTimer(window,1,16,nullptr)!=0,"native UI input timer failed");
-        disabledOwner=IsWindowEnabled(owner)!=FALSE;if(disabledOwner)EnableWindow(owner,FALSE);
-        ShowWindow(window,SW_SHOW);UpdateWindow(window);SetForegroundWindow(window);SetFocus(storage.fits(requested)?accept:GetDlgItem(window,IDCANCEL));
-        need(IsWindowVisible(window)!=FALSE,"storage selector was not shown");
+        ShowWindow(window,SW_SHOWNOACTIVATE);
+        need(IsWindowVisible(window)!=FALSE,"in-game screen was not shown");
+        render();
+        wchar_t capturePath[32768]{};const DWORD captureLength=GetEnvironmentVariableW(L"SIMPSONS_STORAGE_CAPTURE",capturePath,DWORD(std::size(capturePath)));
+        if(captureLength){need(captureLength<std::size(capturePath),"screen capture path is too long");capture(capturePath);}
         notifications->publish({9,1});published=true;
-        std::fprintf(stderr,"[NATIVE STORAGE UI] visible hwnd=%p player=%s folder=%ls available=%llu requested=%llu accept=%u; A=use folder B=continue without saving\n",
-            static_cast<void*>(window),profile.name.c_str(),storage.path.c_str(),static_cast<unsigned long long>(storage.availableBytes),static_cast<unsigned long long>(requested),storage.fits(requested));
+        std::fprintf(stderr,"[NATIVE STORAGE UI] visible hwnd=%p owner=%p in_game=1 player=%s folder=%ls available=%llu requested=%llu accept=%u; A=use folder B=continue without saving\n",
+            static_cast<void*>(window),static_cast<void*>(owner),profile.name.c_str(),storage.path.c_str(),static_cast<unsigned long long>(storage.availableBytes),static_cast<unsigned long long>(requested),storage.fits(requested));
         while(!closed){
             MSG message{};const BOOL got=GetMessageW(&message,nullptr,0,0);need(got>0,"native UI message loop stopped");
-            if(message.message==WM_KEYDOWN&&(message.wParam==VK_RETURN||message.wParam==VK_ESCAPE)){
-                const bool cancel=message.wParam==VK_ESCAPE||GetFocus()==GetDlgItem(window,IDCANCEL);
-                SendMessageW(window,WM_COMMAND,cancel?IDCANCEL:IDOK,0);continue;
-            }
-            if(!IsDialogMessageW(window,&message)){TranslateMessage(&message);DispatchMessageW(&message);}
+            TranslateMessage(&message);DispatchMessageW(&message);
         }
-        if(disabledOwner&&IsWindow(owner)){EnableWindow(owner,TRUE);disabledOwner=false;SetForegroundWindow(owner);}
+        screen.reset();
         input->endModal(token);token=0;
         if(error)std::rethrow_exception(error);rt.checkRunning();
         return selected;
     }
     void notifyClosed(){notifications->publish({9,0});published=false;}
 };
+
 }
 
 PPC_FUNC(__imp__XamShowDeviceSelectorUI){
     HostState host;need(active&&base==active->base,"foreign runtime");auto& rt=*active;rt.checkRunning();
     const uint32_t user=ctx.r3.u32,type=ctx.r4.u32,flags=ctx.r5.u32,deviceOut=ctx.r7.u32,ov=ctx.r8.u32;
     const uint64_t requested=ctx.r6.u64;
-    const auto root=rt.contentRoot.empty()?rt.gameRoot.parent_path()/"userdata"/"content":rt.contentRoot;
+    const auto root=rt.contentRoot.empty()?rt.gameRoot.parent_path()/"saves":rt.contentRoot;
     auditRequest(rt,ctx,root);
     constexpr uint32_t kSelectorFlags=0x300;
     // Original8285CED8 independently adds0x200 from driver byte+4 and0x100

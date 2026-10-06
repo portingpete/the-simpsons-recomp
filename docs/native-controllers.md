@@ -14,10 +14,32 @@ The native game window supplies keyboard and mouse input for slot 0 when its
 physical XInput controller is disconnected. The original input manager consumes
 the resulting button, trigger, and stick values.
 
-| Native input | Gamepad control |
+Open **Options > Controls** for the native keyboard, mouse, and original
+controller preferences. The first two pages expose two bindings for every
+gameplay action. Left/right chooses the primary or secondary slot; Enter or
+select starts capture. Press and release the desired key or mouse button.
+Escape cancels capture; Delete or Backspace clears the selected slot. A key
+already assigned elsewhere exchanges its binding with the selected slot.
+All five mouse buttons are supported. F6, F8, F9, and the Windows keys are
+reserved. Accept changes saves the native settings; backing out restores the
+keyboard and mouse settings from when Controls opened.
+
+The third page includes mouse sensitivity (25–300%, in 25% steps), horizontal
+and vertical mouse inversion, and reset keyboard/mouse defaults. The original
+gamepad inversion and vibration options remain in the same native menu.
+These preferences are stored in a separate, validated version-one
+`.controls.cfg` file alongside the existing profile preferences.
+
+The table below describes the defaults. Gameplay bindings can change, while
+native menus retain WASD/arrows, Enter/Space confirm, Escape/K/right-click back,
+and the original Tab/Backspace input. During gameplay, Escape remains a
+pause/release recovery key even when the optional Pause binding is cleared.
+Enter retains movie skipping.
+
+| Default native input | Gamepad control |
 | --- | --- |
 | WASD | Left stick / movement; directional-pad repeat in menus |
-| Mouse movement | Right stick / camera |
+| Mouse movement | Direct camera rotation from raw relative movement |
 | Enter or Space | A / select / jump; Enter also skips movies |
 | Left mouse button or J | X / attack |
 | E | Y / interact |
@@ -27,27 +49,33 @@ the resulting button, trigger, and stick values.
 | Q / R | Left / right shoulder button |
 | F | Left stick click |
 | Middle mouse button or G | Right stick click |
-| Escape | Start / pause; also releases mouse capture |
+| Escape | Start / pause in gameplay; B / back in native menus; releases mouse capture |
 | Tab or Backspace | Back |
 | Arrow keys | Directional pad |
 
 Click inside the game window to use the mouse. The first click captures the
 cursor and delivers its action immediately; focused mouse buttons also work
-when capture is unavailable. **Escape** pauses and releases the cursor. F6 is
+when capture is unavailable. **Escape** pauses during gameplay, backs out of
+native menus, and releases the cursor. F6 is
 an optional capture/release toggle. Focus loss or closing the window releases
 capture too. Capture hides the cursor and confines it to the client area;
 release restores its previous visibility, position, and clipping rectangle.
+Resuming a menu restores prior gameplay capture. F6, focus loss, moving the
+window, or changing its output extent cancels that automatic restoration.
 The window title explains the click and release controls. Right click (or K)
 performs the game's B action: special attack during gameplay, back in menus.
 
-Foreground raw mouse motion supplies a right-stick impulse. Each horizontal
-count adds 1024 units, and each vertical count subtracts 1024 units before
-conversion. The accumulated vector receives a radial offset of 8689 units
-(`XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE`) so gentle motion clears the usual
-right-stick deadzone. Its direction is preserved and its magnitude is capped
-at the stick's full range. The next input poll consumes the impulse and later
-polls return to neutral. Absolute raw mouse devices are ignored. Integer
-conversion preserves the thread's floating-point state. The original input
+Foreground raw mouse motion retains device counts until the ordinary slot-zero
+poll. The selected original orbit/look camera consumes the displacement once,
+at its final angular input step. At 100% sensitivity each count rotates by
+0.0025 radians. Native mouse inversion combines with the player's original
+inversion settings. The camera retains its original pitch limits, yaw wrapping,
+collision and follow behavior. Mouse input avoids stick deadzones,
+speed limits, diagonal normalization, angle thresholds and frame-time scaling.
+The fallback's right stick stays neutral; physical controllers and old recordings
+retain their original stick path. Absolute raw mouse devices are ignored.
+Capture generations discard stale motion across focus/capture/menu changes.
+Integer accumulation preserves the thread's floating-point state. The original input
 manager has one state query per slot per input update (`82321110` calls
 `82B766A8`, returning at `82321114`). Connection-only queries with a null output
 buffer bypass sampling, so they cannot consume pending clicks or mouse motion
@@ -70,13 +98,21 @@ input-device identity is not recorded. A keyboard/mouse session therefore keeps
 native prompts during replay; the next live slot-0 poll updates the prompt set
 when a checkpoint hands control back to the player.
 
-The controller fixture covers the mappings, mouse saturation and Y direction,
-impulse consumption, alias release, focus loss, short presses, packet changes,
+The controller fixture covers the mappings, raw-count accumulation and direction,
+one-time consumption, alias release, focus loss, short presses, packet changes,
 physical-device priority, prompt-source transitions, and source retirement.
 It also exercises actual window click, Escape, and focus messages, and passes
-native mouse camera motion through the original input manager after repeated
+native mouse snapshots beside the original input manager after repeated
 null-output probes. A live foreground window is required to verify cursor
-capture itself; the test reports when desktop focus is unavailable.
+capture itself; the test reports when desktop focus is unavailable. Separate
+original camera fixtures verify proportional displacement, batching/frame-time
+independence, clamp/wrap, controller behavior and ABI. See
+[native mouse repair](native-mouse-feel.md).
+The focused `--controls-only` fixture additionally verifies rebound keyboard
+and extra mouse buttons, fixed menu navigation, consumed capture until release,
+conflict exchanges, clear/cancel, and focus-loss cancellation. A separate
+settings fixture checks persistence, malformed-file rejection, defaults, and
+mouse option cycles.
 
 ## Physical controller evidence
 

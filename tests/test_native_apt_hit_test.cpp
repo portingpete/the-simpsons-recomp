@@ -17,6 +17,7 @@
 
 void SimpsonsNativeAptHitTest(PPCContext&,uint8_t*);
 void SimpsonsNativeMenuMouse(PPCContext&,uint8_t*);
+void SimpsonsNativeMainMenuExit(PPCContext&,uint8_t*);
 
 namespace {
 using namespace Simpsons;
@@ -243,6 +244,25 @@ void exerciseConstantReload(const char* image) {
     need(PPC_LOAD_U32(apt+0x120)==4&&PPC_LOAD_U32(apt+0x124)==5&&PPC_LOAD_U32(counter)==6,
          "Original constant ordinal restarted at a later action stream");
 }
+void exerciseCloseFailurePriority(const char* image) {
+    const auto checkFailure=[&](const char* stop,const char* expected,bool laterClose=false) {
+        Fixture f(image);auto c=seeded(f.entry,0x29);c.r29.u64=0;c.r28.u64=0xFFFFFFFF;
+        c.lastFunction=0x827C2D30;c.lr=0x827EBEC8;
+        const auto before=c;
+        if(stop)f.rt.requestStop(stop);
+        if(laterClose)f.rt.requestStop("Native window closed");
+        bool rejected=false;
+        try{PPCSafeIndirect(c,f.base,0xFFFFFFFF);}
+        catch(const Failure& error){rejected=std::string(error.what())==expected;}
+        need(rejected,"Apt invalid-target guard changed live-fault or explicit-close classification");
+        need(std::memcmp(&c,&before,sizeof(c))==0,"Apt invalid-target cancellation changed guest registers");
+        if(stop)need(f.rt.stopReason==stop,"A late close replaced the original runtime stop reason");
+    };
+    constexpr auto invalid="missing or invalid indirect function target";
+    checkFailure(nullptr,invalid);
+    checkFailure("Native window closed","Native window closed");
+    checkFailure("prior worker failure",invalid,true);
+}
 void exercise(const char* image) {
     Fixture f(image);auto* base=f.base;
     need(f.bounds(text)==std::array<float,4>{-10,-5,20,10},"Original identity text bounds differ");
@@ -314,7 +334,7 @@ constexpr uint32_t menuOwner=0x30000,menuManager=0x30100,newestMovie=0x30200,
                    olderReceiver=olderMovie+100,wrongDomainReceiver=wrongDomainMovie+100,targetWords=0x30500,
                    newestPath=0x30600,olderPath=0x30700,eventRows=0x31000,driverMode=0x32000;
 uint32_t bridgeCalls{},bridgeTarget{},bridgeExpectedTarget{},bridgeHit=106;
-uint32_t bridgeUpdateMode{};
+uint32_t bridgeUpdateMode{},bridgeExpectedUpdateMode{};
 bool bridgeUpdate{};
 uint32_t pressCalls{},pressExpectedMovie{},pressExpectedEvent{};
 void moviePress(PPCContext& c,uint8_t*) {
@@ -338,8 +358,9 @@ void mouseScriptBridge(PPCContext& c,uint8_t* base) {
         char* end{};values[i]=std::strtod(value,&end);
         need(end!=value&&*end==0&&std::isfinite(values[i]),"Mouse argument string overlapped the original outgoing ABI area");
     }
-    need(values[2]>=0&&values[2]<=2&&std::floor(values[2])==values[2],"Mouse bridge update mode is outside the authored query/hover/wheel protocol");
+    need(values[2]>=0&&values[2]<=3&&std::floor(values[2])==values[2],"Mouse bridge update mode is outside the query/hover/wheel/press protocol");
     bridgeUpdateMode=uint32_t(values[2]);bridgeUpdate=bridgeUpdateMode!=0;
+    need(bridgeUpdateMode==bridgeExpectedUpdateMode,"Mouse bridge did not distinguish pointer press from query, hover or wheel input");
     need(values[3]==256,"Mouse query lost its authored stage center");
     if(bridgeUpdate)need(values[0]==256&&values[1]==224,"Mouse pointer was not mapped to authored Apt coordinates");
     char result[16]{};std::snprintf(result,sizeof(result),"%u",bridgeUpdate?bridgeHit:1u);
@@ -412,7 +433,8 @@ void exerciseMouseDomains(const char* image) {
         ~BridgeDispatch(){PPC_LOOKUP_FUNC(base,0x827BF8F8)=previous;PPC_LOOKUP_FUNC(base,0x823A6C78)=previousPress;}
     } dispatch(base);
     bridgeCalls=pressCalls=0;bridgeExpectedTarget=newestPath;
-    auto invoke=[&] {
+    auto invoke=[&](uint32_t expectedUpdate=0) {
+        bridgeExpectedUpdateMode=expectedUpdate;
         auto c=seeded(entry,menuOwner);c.r26.u64=menuOwner;c.r28.u64=8;const auto before=c;
         const auto previousContext=currentContext;const auto hostFp=PPCFPSCRRegister::getcsr();SetLastError(0x6192);
         std::array<uint8_t,0xC0> frame{};std::memcpy(frame.data(),rt.pointer(c.r1.u32,uint32_t(frame.size()),false),frame.size());
@@ -423,7 +445,7 @@ void exerciseMouseDomains(const char* image) {
         need(!std::memcmp(frame.data(),rt.pointer(c.r1.u32,uint32_t(frame.size()),false),frame.size()),"Mouse script/domain calls overwrote the original dispatcher frame");
     };
     auto clearQueue=[&]{EngineCpuCalls cpu(entry,base);cpu.invoke(0x827F1B98,menuManager);};
-    auto press=[&](uint32_t button){keys->pointerMove(640,360,1280,720);keys->mouseButton(button,true);keys->mouseButton(button,false);invoke();};
+    auto press=[&](uint32_t button){keys->pointerMove(640,360,1280,720);keys->mouseButton(button,true);keys->mouseButton(button,false);invoke(3);};
     auto queued=[&](uint32_t event) {
         need(PPC_LOAD_U32(menuManager+84)==1&&PPC_LOAD_U32(eventRows)==0&&PPC_LOAD_U32(eventRows+4)==event&&!PPC_LOAD_U32(eventRows+8),
              "Mouse adapter did not publish exactly one original slot-zero Apt event");
@@ -438,21 +460,29 @@ void exerciseMouseDomains(const char* image) {
         PPC_STORE_U32(driverMode+148,mode);PPC_STORE_U8(menuOwner+9,mode?3:6);
         rt.window->setMenuMouse(false);invoke();
         need(rt.window->isMenuMouse()&&!bridgeUpdate&&!PPC_LOAD_U32(menuManager+84),"Mouse query did not bootstrap through original slot-zero domain");
-        press(VK_LBUTTON);need(bridgeUpdate,"Active mouse click did not update Apt selection");queued(6);
+        press(VK_LBUTTON);need(bridgeUpdateMode==3,"Active mouse click lost the distinct Apt pointer-press mode");queued(6);
         invoke();need(!bridgeUpdate&&!PPC_LOAD_U32(menuManager+84),"Mouse click repeated after its original queue consumption");
     }
+    // Hovering an Accept hit must update selection without a pointer-press
+    // marker or the original Select event. Only a physical click uses mode3;
+    // the authored AVM normalizes that mode to hover while retaining its flag.
+    const auto beforeHoverPresses=pressCalls;
+    keys->pointerMove(639,360,1280,720);keys->pointerMove(640,360,1280,720);invoke(1);
+    need(bridgeUpdateMode==1&&!PPC_LOAD_U32(menuManager+84)&&pressCalls==beforeHoverPresses,
+         "Hover over an Accept hit became a pointer press or queued menu acceptance");
+    invoke();need(bridgeUpdateMode==0&&!PPC_LOAD_U32(menuManager+84),"Stationary pointer query replayed an Accept hover");
     // A stationary wheel uses mode two, so the AVM retains the selection moved
     // by the previous original navigation event. Settings still classify the
     // hovered editable row and publish the original left/right events.
     for(int32_t delta:{-120,-120,120}) {
-        keys->pointerWheel(delta);invoke();
+        keys->pointerWheel(delta);invoke(2);
         need(bridgeUpdateMode==2,"Stationary list wheel was incorrectly sent as a new hover");
         queued(delta>0?4:5);
         invoke();need(bridgeUpdateMode==0&&!PPC_LOAD_U32(menuManager+84),"Wheel input repeated after its original queue consumption");
     }
     bridgeHit=103;
     for(int32_t delta:{-120,120}) {
-        keys->pointerWheel(delta);invoke();
+        keys->pointerWheel(delta);invoke(2);
         need(bridgeUpdateMode==2,"Stationary setting wheel lost its wheel query mode");queued(delta>0?3:2);
     }
     bridgeHit=106;invoke();
@@ -476,10 +506,43 @@ void exerciseMouseDomains(const char* image) {
     need(bridgeCalls==calls&&!rt.window->isMenuMouse()&&!PPC_LOAD_U32(menuManager+84),"Adapter queried or published the obsolete hardcoded domain eight");
     rt.engineDriver.reset();rt.window.reset();
 }
+void exerciseMainMenuExit(const char* image) {
+    Runtime rt;PPCContext entry{};rt.load(image);rt.initialize(entry);auto* base=rt.base;
+    constexpr uint32_t menuText=0x35000;rt.map(menuText,0x1000,true,"MainMenu selected ID fixture");
+    need(PPC_LOAD_U32(0x8239F6F4)==0x3D608200&&PPC_LOAD_U32(0x8239F6F8)==0x38610050&&
+         PPC_LOAD_U32(0x8239F6FC)==0x388B1F7C&&PPC_LOAD_U32(0x8239F700)==0x483A2539,
+         "Retail MainMenu accepted-selection string comparison changed");
+    const auto previous=std::getenv("SIMPSONS_BACKGROUND_WINDOW");
+    const bool existed=previous!=nullptr;const std::string saved=previous?previous:"";
+    need(!_putenv_s("SIMPSONS_BACKGROUND_WINDOW","1"),"MainMenu Exit fixture environment failed");
+    rt.window=std::make_unique<NativeWindow>();ShowWindow(rt.window->handle(),SW_HIDE);
+    need(!_putenv_s("SIMPSONS_BACKGROUND_WINDOW",existed?saved.c_str():""),"MainMenu Exit fixture environment restore failed");
+    auto c=seeded(entry,0);
+    auto invoke=[&](const char* text) {
+        // Place the terminator at the final byte of this guest mapping. Short
+        // stock IDs must not trigger a full native-exit-literal extent probe.
+        const auto length=uint32_t(std::strlen(text)+1),address=menuText+0x1000-length;
+        std::memcpy(rt.pointer(address,length,true),text,length);PPC_STORE_U32(c.r1.u32+80,address);
+        const auto before=c;const auto hostFp=PPCFPSCRRegister::getcsr();const auto previousContext=currentContext;SetLastError(0x6192);
+        std::array<uint8_t,0xC0> frame{};std::memcpy(frame.data(),rt.pointer(c.r1.u32,uint32_t(frame.size()),false),frame.size());
+        SimpsonsNativeMainMenuExit(c,base);
+        need(!std::memcmp(&c,&before,sizeof(c)),"MainMenu Exit hook changed original dispatcher registers");
+        need(currentContext==previousContext&&PPCFPSCRRegister::getcsr()==hostFp&&GetLastError()==0x6192,
+             "MainMenu Exit hook changed host FP/error/current context");
+        need(!std::memcmp(frame.data(),rt.pointer(c.r1.u32,uint32_t(frame.size()),false),frame.size()),"MainMenu Exit hook changed original dispatcher frame");
+    };
+    for(const auto text:{"Continue","Options","Extras","ExitGame","NativeExitGameExtra","nativeexitgame",""}) {
+        invoke(text);need(!rt.stopping.load()&&!rt.window->closed.load(),"Unrelated menu ID closed the native game");
+    }
+    invoke("NativeExitGame");need(rt.stopping.load()&&rt.stopReason=="Native window closed","MainMenu Exit did not synchronously cancel through the native window-close path");
+    for(unsigned i=0;i<100&&!rt.window->closed.load();++i)Sleep(10);
+    need(rt.window->closed.load(),"MainMenu Exit did not deliver WM_CLOSE to its owned window thread");
+    rt.window.reset();
+}
 }
 int main(int argc,char** argv) {
     try {
-        need(argc==2,"Original image required");exercise(argv[1]);exerciseConstantReload(argv[1]);exerciseMouseDomains(argv[1]);
+        need(argc==2,"Original image required");exercise(argv[1]);exerciseConstantReload(argv[1]);exerciseMouseDomains(argv[1]);exerciseCloseFailurePriority(argv[1]);exerciseMainMenuExit(argv[1]);
         std::printf("PASS original Apt hitTest: %zu checks; real text/movie bounds, original point oracle, nested transforms, visibility, edges, original Boolean allocation, original constant unload/reload, original controller mapper/publisher, receiver ownership, arguments and PPC/host ABI\n",checks);return 0;
     } catch(const std::exception& error){std::fprintf(stderr,"FAIL original Apt hitTest: %s\n",error.what());return 1;}
 }

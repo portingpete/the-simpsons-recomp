@@ -8,6 +8,7 @@
 #include <string>
 struct PPCContext;
 namespace Simpsons {
+struct NativeControlSettings;
 class Runtime;
 namespace Graphics {class NativeBackend;class Texture;}
 // Copied ITXD records have original CPU metadata and allocator ownership.
@@ -32,7 +33,7 @@ public:
     std::shared_ptr<Graphics::Texture> texture(uint8_t* base,uint32_t raster);
     // Optional draw-only keyboard/mouse artwork. Original texture bindings and
     // resource bytes always retain texture(); unrecognized rasters return null.
-    std::shared_ptr<Graphics::Texture> inputPromptTexture(uint8_t* base,uint32_t raster);
+    std::shared_ptr<Graphics::Texture> inputPromptTexture(uint8_t* base,uint32_t raster,const NativeControlSettings* controls=nullptr);
     // Original effect stores embedded H. Resolve only the published named
     // palette's H->T->R association; H is never treated as an SDK object.
     std::shared_ptr<Graphics::Texture> paletteFromHeader(uint8_t* base,uint32_t header);

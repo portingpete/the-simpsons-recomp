@@ -1,4 +1,5 @@
 #include "native_menu_mouse.h"
+#include "native_control_menu.h"
 #include "native_controllers.h"
 #include "native_window.h"
 #include "engine_cpu_calls.h"
@@ -79,9 +80,32 @@ uint32_t scriptQuery(Simpsons::EngineCpuCalls& cpu,uint8_t* base,uint32_t target
 }
 }
 
+void SimpsonsNativeMainMenuExit(PPCContext& ctx,uint8_t* base) {
+    HostState host;auto* rt=Simpsons::active;
+    if(!rt||base!=rt->base||!rt->window)return;
+    // The original MainMenu Select path copies SetSafeString into this
+    // string object's data pointer before comparing the stock menu IDs.
+    // Both physical/controller input and the native mouse use that handler.
+    constexpr char selection[]="NativeExitGame";
+    const auto text=PPC_LOAD_U32(ctx.r1.u32+80);
+    if(!text)return;
+    // Stock selections can end at a mapped boundary. Read only the bytes
+    // needed to reject a shorter/different ID, including the exact final NUL.
+    for(size_t i=0;i<sizeof(selection);++i) {
+        const auto at=uint64_t(text)+i;
+        if(at>UINT32_MAX||*PPCGuestPointer(base,uint32_t(at),1,false)!=uint8_t(selection[i]))return;
+    }
+    // Match Alt+F4/WM_CLOSE: cancel guest execution before window teardown,
+    // then let the window thread restore capture and destroy its own HWND.
+    rt->requestStop("Native window closed");
+    if(const auto window=rt->window->handle())PostMessageW(window,WM_CLOSE,0,0);
+    std::fprintf(stderr,"[NATIVE MAIN MENU] Exit Game selected; graceful window close requested\n");
+}
+
 void SimpsonsNativeMenuMouse(PPCContext& ctx,uint8_t* base) {
     HostState host;auto* rt=Simpsons::active;
     if(!rt||base!=rt->base||!rt->window||!rt->controllers)return;
+    SimpsonsNativeControlMenuTick(ctx,base);
     const auto owner=ctx.r26.u32;
     const auto globalOwner=PPC_LOAD_U32(0x82D08B14);
     if(!owner||owner!=globalOwner){traceState("owner",{owner,globalOwner});return;}
@@ -126,7 +150,7 @@ void SimpsonsNativeMenuMouse(PPCContext& ctx,uint8_t* base) {
     const auto point=Simpsons::nativeMenuPoint(pointer.x,pointer.y,pointer.width,pointer.height,
         stageWidth,stageHeight,rt->engineDriver->renderAspect());
     const uint32_t update=!pointer.active||!point.inside?0:
-        (pointer.moved||pointer.pressed?1:(pointer.wheel?2:0));
+        (pointer.pressed?3:(pointer.moved?1:(pointer.wheel?2:0)));
     const auto hit=scriptQuery(cpu,base,target,point,update,stageWidth/2);
     rt->window->setMenuMouse(hit!=0);
     if(pointer.moved||pointer.pressed||pointer.wheel)traceState("pointer",{hit,uint32_t(pointer.active),uint32_t(pointer.x),uint32_t(pointer.y),uint32_t(pointer.moved),pointer.pressed,uint32_t(pointer.wheel),uint32_t(point.inside)});

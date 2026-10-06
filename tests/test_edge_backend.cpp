@@ -4,8 +4,16 @@
 #include <cstdio>
 #include <limits>
 #include <cmath>
+#include <bit>
+#include <cstring>
 
 using namespace Simpsons::Graphics;
+namespace Simpsons::Graphics {
+struct NativeIm2DProbe {
+    static ID3D11DeviceContext* context(const NativeBackend& backend){return backend.context.Get();}
+    static ID3D11Device* device(const NativeBackend& backend){return backend.device.Get();}
+};
+}
 namespace {
 size_t checks{};
 void need(bool b,const char* message){++checks;if(!b)throw Error(message);}
@@ -35,6 +43,24 @@ void run(const char* image,bool software) {
     const std::array<ScreenVertex,3> corners={ScreenVertex{-1,1,0,0},ScreenVertex{1,1,1,0},ScreenVertex{-1,-1,0,1}};
     rejects([&]{backend.drawEdge(target,depth,{},corners,vertex,pixel);});
     auto commit=backend.commitEdge(source,constants,sampler);backend.requireEdgeCommit(commit);
+    auto* context=NativeIm2DProbe::context(backend);
+    ComPtr<ID3D11Buffer> firstConstants,repeatedConstants;
+    ComPtr<ID3D11SamplerState> firstSampler,repeatedSampler;
+    context->PSGetConstantBuffers(0,1,&firstConstants);context->PSGetSamplers(0,1,&firstSampler);
+    auto oldIdenticalCommit=commit;commit=backend.commitEdge(source,constants,sampler);
+    context->PSGetConstantBuffers(0,1,&repeatedConstants);context->PSGetSamplers(0,1,&repeatedSampler);
+    need(firstConstants.Get()==repeatedConstants.Get() && firstSampler.Get()==repeatedSampler.Get(),
+         "Identical edge data/descriptors did not reuse immutable resources");
+    rejects([&]{backend.requireEdgeCommit(oldIdenticalCommit);});
+    auto changed=constants;changed.kernel[7][2]=-0.0f;
+    auto signedZeroCommit=backend.commitEdge(source,changed,sampler);
+    ComPtr<ID3D11Buffer> signedZeroConstants;context->PSGetConstantBuffers(0,1,&signedZeroConstants);
+    need(signedZeroConstants.Get()!=firstConstants.Get(),"Edge constant key lost the sign bit of zero");
+    rejects([&]{backend.requireEdgeCommit(commit);});
+    commit=backend.commitEdge(source,constants,sampler);
+    context->PSGetConstantBuffers(0,1,repeatedConstants.ReleaseAndGetAddressOf());
+    need(repeatedConstants.Get()==firstConstants.Get(),"Exact edge bytes were not found after another commit");
+    rejects([&]{backend.requireEdgeCommit(signedZeroCommit);});
     rejects([&]{backend.drawEdge(target,depth,commit,corners,vertex,pixel);});
     backend.bindEdgeDeclaration();
     auto badConstants=constants;badConstants.dimensions[2]=std::numeric_limits<float>::quiet_NaN();
@@ -48,10 +74,40 @@ void run(const char* image,bool software) {
     backend.setViewport({0,0,16,32,0,1});rejects([&]{backend.drawEdge(target,depth,commit,corners,vertex,pixel);});
     backend.setViewport({0,0,32,32,0,1});
     need(!backend.edgeDrawCount() && backend.readbackTarget(target)==copied,"Rejected edge operation drew or changed output");
+    ComPtr<ID3D11Buffer> sharedQuad;
     for(float width:{0.0f,0.5f,1.0f,1.5f,2.0f,2.5f}) {
         constants.dimensions[2]=width;auto previous=commit;commit=backend.commitEdge(source,constants,sampler);
         rejects([&]{backend.drawEdge(target,depth,previous,corners,vertex,pixel);});
-        backend.drawEdge(target,depth,commit,corners,vertex,pixel);
+        auto exactCorners=corners;if(width==0)exactCorners[0].u=-0.0f;
+        backend.drawEdge(target,depth,commit,exactCorners,vertex,pixel);
+        if(width==0) {
+            ComPtr<ID3D11Buffer> queuedConstants;context->PSGetConstantBuffers(0,1,&queuedConstants);
+            // Evict the queued draw's constants before readback. The immutable
+            // buffer retained by D3D must still produce width-zero output.
+            for(unsigned i=1;i<=9;++i) {
+                auto distinct=constants;distinct.dimensions[2]=2.5f;distinct.kernel[7][2]=float(i);
+                commit=backend.commitEdge(source,distinct,sampler);
+            }
+            commit=backend.commitEdge(source,constants,sampler);
+            context->PSGetConstantBuffers(0,1,repeatedConstants.ReleaseAndGetAddressOf());
+            need(repeatedConstants.Get()!=queuedConstants.Get(),"Bounded edge constant cache did not evict old bytes");
+        }
+        ComPtr<ID3D11Buffer> drawnQuad;UINT drawnStride{},drawnOffset{};
+        context->IAGetVertexBuffers(0,1,&drawnQuad,&drawnStride,&drawnOffset);
+        need(drawnStride==sizeof(ScreenVertex) && !drawnOffset,"Reused edge rectangle layout changed");
+        if(width==0) {
+            D3D11_BUFFER_DESC desc{};drawnQuad->GetDesc(&desc);desc.Usage=D3D11_USAGE_STAGING;
+            desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+            ComPtr<ID3D11Buffer> staging;
+            need(SUCCEEDED(NativeIm2DProbe::device(backend)->CreateBuffer(&desc,nullptr,&staging)),"Edge signed-zero readback allocation failed");
+            context->CopyResource(staging.Get(),drawnQuad.Get());D3D11_MAPPED_SUBRESOURCE mapped{};
+            need(SUCCEEDED(context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped)),"Edge signed-zero readback failed");
+            ScreenVertex uploaded{};std::memcpy(&uploaded,mapped.pData,sizeof(uploaded));context->Unmap(staging.Get(),0);
+            need(std::bit_cast<uint32_t>(uploaded.u)==0x80000000u,"Reused edge rectangle lost signed-zero UV bytes");
+        } else {
+            if(!sharedQuad)sharedQuad=drawnQuad;
+            need(drawnQuad.Get()==sharedQuad.Get(),"Canonical edge rectangle was allocated again");
+        }
         const auto result=backend.readbackTarget(target);
         // Half-integer point offsets select the positive-side texel.
         const int positive=int(std::floor(width+0.5f)),negative=int(std::ceil(width-0.5f));

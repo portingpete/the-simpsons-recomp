@@ -6,10 +6,14 @@
 #include <cstdint>
 #include <mutex>
 #include <string_view>
+#include "native_mouse_input.h"
 
 namespace Simpsons::Platform {
 // Records the final input returned to each consumer, without changing input.
 // Each JSON line goes directly to Windows, not a process-local stdio buffer.
+// Version 1 retains every controller field. Optional mouse_camera header and
+// mouse_native/mouse_x/mouse_y input fields extend it for raw camera replay;
+// older readers can ignore them, and recordings without them remain valid.
 class NativeInputRecording {
 public:
     enum class Status { Ready, Recording, Saved, Error };
@@ -22,7 +26,8 @@ public:
     void checkpoint();
     void maybeStart(uint32_t slot);
     void stop();
-    void sample(uint32_t slot,DWORD result,const XINPUT_STATE& state,bool modal=false);
+    void sample(uint32_t slot,DWORD result,const XINPUT_STATE& state,bool modal=false,
+        const NativeMouseMotion& mouse={});
     Status status() const;
     std::filesystem::path path() const;
 private:

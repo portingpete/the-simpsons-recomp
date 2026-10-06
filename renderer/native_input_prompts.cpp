@@ -1,6 +1,7 @@
 #include "native_input_prompts.h"
 #include "im2d_draw.h"
 #include "native_prompt_icons.generated.h"
+#include "runtime/native_control_settings.h"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -18,25 +19,26 @@ constexpr std::array cells={
     Icon::E,Icon::MouseLeft,Icon::MouseRight,Icon::Space,
     Icon::Q,Icon::R,Icon::Ctrl,Icon::Shift};
 struct Bounds {float left{},top{},right{},bottom{};};
-const std::array<Bounds,16>& artworkBounds() {
-    static const auto bounds=[] {
-        std::array<Bounds,16> result{};
+const std::array<Bounds,16>& artworkBounds(const NativePromptLayout& layout) {
+    static NativePromptLayout previous{};
+    static std::array<Bounds,16> result{};
+    static bool ready=false;
+    if(!ready||previous!=layout) {
+        result={};const auto pixels=keyboardMousePromptPixels(layout);
         for(std::size_t cell=0;cell<cells.size();++cell) {
-            const auto image=NativePromptIcons::lookup(cells[cell]);
-            if(image.rgba.empty())continue;
             auto& b=result[cell];b.left=b.top=64;
             for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x) {
-                if(!image.rgba[(y*64+x)*4+3])continue;
+                if(!pixels[((cell/4*64+y)*256+cell%4*64+x)*4+3])continue;
                 b.left=std::min(b.left,float(x));b.top=std::min(b.top,float(y));
                 b.right=std::max(b.right,float(x+1));b.bottom=std::max(b.bottom,float(y+1));
             }
         }
-        return result;
-    }();
-    return bounds;
+        previous=layout;ready=true;
+    }
+    return result;
 }
 bool nearlyEqual(float a,float b) {return std::abs(a-b)<=0.0001f;}
-bool enlargeQuad(std::span<Im2DVertex> vertices,float rasterWidth,float rasterHeight,bool strip) {
+bool enlargeQuad(std::span<Im2DVertex> vertices,float rasterWidth,float rasterHeight,bool strip,const NativePromptLayout& layout) {
     Bounds screen{vertices[0].position[0],vertices[0].position[1],vertices[0].position[0],vertices[0].position[1]};
     Bounds uv{vertices[0].uv[0],vertices[0].uv[1],vertices[0].uv[0],vertices[0].uv[1]};
     for(const auto& v:vertices) {
@@ -53,7 +55,7 @@ bool enlargeQuad(std::span<Im2DVertex> vertices,float rasterWidth,float rasterHe
     const float column=std::round(uv.left*4),row=std::round(uv.top*4);
     if(column<0||column>3||row<0||row>3||!nearlyEqual(uv.left,column*.25f)||!nearlyEqual(uv.top,row*.25f))return false;
     const auto cell=unsigned(row)*4+unsigned(column);
-    if(cells[cell]==Icon::Count)return false;
+    if(layout[cell]>=uint8_t(Icon::Count))return false;
     // Require two triangles covering exactly one axis-aligned rectangle, with
     // matching unflipped UV corners. Skip clipped, rotated or arbitrary meshes.
     std::array<unsigned,6> corners{};
@@ -68,13 +70,15 @@ bool enlargeQuad(std::span<Im2DVertex> vertices,float rasterWidth,float rasterHe
     const unsigned first=triangleMask(0,1,2),second=strip?triangleMask(1,2,3):triangleMask(3,4,5);
     if(std::popcount(first)!=3||std::popcount(second)!=3||(first|second)!=15||
        ((first&second)!=9&&(first&second)!=6))return false;
-    const auto b=artworkBounds()[cell];
+    const auto b=artworkBounds(layout)[cell];
+    if(b.right<=b.left||b.bottom<=b.top)return false;
     const float aspect=(b.right-b.left)/(b.bottom-b.top);
     const float scale=rasterHeight/720.f;
     const float centerX=(screen.left+screen.right)*.5f,centerY=(screen.top+screen.bottom)*.5f;
     const bool leftFooter=centerY>rasterHeight*.75f&&centerX<rasterWidth*.3f;
     const bool rightFooter=centerY>rasterHeight*.75f&&centerX>rasterWidth*.7f;
-    float desiredHeight=(cells[cell]==Icon::Move||cells[cell]==Icon::Directions?48.f:cells[cell]==Icon::Space?36.f:44.f)*scale;
+    const auto selected=Icon(layout[cell]);
+    float desiredHeight=(selected==Icon::Move||selected==Icon::Directions?48.f:selected==Icon::Space?36.f:44.f)*scale;
     desiredHeight=std::max(desiredHeight,height*(b.bottom-b.top)/64.f);
     float outputHeight,outputWidth,left,top;
     if(leftFooter||rightFooter) {
@@ -107,10 +111,62 @@ bool isInputPromptAtlas(std::string_view name,uint32_t width,uint32_t height) {
     return name=="buttons" && width==256 && height==256;
 }
 std::vector<uint8_t> keyboardMousePromptPixels() {
+    return keyboardMousePromptPixels(defaultKeyboardMousePromptLayout());
+}
+NativePromptLayout defaultKeyboardMousePromptLayout() {
+    NativePromptLayout layout{};
+    for(size_t i=0;i<cells.size();++i)layout[i]=uint8_t(cells[i]);
+    layout[16]=uint8_t(Icon::W);layout[17]=uint8_t(Icon::A);layout[18]=uint8_t(Icon::S);layout[19]=uint8_t(Icon::D);
+    return layout;
+}
+namespace {
+Icon keyIcon(uint32_t code) {
+    constexpr std::array letters{Icon::A,Icon::B,Icon::C,Icon::D,Icon::E,Icon::F,Icon::G,Icon::H,Icon::I,Icon::J,Icon::K,Icon::L,Icon::M,
+        Icon::N,Icon::O,Icon::P,Icon::Q,Icon::R,Icon::S,Icon::T,Icon::U,Icon::V,Icon::W,Icon::X,Icon::Y,Icon::Z};
+    constexpr std::array digits{Icon::Zero,Icon::One,Icon::Two,Icon::Three,Icon::Four,Icon::Five,Icon::Six,Icon::Seven,Icon::Eight,Icon::Nine};
+    if(code>='A'&&code<='Z')return letters[code-'A'];
+    if(code>='0'&&code<='9')return digits[code-'0'];
+    if(code>=0x70&&code<=0x7B)return Icon(uint8_t(Icon::F1)+code-0x70);
+    if(code>=0x60&&code<=0x69)return Icon(uint8_t(Icon::Numpad0)+code-0x60);
+    switch(code) {
+    case 0:return Icon::Count;case 1:return Icon::MouseLeft;case 2:return Icon::MouseRight;case 4:return Icon::MouseMiddle;
+    case 5:case 6:return Icon::Question;
+    case 8:return Icon::Backspace;case 9:return Icon::Tab;case 13:return Icon::Enter;case 0x1B:return Icon::Esc;case 0x20:return Icon::Space;
+    case 0x10:return Icon::Shift;case 0x11:return Icon::Ctrl;case 0x12:return Icon::LeftAlt;
+    case 0xA0:return Icon::Shift;case 0xA1:return Icon::RightShift;case 0xA2:return Icon::Ctrl;case 0xA3:return Icon::RightCtrl;
+    case 0xA4:return Icon::LeftAlt;case 0xA5:return Icon::RightAlt;
+    case 0x14:return Icon::CapsLock;case 0x21:return Icon::PageUp;case 0x22:return Icon::PageDown;case 0x23:return Icon::End;case 0x24:return Icon::Home;
+    case 0x25:return Icon::Left;case 0x26:return Icon::Up;case 0x27:return Icon::Right;case 0x28:return Icon::Down;
+    case 0x2D:return Icon::Insert;case 0x2E:return Icon::Delete;case 0x2C:return Icon::PrintScreen;case 0x13:return Icon::Pause;
+    case 0x5D:return Icon::Menu;
+    case 0x90:return Icon::NumLock;case 0x91:return Icon::ScrollLock;
+    case 0x6A:return Icon::NumpadMultiply;case 0x6B:return Icon::NumpadAdd;case 0x6D:return Icon::NumpadSubtract;case 0x6E:return Icon::NumpadDecimal;case 0x6F:return Icon::NumpadDivide;
+    case 0xBA:return Icon::Semicolon;case 0xBB:return Icon::Equals;case 0xBC:return Icon::Comma;case 0xBD:return Icon::Minus;case 0xBE:return Icon::Period;
+    case 0xBF:return Icon::Slash;case 0xC0:return Icon::Grave;case 0xDB:return Icon::LeftBracket;case 0xDC:return Icon::Backslash;case 0xDD:return Icon::RightBracket;case 0xDE:return Icon::Apostrophe;
+    default:return Icon::Question;
+    }
+}
+}
+NativePromptLayout keyboardMousePromptLayout(const NativeControlSettings& settings) {
+    auto layout=defaultKeyboardMousePromptLayout();
+    const auto binding=[&](ControlAction action) {
+        const auto& slots=settings.bindings[uint32_t(action)];
+        // Keep the familiar mouse action representative when it is still bound.
+        for(const auto code:slots)if(code==1||code==2||code==4)return keyIcon(code);
+        return keyIcon(slots[0]?slots[0]:slots[1]);
+    };
+    constexpr std::array actions{ControlAction::CharacterMenu,ControlAction::Pause,ControlAction::Action,ControlAction::Attack,
+        ControlAction::Special,ControlAction::Jump,ControlAction::SwitchCharacter,ControlAction::TargetLock,ControlAction::LeftTrigger,ControlAction::SpecialPower};
+    for(size_t i=0;i<actions.size();++i)layout[6+i]=uint8_t(binding(actions[i]));
+    constexpr std::array moves{ControlAction::MoveForward,ControlAction::MoveLeft,ControlAction::MoveBackward,ControlAction::MoveRight};
+    for(size_t i=0;i<moves.size();++i)layout[16+i]=uint8_t(binding(moves[i]));
+    return layout;
+}
+std::vector<uint8_t> keyboardMousePromptPixels(const NativePromptLayout& layout) {
     std::vector<uint8_t> pixels(256*256*4,0);
     for(size_t cell=0;cell<cells.size();++cell) {
-        if(cells[cell]==Icon::Count)continue;
-        const auto icon=NativePromptIcons::lookup(cells[cell]);
+        if(layout[cell]>=uint8_t(Icon::Count))continue;
+        const auto icon=NativePromptIcons::lookup(Icon(layout[cell]));
         if(icon.width!=64 || icon.height!=64 || icon.rgba.size()!=64*64*4)
             throw Error("Native input prompt icon extent differs from its atlas cell");
         for(size_t y=0;y<64;++y) {
@@ -118,24 +174,45 @@ std::vector<uint8_t> keyboardMousePromptPixels() {
             std::copy_n(icon.rgba.data()+y*64*4,64*4,pixels.data()+offset);
         }
     }
+    const auto defaults=defaultKeyboardMousePromptLayout();
+    if(!std::equal(layout.begin()+16,layout.end(),defaults.begin()+16)) {
+        // Reuse complete physical-key artwork for a directional W/A/S/D group.
+        for(size_t y=0;y<64;++y)std::fill_n(pixels.data()+((64+y)*256)*4,64*4,0);
+        constexpr std::array<size_t,4> xs{21,0,21,42},ys{0,32,32,32};
+        for(size_t key=0;key<4;++key) {
+            const auto icon=NativePromptIcons::lookup(Icon(layout[16+key]));if(icon.rgba.empty())continue;
+            for(size_t y=0;y<32;++y)for(size_t x=0;x<21;++x) {
+                const auto src=(y*2*64+x*64/21)*4;
+                const auto dst=((64+ys[key]+y)*256+xs[key]+x)*4;
+                std::copy_n(icon.rgba.data()+src,4,pixels.data()+dst);
+            }
+        }
+    }
     return pixels;
 }
 std::size_t enlargeInputPromptGlyphs(Im2DDraw& draw) {
+    return enlargeInputPromptGlyphs(draw,defaultKeyboardMousePromptLayout());
+}
+std::size_t enlargeInputPromptGlyphs(Im2DDraw& draw,const NativePromptLayout& layout) {
     if(!draw.rasterWidth||!draw.rasterHeight)return 0;
     std::size_t changed=0;
     if(draw.primitiveType==3&&draw.vertices.size()%6==0) {
         for(std::size_t offset=0;offset<draw.vertices.size();offset+=6)
-            changed+=enlargeQuad(std::span(draw.vertices).subspan(offset,6),float(draw.rasterWidth),float(draw.rasterHeight),false);
+            changed+=enlargeQuad(std::span(draw.vertices).subspan(offset,6),float(draw.rasterWidth),float(draw.rasterHeight),false,layout);
     } else if(draw.primitiveType==4&&draw.vertices.size()==4) {
-        changed=enlargeQuad(draw.vertices,float(draw.rasterWidth),float(draw.rasterHeight),true);
+        changed=enlargeQuad(draw.vertices,float(draw.rasterWidth),float(draw.rasterHeight),true,layout);
     }
     return changed;
 }
 std::shared_ptr<Texture> NativeInputPrompts::texture(NativeBackend& backend) {
+    return texture(backend,defaultKeyboardMousePromptLayout());
+}
+std::shared_ptr<Texture> NativeInputPrompts::texture(NativeBackend& backend,const NativePromptLayout& selected) {
     backend.validateSubmissionContext();
-    if(!atlas) {
-        const auto pixels=keyboardMousePromptPixels();
+    if(!atlas||layout!=selected) {
+        const auto pixels=keyboardMousePromptPixels(selected);
         atlas=backend.createTexture(256,256,TextureFormat::RGBA8,pixels);
+        layout=selected;
         std::fprintf(stderr,"[NATIVE INPUT PROMPTS] Yellow keyboard/mouse atlas uploaded; readable native glyph sizing enabled\n");
     }
     backend.validateTexture(atlas);

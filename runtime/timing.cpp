@@ -1,5 +1,6 @@
 #include "runtime.h"
 #include "frame_timing.h"
+#include "stall_profiler.h"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -95,8 +96,12 @@ void SimpsonsNativeWorldCollisionStep(PPCContext& ctx,uint8_t*) {
 // deadline, interval, register or scheduler request.
 void SimpsonsNativeFrameWaitBegin(PPCContext& ctx,uint8_t* base) {
     const DWORD error=GetLastError();Simpsons::FrameTiming::beginPacing(ctx,base);SetLastError(error);
+    Simpsons::StallProfiler::beginWait(&ctx,"SimpsonsNativeFrameWait",ctx.r3.u32);
 }
-void SimpsonsNativeFrameWaitEnd(PPCContext&,uint8_t*) {Simpsons::FrameTiming::endPacing();}
+void SimpsonsNativeFrameWaitEnd(PPCContext&,uint8_t*) {
+    Simpsons::StallProfiler::endWait();
+    Simpsons::FrameTiming::endPacing();
+}
 
 // Configure the original scheduler through its real constructor argument.
 // The original body still creates every field, callback and timestamp.
@@ -154,6 +159,7 @@ void Simpsons::SimpsonsNativeFramePace(Simpsons::Runtime& runtime) {
     };
     thread_local PaceTimer timer;
     const uint64_t release=runtime.framePacer.release(PPCQueryTimebase(),floor,ceiling,percentile);
+    StallProfiler::Scope paceProfile(StallProfiler::Section::Wait,"SimpsonsNativeFramePace",nullptr,reinterpret_cast<uintptr_t>(timer.handle));
     for(;;) {
         const uint64_t now=PPCQueryTimebase();
         if(now-release>(~uint64_t(0)>>1))  // Unsigned: now < release (50MHz wrap is still ordered).
@@ -218,7 +224,9 @@ PPC_FUNC(__imp__NtYieldExecution) {
     } restore{error,fp};
     PPCFPSCRRegister::restoreHostCSR(PPCFPSCRRegister::DefaultCSR);
     static auto yield=service<NtYieldFn>("NtYieldExecution");
+    Simpsons::StallProfiler::Scope yieldProfile(Simpsons::StallProfiler::Section::Wait,"NtYieldExecution",&ctx);
     const uint32_t status=uint32_t(yield());
+    yieldProfile.finish();
     Simpsons::active->checkRunning();
     ctx.r3.u64=status;
 }
@@ -247,6 +255,7 @@ PPC_FUNC(__imp__KeDelayExecutionThread) {
     LARGE_INTEGER interval{};interval.QuadPart=int64_t(PPC_LOAD_U64(ctx.r5.u32));
     BOOLEAN alertable=ctx.r4.u32!=0;
     LONG status;
+    Simpsons::StallProfiler::Scope delayProfile(Simpsons::StallProfiler::Section::Wait,"KeDelayExecutionThread",&ctx,reinterpret_cast<uintptr_t>(Simpsons::active->stopEvent));
     if(interval.QuadPart==0) {
         // Preserve the real scheduler yield behavior of a zero-duration delay.
         static auto delay=service<NtDelayFn>("NtDelayExecution");
@@ -260,6 +269,7 @@ PPC_FUNC(__imp__KeDelayExecutionThread) {
         if(status==0) Simpsons::active->checkRunning();
         if(status==0x102) status=0; // Normal delay expiry, not an object wait timeout.
     }
+    delayProfile.finish();
     if(uint32_t(status)==0xc0) PPC_RECOMP_FAILURE(ctx,uint32_t(ctx.lr),"Native APC woke a delay without a guest APC delivery bridge");
     ctx.r3.u64=uint32_t(status);
 }
