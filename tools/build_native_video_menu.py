@@ -171,6 +171,7 @@ def patch_options(original):
     def next_page():
         a.string('nativePage');a.integer(1);a.variable('nativePage');a.op(0x0b);a.op(0x1d)
         video_method('layoutNativePage')
+        a.method('_root','activateGizmos')
         a.string('rememberedSelection');a.variable('_root');a.member('InitialSelection');a.op(0x1d)
         a.variable('_root');a.string('InitialSelection');a.string('');a.op(0x4f)
         a.string('currentSelection');a.integer(0);a.integer(1);a.variable('_root');a.string('activateMenuButtons');a.op(0x52);a.op(0x1d)

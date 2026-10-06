@@ -197,6 +197,11 @@ class NativeMenuTests(unittest.TestCase):
                     self.assertEqual(scope['_root']['InitialSelection'],'')
                     for button in scope['MenuItemButtons']:scope[button]['_visible']=True
                     return index
+                def activate_gizmos():
+                    # The original Apt routine consumes and hides slider ColorRefs.
+                    for index,kind in enumerate(scope['GizmoTypes']):
+                        if kind=='slider':scope[scope['ColorRefs'][index]]['_visible']=False
+                scope['_root']['activateGizmos']=activate_gizmos
                 scope['_root']['initializeButtons']=initialize;scope['_root']['activateMenuButtons']=activate
                 actions.evaluate(actions.begin,len(actions.apt),scope)
                 self.assertEqual(scope['currentSelection'],0)
@@ -229,6 +234,7 @@ class NativeMenuTests(unittest.TestCase):
                                 actions.call('getNativeAction',scope)
                                 self.assertEqual(exports[-1],0)
                     actions.call('nextPage',scope)
+                    self.assertFalse(scope['brightnessColorRef']['_visible'])
                     self.assertEqual(scope['currentSelection'],0)
                     self.assertEqual(scope['_root']['InitialSelection'],'Brightness')
                     visible=[name for name in ('brightness',*NATIVE_ROWS,'page') if scope.get('btn_'+name,{}).get('_visible')]
