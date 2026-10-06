@@ -295,6 +295,56 @@ void run(const std::vector<uint8_t>& image,bool hardware,bool textured=false) {
     clear();const EngineBindingResetProbe::Snapshot executionBefore(context);backend.executeRecordingPayload(payload);backend.waitIdle();
     require(EngineBindingResetProbe::Snapshot(context)==executionBefore,"Recorded skin execution changed immediate state");
     require(verifyPixels(2,.75f)==immediate,"Immediate and recorded skin pixels differ");
+    {
+        const auto originalDepth=backend.readbackDepthTarget(depth);
+        // Inherit projection and the shadow gate so this list exercises both
+        // writable banks while its material rows stay independently captured.
+        NativeRecordingMask queuedMask{};queuedMask[0]=0x80;queuedMask[8]=0x01;
+        auto queuedLive=backend.createSkinReplayConstants(vc,pc);
+        auto queuedPayload=backend.allocateRecordingPayload(recording,0x3000);
+        backend.beginRecordingPayload(queuedPayload,4,queuedMask,queuedMask);
+        backend.recordSkinMesh(queuedPayload,color,depth,mesh,*vs,*ps,vc,pc,queuedLive,draw);
+        backend.finishRecordingPayload(queuedPayload);
+        auto changedVS=vc;changedVS[0][0]=.5f;
+        auto changedPS=pc;changedPS[31][0]=-1;
+        const auto changedCommit=backend.commitSkin(*vs,*ps,changedVS,changedPS);
+        clear();backend.drawSkinMesh(color,depth,mesh,*vs,*ps,changedCommit,draw);backend.waitIdle();
+        const auto expectedColor=backend.readbackTarget(color),expectedDepth=backend.readbackDepthTarget(depth);
+        require(expectedColor!=immediate,"Skin queued replay fixture did not change visible projection/shadow output");
+        commit=backend.commitSkin(*vs,*ps,vc,pc);
+        std::array<std::shared_ptr<RenderTarget>,2> queued;
+        std::array<std::shared_ptr<DepthTarget>,2> queuedDepth;
+        for(size_t i=0;i<queued.size();++i) {
+            queued[i]=backend.createTarget(extent,extent,TargetFormat::RGB10A2);
+            queuedDepth[i]=backend.createDepthTarget(extent,extent);
+        }
+        const EngineBindingResetProbe::Snapshot queueBefore(context);
+        for(size_t i=0;i<queued.size();++i) {
+            clear();backend.executeRecordingPayload(queuedPayload);
+            (void)backend.copyFront(color,queued[i]);(void)backend.copyDepth(depth,queuedDepth[i]);
+        }
+        // The two earlier draws/copies are still queued when these constants
+        // change. The driver must retain their old contents in command order.
+        backend.updateSkinReplayConstants(queuedLive,changedVS,changedPS);
+        clear();backend.executeRecordingPayload(queuedPayload);backend.waitIdle();
+        require(EngineBindingResetProbe::Snapshot(context)==queueBefore&&backend.recordingPayloadReceipt(queuedPayload).executions==3,
+                "Queued skin replays changed bindings or execution accounting");
+        for(size_t i=0;i<queued.size();++i) {
+            require(backend.readbackTarget(queued[i])==immediate,"Changed skin constants overwrote an earlier queued color result");
+            const auto copied=backend.readbackDepthTarget(queuedDepth[i]);
+            for(size_t p=0;p<extent*extent;++p)
+                require(word(copied,8*p)==word(originalDepth,8*p)&&copied[8*p+4]==originalDepth[8*p+4],
+                        "Changed skin constants overwrote an earlier queued depth/stencil result");
+        }
+        require(backend.readbackTarget(color)==expectedColor,"Queued skin changed constants differ from the immediate color oracle");
+        const auto actualDepth=backend.readbackDepthTarget(depth);
+        for(size_t p=0;p<extent*extent;++p)
+            require(word(actualDepth,8*p)==word(expectedDepth,8*p)&&actualDepth[8*p+4]==expectedDepth[8*p+4],
+                    "Queued skin changed constants differ from the immediate depth/stencil oracle");
+        backend.releaseSkinReplayConstants(queuedLive);rejects([&]{backend.executeRecordingPayload(queuedPayload);});
+        backend.releaseRecordingPayload(queuedPayload);
+        clear();backend.executeRecordingPayload(payload);backend.waitIdle();verifyPixels(2,.75f);
+    }
     for(int32_t baseOffset:{2,-2,0,65532}) {
         std::vector<SkinVertex> owned(vertices.begin(),vertices.end());
         std::vector<uint16_t> words;

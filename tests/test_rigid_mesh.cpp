@@ -1083,9 +1083,32 @@ void run(const std::vector<uint8_t>& image,bool hardware) {
     // Both copied depths are .75. Replicated RRRR makes every comparison false:
     // original alpha .4 -> RGB10A2 alpha code1. Default R32 G/B zeros would fail.
     f.pixels([](UINT x,UINT){return packed(x<8?64:512,1);},[](UINT,UINT){return .5f;});
+    std::array<std::shared_ptr<RenderTarget>,2> queued;
+    std::array<std::shared_ptr<DepthTarget>,2> queuedDepth;
+    for(size_t i=0;i<queued.size();++i) {
+        queued[i]=f.backend.createTarget(Fixture::extent,Fixture::extent,TargetFormat::RGB10A2);
+        queuedDepth[i]=f.backend.createDepthTarget(Fixture::extent,Fixture::extent);
+    }
+    const auto queuedColor=f.backend.readbackTarget(f.color),oldDepth=f.backend.readbackDepthTarget(f.depth);
+    const Snapshot queueBefore(f.immediate);const auto queueExecutions=f.backend.recordingPayloadReceipt(payload).executions;
+    // Preserve two unchanged GPU draws before updating the same private
+    // constant buffers. There is no readback or wait inside this queue.
+    for(size_t i=0;i<queued.size();++i) {
+        f.clear();f.backend.executeRecordingPayload(payload);
+        (void)f.backend.copyFront(f.color,queued[i]);(void)f.backend.copyDepth(f.depth,queuedDepth[i]);
+    }
     f.clear();auto currentVS=f.vc;currentVS[0][0]=.5f;currentVS[2][3]=.25f;
     auto currentPS=f.pc;currentPS[31][0]=-1;currentPS[40][0]=700;currentPS[49][2]=1001;
-    f.backend.updateRigidReplayConstants(f.live,currentVS,currentPS);f.execute(payload);
+    f.backend.updateRigidReplayConstants(f.live,currentVS,currentPS);f.backend.executeRecordingPayload(payload);f.backend.waitIdle();
+    require(Snapshot(f.immediate)==queueBefore&&f.backend.recordingPayloadReceipt(payload).executions==queueExecutions+3,
+            "Queued rigid replays changed bindings or execution accounting");
+    for(size_t i=0;i<queued.size();++i) {
+        require(f.backend.readbackTarget(queued[i])==queuedColor,"Changed rigid constants overwrote an earlier queued color result");
+        const auto copied=f.backend.readbackDepthTarget(queuedDepth[i]);
+        for(size_t p=0;p<Fixture::extent*Fixture::extent;++p)
+            require(word(copied,8*p)==word(oldDepth,8*p)&&copied[8*p+4]==oldDepth[8*p+4],
+                    "Changed rigid constants overwrote an earlier queued depth/stencil result");
+    }
     // Same list, new inherited geometry/receiver. Recorded IDs remain DISTINCT
     // and ignore the caller's rewritten arrays and unrelated live c49 value.
     f.pixels([](UINT x,UINT){return x>=4&&x<12?packed(x<8?64:512,0):untouched;},[](UINT x,UINT){return x>=4&&x<12?.25f:0.f;});

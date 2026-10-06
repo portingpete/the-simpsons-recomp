@@ -1,4 +1,5 @@
 #include "rigid_mesh.h"
+#include "runtime/stall_profiler.h"
 #include "common/geometry_extent.h"
 #include "immutable_buffer_proof.h"
 #include "mesh_upload_cache.h"
@@ -184,6 +185,8 @@ struct RecordedDraw {
     ComPtr<ID3D11ShaderResourceView> noiseView;
     ComPtr<ID3D11SamplerState> noiseSampler;
     ComPtr<ID3D11Buffer> vertices,indices,vertexConstants,pixelConstants,depthConstants;
+    RigidVertexConstants uploadedVertex{};
+    RigidPixelConstants uploadedPixel{};
     ComPtr<ID3D11InputLayout> layout;
     ComPtr<ID3D11VertexShader> vertex;
     ComPtr<ID3D11PixelShader> originalPixel,drawPixel;
@@ -727,6 +730,9 @@ void NativeBackend::recordRigidMesh(const std::shared_ptr<NativeRecordingPayload
                                  D3D11_RECT{0,0,LONG(target->width),LONG(target->height)});
     draw->vertexConstants=buffer(device.Get(),materialVS.data(),sizeof(materialVS),D3D11_BIND_CONSTANT_BUFFER,D3D11_USAGE_DEFAULT);
     draw->pixelConstants=buffer(device.Get(),materialPS.data(),sizeof(materialPS),D3D11_BIND_CONSTANT_BUFFER,D3D11_USAGE_DEFAULT);
+    // Cache the bytes that CreateBuffer uploaded to these private buffers.
+    std::memcpy(draw->uploadedVertex.data(),materialVS.data(),sizeof(materialVS));
+    std::memcpy(draw->uploadedPixel.data(),materialPS.data(),sizeof(materialPS));
     const DepthConstants depthValues{uint32_t(reverse),d.depthBiasBits,d.slopeBiasBits,0};
     draw->depthConstants=buffer(device.Get(),&depthValues,sizeof(depthValues),D3D11_BIND_CONSTANT_BUFFER,D3D11_USAGE_IMMUTABLE);
     D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthEnable=d.depthEnable;dd.DepthWriteMask=d.depthWrite?D3D11_DEPTH_WRITE_MASK_ALL:D3D11_DEPTH_WRITE_MASK_ZERO;
@@ -758,8 +764,16 @@ void NativeBackend::recordRigidMesh(const std::shared_ptr<NativeRecordingPayload
         finite(material.vertex);finite(material.pixel);
         // Each draw has DISTINCT DEFAULT storage, updated only here. Recording
         // UpdateSubresource into the list would overwrite every replay's values.
-        immediate->UpdateSubresource(draw->vertexConstants.Get(),0,nullptr,material.vertex.data(),0,0);
-        immediate->UpdateSubresource(draw->pixelConstants.Get(),0,nullptr,material.pixel.data(),0,0);
+        if(std::memcmp(draw->uploadedVertex.data(),material.vertex.data(),sizeof(material.vertex))) {
+            StallProfiler::Scope updateProfile(StallProfiler::Section::Rendering,"D3D11.UpdateSubresource.rigidVertex",nullptr,reinterpret_cast<uintptr_t>(draw->vertexConstants.Get()));
+            immediate->UpdateSubresource(draw->vertexConstants.Get(),0,nullptr,material.vertex.data(),0,0);
+            std::memcpy(draw->uploadedVertex.data(),material.vertex.data(),sizeof(material.vertex));
+        }
+        if(std::memcmp(draw->uploadedPixel.data(),material.pixel.data(),sizeof(material.pixel))) {
+            StallProfiler::Scope updateProfile(StallProfiler::Section::Rendering,"D3D11.UpdateSubresource.rigidPixel",nullptr,reinterpret_cast<uintptr_t>(draw->pixelConstants.Get()));
+            immediate->UpdateSubresource(draw->pixelConstants.Get(),0,nullptr,material.pixel.data(),0,0);
+            std::memcpy(draw->uploadedPixel.data(),material.pixel.data(),sizeof(material.pixel));
+        }
     };
     recordRecordingDraw(payload,std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&data),sizeof(data)),draw,std::move(prepare),
         [draw](ID3D11DeviceContext* deferred){draw->record(deferred);});

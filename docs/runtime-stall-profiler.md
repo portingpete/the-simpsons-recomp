@@ -51,6 +51,20 @@ recorded draw preparation, `ExecuteCommandList`, skin draw submission, and
 presentation query `CreateQuery`, `GetData`, and `Flush`. This separates driver
 calls from the larger runtime hooks without adding GPU synchronization commands.
 
+Original screen sprites reuse one device-owned packed integer scratch surface
+when its complete physical texture descriptor matches. Allocation scopes record
+cache misses; `CopyResource.screenSnapshot` and `CopyResource.screenCommit`
+record the two original ordered full-surface copies. A different physical extent
+replaces the cached surface. SSAA4x doubles each scene dimension, so a logical
+3440x1440 scene uses 6880x2880 backing for these operations.
+
+Recorded skin, rigid, mono and sky draws skip constant-buffer updates only when
+their effective inherited bytes exactly match the last upload. Changed uploads
+have `D3D11.UpdateSubresource` scopes. Replay ownership, released-state and
+inheritance checks still run before reuse. These optimizations reduce resource
+churn; a remaining slow driver call can still reflect pressure from earlier
+queued rendering.
+
 Section and contributor totals use exclusive wall time: an inner GPU wait is
 charged to waits rather than counted again as rendering. Call records use
 inclusive elapsed time so every slow service call is still visible. Native

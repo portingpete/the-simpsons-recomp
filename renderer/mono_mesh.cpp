@@ -1,4 +1,5 @@
 #include "mono_mesh.h"
+#include "runtime/stall_profiler.h"
 #include "material_resources.h"
 #include "common/geometry_extent.h"
 #include "immutable_buffer_proof.h"
@@ -333,6 +334,7 @@ struct MonoRecordedDraw {
     std::shared_ptr<RenderTarget> color;std::shared_ptr<DepthTarget> depth;
     ComPtr<ID3D11RenderTargetView> colorView;ComPtr<ID3D11DepthStencilView> depthView;
     ComPtr<ID3D11Buffer> vertices,indices,constants,booleans,depthConstants;
+    MonoConstants uploadedVertex{};
     ComPtr<ID3D11InputLayout> layout;ComPtr<ID3D11VertexShader> vertex;
     ComPtr<ID3D11PixelShader> originalPixel,drawPixel;
     ComPtr<ID3D11DepthStencilState> depthState;ComPtr<ID3D11RasterizerState> raster;ComPtr<ID3D11BlendState> blend;
@@ -433,6 +435,7 @@ void NativeBackend::recordMonoMesh(const std::shared_ptr<NativeRecordingPayload>
     D3D11_BUFFER_DESC constantsDesc{};constantsDesc.ByteWidth=sizeof(materialVS);constantsDesc.Usage=D3D11_USAGE_DEFAULT;
     constantsDesc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;const D3D11_SUBRESOURCE_DATA initial{materialVS.data(),0,0};
     check(device->CreateBuffer(&constantsDesc,&initial,&draw->constants),"recorded constant allocation");
+    std::memcpy(draw->uploadedVertex.data(),materialVS.data(),sizeof(materialVS));
     draw->booleans=immutable(device.Get(),booleans.data(),sizeof(booleans),D3D11_BIND_CONSTANT_BUFFER);
     const DepthConstants depthValues{uint32_t(reverse),d.depthBiasBits,d.slopeBiasBits,0};
     draw->depthConstants=immutable(device.Get(),&depthValues,sizeof(depthValues),D3D11_BIND_CONSTANT_BUFFER);
@@ -465,7 +468,12 @@ void NativeBackend::recordMonoMesh(const std::shared_ptr<NativeRecordingPayload>
             const auto group=row/4;
             if(material.inputMask[group/8]&(0x80u>>(group%8)))material.vertex[row]=draw->live->state->vertex[row];
         }
-        monoFinite(material.vertex);immediate->UpdateSubresource(draw->constants.Get(),0,nullptr,material.vertex.data(),0,0);
+        monoFinite(material.vertex);
+        if(std::memcmp(draw->uploadedVertex.data(),material.vertex.data(),sizeof(material.vertex))) {
+            StallProfiler::Scope updateProfile(StallProfiler::Section::Rendering,"D3D11.UpdateSubresource.monoVertex",nullptr,reinterpret_cast<uintptr_t>(draw->constants.Get()));
+            immediate->UpdateSubresource(draw->constants.Get(),0,nullptr,material.vertex.data(),0,0);
+            std::memcpy(draw->uploadedVertex.data(),material.vertex.data(),sizeof(material.vertex));
+        }
     };
     recordRecordingDraw(payload,std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&data),sizeof(data)),draw,std::move(prepare),
         [draw](ID3D11DeviceContext* deferred){draw->record(deferred);});

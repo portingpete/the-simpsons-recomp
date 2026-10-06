@@ -18,11 +18,96 @@ ScreenDraw quad(){ScreenDraw d{};d.vertices={{{-1,1,0,0},{1,1,1,0},{-1,-1,0,1},{
 uint32_t pixel(const std::vector<uint8_t>& bytes,size_t i=0){uint32_t value{};std::memcpy(&value,bytes.data()+i*4,4);return value;}
 std::array<float,4> unpack(uint32_t p){return {float(p&1023)/1023,float((p>>10)&1023)/1023,float((p>>20)&1023)/1023,float(p>>30)/3};}
 uint32_t pack(const std::array<float,4>& p){uint32_t out=0;for(uint32_t i=0;i<4;++i)out|=uint32_t(std::nearbyint(std::clamp(p[i],0.0f,1.0f)*float(i==3?3:1023)))<<(i*10);return out;}
+uint32_t blended(uint32_t destination,const std::array<float,4>& source,uint32_t mode){
+    const auto before=unpack(destination);auto result=source;
+    for(size_t c=0;c<3;++c){const float product=source[c]*source[3];
+        result[c]=mode==3?source[c]:(mode==0?product+before[c]:(mode==1?product+before[c]*(1-source[3]):before[c]-product));}
+    return pack(result);
+}
+void image(NativeBackend& b,const std::shared_ptr<RenderTarget>& target,const std::vector<uint32_t>& expected){
+    const auto bytes=b.readbackTarget(target);need(bytes.size()==expected.size()*4,"Queued screen output extent differs");
+    for(size_t i=0;i<expected.size();++i)need(pixel(bytes,i)==expected[i],"Queued screen scratch changed packed output or untouched coverage");
+}
 }
 namespace Simpsons::Graphics {
 struct NativeScreenProbe {
     static ID3D11Device* device(NativeBackend& b){return b.device.Get();}
     static ID3D11DeviceContext* context(NativeBackend& b){return b.context.Get();}
+    static void queuedScratch(bool hardware){
+        NativeBackend b(!hardware);b.configureRendering(1280,720,1,Antialiasing::SSAA4x);
+        auto a=b.createTarget(32,16,TargetFormat::RGB10A2,TargetScale::Scene);
+        auto other=b.createTarget(32,16,TargetFormat::RGB10A2,TargetScale::Scene);
+        auto smallerTarget=b.createTarget(16,8,TargetFormat::RGB10A2,TargetScale::Scene);
+        auto fixed=b.createTarget(32,16,TargetFormat::RGB10A2);
+        auto za=b.createDepthTarget(32,16,TargetScale::Scene),zs=b.createDepthTarget(16,8,TargetScale::Scene),zf=b.createDepthTarget(32,16);
+        auto frontA=b.createTarget(32,16,TargetFormat::RGB10A2,TargetScale::Scene);
+        auto frontOther=b.createTarget(32,16,TargetFormat::RGB10A2,TargetScale::Scene);
+        auto frontSmall=b.createTarget(16,8,TargetFormat::RGB10A2,TargetScale::Scene);
+        auto frontFixed=b.createTarget(32,16,TargetFormat::RGB10A2);
+        auto frontFinal=b.createTarget(32,16,TargetFormat::RGB10A2,TargetScale::Scene);
+        std::vector<uint32_t> ea(size_t(a->pixelWidth())*a->pixelHeight()),eo(ea.size());
+        std::vector<uint32_t> es(size_t(smallerTarget->pixelWidth())*smallerTarget->pixelHeight()),ef(es.size());
+        auto draw=quad();draw.alphaTest=false;draw.blendSelector=3;draw.color={0.17f,0.41f,0.83f,0.72f};
+        auto issue=[&](const auto& target,const auto& depth,std::vector<uint32_t>& expected,bool left=false,
+                       std::optional<std::array<float,4>> sampled={}){
+            b.bindTargets({target,nullptr,nullptr,nullptr},depth);b.drawOriginalScreen(target,depth,draw,false,6,false);
+            b.requireSelectedTargets({target,nullptr,nullptr,nullptr},depth);
+            const auto source=sampled.value_or(draw.color);
+            for(size_t y=0;y<target->pixelHeight();++y)for(size_t x=0;x<target->pixelWidth();++x)
+                if(!left||x<target->pixelWidth()/2){auto& p=expected[y*target->pixelWidth()+x];p=blended(p,source,draw.blendSelector);}
+        };
+        issue(a,za,ea);const auto first=b.screenScratch.texture;const auto firstView=b.screenScratch.view;
+        need(first&&firstView&&b.screenScratch.desc.Width==64&&b.screenScratch.desc.Height==32&&
+             b.screenScratch.desc.Format==DXGI_FORMAT_R10G10B10A2_UINT,"Screen scratch used logical dimensions or wrong packed format");
+        draw.color={0.61f,0.29f,0.43f,1};issue(other,za,eo);
+        need(b.screenScratch.texture==first&&b.screenScratch.view==firstView,"Same-size different target allocated another screen scratch");
+        draw.vertices[1].x=draw.vertices[3].x=0;draw.color={0.31f,0.73f,0.23f,0.37f};draw.blendSelector=1;issue(a,za,ea,true);
+        const std::array<uint8_t,4> rgba={17,101,239,255};auto source=b.createTexture(1,1,TextureFormat::RGBA8,rgba);
+        std::weak_ptr<Texture> weakSource=source;draw=quad();draw.alphaTest=false;draw.texture=source;draw.color={1,1,1,0.37f};draw.blendSelector=0;
+        issue(a,za,ea,false,std::array<float,4>{17.0f/255,101.0f/255,239.0f/255,0.37f});
+        need(b.screenScratch.texture==first,"Queued textured blend replaced same-size scratch");
+        draw.texture.reset();source.reset();need(weakSource.expired(),"Screen scratch retained caller source texture ownership");
+        auto copyA=b.copyFront(a,frontA);const auto snapshotA=ea;
+        draw.vertices[1].x=draw.vertices[3].x=0;draw.color={0.25f,0.61f,0.47f,0.29f};draw.blendSelector=2;issue(other,za,eo,true);
+        auto copyOther=b.copyFront(other,frontOther);
+        draw=quad();draw.alphaTest=false;draw.blendSelector=3;draw.color={0.07f,0.83f,0.19f,1};issue(smallerTarget,zs,es);
+        const auto resized=b.screenScratch.texture;
+        need(resized!=first&&b.screenScratch.desc.Width==32&&b.screenScratch.desc.Height==16,"Different physical extent reused incompatible scratch");
+        draw.vertices[1].x=draw.vertices[3].x=0;draw.color={0.41f,0.17f,0.53f,0.23f};draw.blendSelector=0;issue(smallerTarget,zs,es,true);
+        auto copySmall=b.copyFront(smallerTarget,frontSmall);
+        draw=quad();draw.alphaTest=false;draw.blendSelector=3;draw.color={0.73f,0.11f,0.37f,1};issue(fixed,zf,ef);
+        need(b.screenScratch.texture==resized,"Equal physical storage with different logical extent missed scratch reuse");
+        auto copyFixed=b.copyFront(fixed,frontFixed);
+        draw.color={0.31f,0.13f,0.23f,0.17f};draw.blendSelector=2;issue(a,za,ea);
+        need(b.screenScratch.texture!=resized,"Returning to larger extent reused smaller scratch");
+        // A retained scratch output in an additional OM slot must still reject
+        // before copying, rebinding, or changing the completed draw count.
+        ComPtr<ID3D11RenderTargetView> selected;ComPtr<ID3D11DepthStencilView> selectedDepth;
+        b.context->OMGetRenderTargets(1,&selected,&selectedDepth);
+        const std::array<ID3D11RenderTargetView*,2> outputs={selected.Get(),b.screenScratch.view.Get()};
+        b.context->OMSetRenderTargets(2,outputs.data(),selectedDepth.Get());const auto count=b.screenDrawCount();
+        rejects([&]{b.drawOriginalScreen(a,za,draw,false,6,false);});
+        std::array<ID3D11RenderTargetView*,2> retained{};b.context->OMGetRenderTargets(2,retained.data(),nullptr);
+        need(retained==outputs&&b.screenDrawCount()==count,"Rejected scratch output binding changed OM or draw count");
+        for(auto* output:retained)if(output)output->Release();b.bindTargets({a,nullptr,nullptr,nullptr},za);
+        // A same-descriptor entry belonging to another device must miss. Pin
+        // both entries so pointer reuse cannot make this identity check pass.
+        NativeBackend foreign(!hardware);auto ft=foreign.createTarget(64,32,TargetFormat::RGB10A2);auto fz=foreign.createDepthTarget(64,32);
+        foreign.bindTargets({ft,nullptr,nullptr,nullptr},fz);auto seed=quad();seed.alphaTest=false;seed.blendSelector=3;
+        foreign.drawOriginalScreen(ft,fz,seed,false,6,false);const auto foreignTexture=foreign.screenScratch.texture;
+        b.screenScratch=foreign.screenScratch;draw.blendSelector=0;issue(a,za,ea);
+        need(b.screenScratch.device.Get()==b.device.Get()&&b.screenScratch.texture!=foreignTexture,"Screen scratch reused a foreign-device entry");
+        auto copyFinal=b.copyFront(a,frontFinal);std::weak_ptr<RenderTarget> weakTarget=a;
+        b.clearBindings();a.reset();other.reset();smallerTarget.reset();fixed.reset();
+        need(!weakTarget.expired(),"Queued front receipt failed to retain its source target owner");
+        // No readback, Flush or completion wait occurs between the draws.
+        // Waiting the last event retires every earlier scratch copy/draw/copy.
+        b.waitCopy(copyFinal);need(b.copyComplete(copyA)&&b.copyComplete(copyOther)&&b.copyComplete(copySmall)&&b.copyComplete(copyFixed),"Queued screen front events completed out of order");
+        image(b,frontA,snapshotA);image(b,frontOther,eo);image(b,frontSmall,es);image(b,frontFixed,ef);image(b,frontFinal,ea);
+        copyA.reset();copyOther.reset();copySmall.reset();copyFixed.reset();copyFinal.reset();b.waitIdle();
+        need(weakTarget.expired(),"Screen scratch retained source target after transfer retirement");
+        foreign.waitIdle();
+    }
     static void spriteDepth(NativeBackend& b){
         ComPtr<ID3D11DepthStencilState> state;b.context->OMGetDepthStencilState(&state,nullptr);
         D3D11_DEPTH_STENCIL_DESC desc{};state->GetDesc(&desc);
@@ -110,6 +195,7 @@ int main(int argc,char** argv){try{
     d.color[0]=std::numeric_limits<float>::quiet_NaN();rejects([&]{submit();});d.color[0]=0;
     b.bindTargets({nullptr,nullptr,nullptr,nullptr},depth);rejects([&]{submit();});
     need(b.screenDrawCount()==draws,"Rejected original draw changed submission count");need(!b.presentationCount(),"Fixture draws counted as presentation");
+    NativeScreenProbe::queuedScratch(hardware);
     auto state=EngineState::fromOriginalStartup();state.setScalar(ScalarState::HalfPixelOffset,1);state.setScalar(ScalarState::GuardBandX,0x3F800000);state.setScalar(ScalarState::GuardBandY,0x3F800000);
     state.setSampler(0,SamplerState::AddressW,2);state.setSampler(0,SamplerState::MipFilter,1);state.applyScreenQuadState(0,true);
     auto checked=state.requireOriginalScreenState(true);need(checked.expandedBlendRequested&&checked.sampler->addressW==2&&checked.sampler->mipFilter==1,"Original snapshot lost retained inactive sampler fields");

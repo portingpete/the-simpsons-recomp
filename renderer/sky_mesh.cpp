@@ -1,4 +1,5 @@
 #include "sky_mesh.h"
+#include "runtime/stall_profiler.h"
 #include "common/geometry_extent.h"
 #include "native_material_compiler.h"
 #include "mesh_upload_cache.h"
@@ -154,6 +155,8 @@ struct SkyRecordedDraw {
     std::array<ComPtr<ID3D11ShaderResourceView>,4> textureViews;
     std::array<ComPtr<ID3D11SamplerState>,4> samplers;
     ComPtr<ID3D11Buffer> vertices,indices,vc,pc,depthConstants;
+    SkyVertexConstants uploadedVertex{};
+    SkyPixelConstants uploadedPixel{};
     ComPtr<ID3D11InputLayout> layout;ComPtr<ID3D11VertexShader> vertex;ComPtr<ID3D11PixelShader> pixel;
     ComPtr<ID3D11DepthStencilState> depthState;ComPtr<ID3D11RasterizerState> raster;ComPtr<ID3D11BlendState> blend;
     D3D11_VIEWPORT viewport{};D3D11_RECT scissor{};uint32_t count{},start{},mask{};int32_t base{};
@@ -393,6 +396,8 @@ void NativeBackend::recordSkyMesh(const std::shared_ptr<NativeRecordingPayload>&
         D3D11_RECT{0,0,LONG(target->width),LONG(target->height)});
     draw->vc=buffer(device.Get(),materialVS.data(),sizeof(materialVS),D3D11_BIND_CONSTANT_BUFFER,D3D11_USAGE_DEFAULT);
     draw->pc=buffer(device.Get(),materialPS.data(),sizeof(materialPS),D3D11_BIND_CONSTANT_BUFFER,D3D11_USAGE_DEFAULT);
+    std::memcpy(draw->uploadedVertex.data(),materialVS.data(),sizeof(materialVS));
+    std::memcpy(draw->uploadedPixel.data(),materialPS.data(),sizeof(materialPS));
     const DepthConstants values{uint32_t(reverse),d.depthBiasBits,d.slopeBiasBits,0};
     draw->depthConstants=buffer(device.Get(),&values,sizeof(values),D3D11_BIND_CONSTANT_BUFFER,D3D11_USAGE_IMMUTABLE);
     D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthEnable=d.depthEnable;dd.DepthWriteMask=d.depthWrite?D3D11_DEPTH_WRITE_MASK_ALL:D3D11_DEPTH_WRITE_MASK_ZERO;
@@ -421,8 +426,16 @@ void NativeBackend::recordSkyMesh(const std::shared_ptr<NativeRecordingPayload>&
         skyInherit(material.vertex,draw->live->state->vertex,material.mask,0);
         skyInherit(material.pixel,draw->live->state->pixel,material.mask,8);
         skyFinite(material.vertex);skyFinite(material.pixel);
-        immediate->UpdateSubresource(draw->vc.Get(),0,nullptr,material.vertex.data(),0,0);
-        immediate->UpdateSubresource(draw->pc.Get(),0,nullptr,material.pixel.data(),0,0);
+        if(std::memcmp(draw->uploadedVertex.data(),material.vertex.data(),sizeof(material.vertex))) {
+            StallProfiler::Scope updateProfile(StallProfiler::Section::Rendering,"D3D11.UpdateSubresource.skyVertex",nullptr,reinterpret_cast<uintptr_t>(draw->vc.Get()));
+            immediate->UpdateSubresource(draw->vc.Get(),0,nullptr,material.vertex.data(),0,0);
+            std::memcpy(draw->uploadedVertex.data(),material.vertex.data(),sizeof(material.vertex));
+        }
+        if(std::memcmp(draw->uploadedPixel.data(),material.pixel.data(),sizeof(material.pixel))) {
+            StallProfiler::Scope updateProfile(StallProfiler::Section::Rendering,"D3D11.UpdateSubresource.skyPixel",nullptr,reinterpret_cast<uintptr_t>(draw->pc.Get()));
+            immediate->UpdateSubresource(draw->pc.Get(),0,nullptr,material.pixel.data(),0,0);
+            std::memcpy(draw->uploadedPixel.data(),material.pixel.data(),sizeof(material.pixel));
+        }
     };
     recordRecordingDraw(payload,std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&data),sizeof(data)),draw,std::move(prepare),
         [draw](ID3D11DeviceContext* deferred){draw->record(deferred);});

@@ -855,6 +855,17 @@ private:
     ComPtr<IDXGISwapChain1> swapChain;
     ComPtr<ID3D11RenderTargetView> backbuffer;
     std::shared_ptr<ScreenPipeline> screenPipeline;
+    // One private integer screen output per device/complete physical descriptor.
+    // The whole target is copied in before every draw; contents never identify
+    // an engine target. Commands on the owner immediate context serialize reuse,
+    // and D3D11 retains old storage through queued use when an extent changes.
+    // Holds no caller texture/target owners and exposes no bindable scratch view.
+    struct ScreenScratchTexture {
+        ComPtr<ID3D11Device> device;
+        D3D11_TEXTURE2D_DESC desc{};
+        ComPtr<ID3D11Texture2D> texture;
+        ComPtr<ID3D11RenderTargetView> view;
+    } screenScratch;
     // Retain even abandoned caller tokens and post-submission failure resources
     // until a real query completes, waitIdle succeeds, or the device is torn down.
     std::vector<std::shared_ptr<NativeCopySubmission>> pendingCopies;

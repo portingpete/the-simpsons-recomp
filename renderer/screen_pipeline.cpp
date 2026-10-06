@@ -125,6 +125,11 @@ void sameDevice(ID3D11Resource* resource,ID3D11Device* device) {
 void finiteColor(const std::array<float,4>& color) {
     for(float value:color) if(!std::isfinite(value)) throw Error("Nonfinite native screen color is unverified");
 }
+bool sameTextureDescriptor(const D3D11_TEXTURE2D_DESC& a,const D3D11_TEXTURE2D_DESC& b) {
+    return a.Width==b.Width && a.Height==b.Height && a.MipLevels==b.MipLevels && a.ArraySize==b.ArraySize &&
+        a.Format==b.Format && a.SampleDesc.Count==b.SampleDesc.Count && a.SampleDesc.Quality==b.SampleDesc.Quality &&
+        a.Usage==b.Usage && a.BindFlags==b.BindFlags && a.CPUAccessFlags==b.CPUAccessFlags && a.MiscFlags==b.MiscFlags;
+}
 struct Constants {std::array<float,4> color;float alphaReference;uint32_t alphaTest;uint32_t blendSelector;float padding{};};
 static_assert(sizeof(Constants)==32 && sizeof(ScreenVertex)==16);
 }
@@ -1434,6 +1439,7 @@ void NativeBackend::drawScreenImpl(const std::shared_ptr<RenderTarget>& target,c
     if(!target) throw Error("Missing native screen target");
     sameDevice(target->texture.Get(),device.Get());
     if(original) {
+        validateFrontTarget(target);
         const bool alphaClear=draw.colorWriteMask==8 && !draw.texture && !draw.coronaQuery &&
             draw.blendSelector==3 && !draw.alphaTest && draw.color==std::array<float,4>{};
         if(target->format!=TargetFormat::RGB10A2 || !depth || depthCompare>7 || (draw.colorWriteMask!=15 && !alphaClear))
@@ -1493,10 +1499,30 @@ void NativeBackend::drawScreenImpl(const std::shared_ptr<RenderTarget>& target,c
         // Integer output prevents adapter-dependent UNORM conversion from
         // rounding the recovered blend result a second time. Same packed family;
         // CopyResource transfers the bits without changing the engine target.
-        D3D11_TEXTURE2D_DESC packed{};target->texture->GetDesc(&packed);
+        // Use actual storage dimensions (including SSAA/internal scale), never
+        // logical guest/front dimensions. The exact device and full normalized
+        // descriptor are the cache key; allocation/view failures publish nothing.
+        D3D11_TEXTURE2D_DESC packed=*attachmentDescriptor(*target);
         packed.Format=DXGI_FORMAT_R10G10B10A2_UINT;packed.BindFlags=D3D11_BIND_RENDER_TARGET;
-        check(device->CreateTexture2D(&packed,nullptr,&packedOutput),"packed integer screen allocation");
-        check(device->CreateRenderTargetView(packedOutput.Get(),nullptr,&packedView),"packed integer screen view creation");
+        if(screenScratch.device.Get()!=device.Get() || !screenScratch.texture || !screenScratch.view ||
+           !sameTextureDescriptor(screenScratch.desc,packed)) {
+            ScreenScratchTexture next;next.device=device;next.desc=packed;
+            {
+                StallProfiler::Scope profile(StallProfiler::Section::Rendering,"D3D11.CreateTexture2D.screenScratch",nullptr,reinterpret_cast<uintptr_t>(device.Get()));
+                check(device->CreateTexture2D(&packed,nullptr,&next.texture),"packed integer screen allocation");
+            }
+            {
+                StallProfiler::Scope profile(StallProfiler::Section::Rendering,"D3D11.CreateRenderTargetView.screenScratch",nullptr,reinterpret_cast<uintptr_t>(next.texture.Get()));
+                check(device->CreateRenderTargetView(next.texture.Get(),nullptr,&next.view),"packed integer screen view creation");
+            }
+            screenScratch=std::move(next);
+        }
+        packedOutput=screenScratch.texture;packedView=screenScratch.view;
+        // Scratch has only RT binding capability, remains private, and exact
+        // selected-target validation above rules out a retained OM scratch view.
+        if(packedOutput.Get()==target->texture.Get() || (draw.texture&&packedOutput.Get()==draw.texture->texture.Get()) ||
+           (draw.coronaQuery&&packedOutput.Get()==draw.coronaQuery->texture.Get()))
+            throw Error("Native screen scratch aliases an engine resource");
         context->RSGetViewports(&savedViewportCount,savedViewports.data());
         context->PSGetShaderResources(1,1,&savedTexture1);
     }
@@ -1520,7 +1546,11 @@ void NativeBackend::drawScreenImpl(const std::shared_ptr<RenderTarget>& target,c
     // All fallible preparation precedes submission or effective pipeline changes.
     invalidateScreenReplacement();
     if(original) {
-        context->CopyResource(packedOutput.Get(),target->texture.Get());
+        context->OMSetRenderTargetsAndUnorderedAccessViews(0,nullptr,nullptr,0,D3D11_KEEP_UNORDERED_ACCESS_VIEWS,nullptr,nullptr);
+        {
+            StallProfiler::Scope profile(StallProfiler::Section::Rendering,"D3D11.CopyResource.screenSnapshot",nullptr,reinterpret_cast<uintptr_t>(packedOutput.Get()));
+            context->CopyResource(packedOutput.Get(),target->texture.Get());
+        }
         auto* packed=packedView.Get();
         context->OMSetRenderTargetsAndUnorderedAccessViews(1,&packed,depth->view.Get(),0,D3D11_KEEP_UNORDERED_ACCESS_VIEWS,nullptr,nullptr);
     }
@@ -1554,8 +1584,12 @@ void NativeBackend::drawScreenImpl(const std::shared_ptr<RenderTarget>& target,c
         auto* restored=draw.coronaQuery?savedTexture2.Get():savedTexture1.Get();context->PSSetShaderResources(draw.coronaQuery?2:1,1,&restored);
         // Snapshot already contains all untouched pixels. Copy back exact packed
         // codes, then retain the original attachments for following engine work.
+        context->OMSetRenderTargetsAndUnorderedAccessViews(0,nullptr,nullptr,0,D3D11_KEEP_UNORDERED_ACCESS_VIEWS,nullptr,nullptr);
+        {
+            StallProfiler::Scope profile(StallProfiler::Section::Rendering,"D3D11.CopyResource.screenCommit",nullptr,reinterpret_cast<uintptr_t>(packedOutput.Get()));
+            context->CopyResource(target->texture.Get(),packedOutput.Get());
+        }
         context->OMSetRenderTargetsAndUnorderedAccessViews(1,&output,depth->view.Get(),0,D3D11_KEEP_UNORDERED_ACCESS_VIEWS,nullptr,nullptr);
-        context->CopyResource(target->texture.Get(),packedOutput.Get());
         context->RSSetViewports(savedViewportCount,savedViewports.data());
         context->OMSetDepthStencilState(postDepth.Get(),0);
         ID3D11Buffer* unbound=nullptr;UINT zero=0;context->IASetVertexBuffers(0,1,&unbound,&zero,&zero);
