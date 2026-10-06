@@ -83,7 +83,7 @@ struct Fixture {
         need(rt.handles.size()==handlesBeforeOwner+1,"Original retirement retained an unexplained handle");
         for(const auto& [id,handle]:rt.handles)
             need(handle==rt.mainThreadHandle,"Original retirement released its completion thread or retained another owner");
-        need(!FindWindowW(L"SimpsonsNativeStorageSelector",nullptr)&&IsWindowEnabled(rt.window->handle()),"Original retirement retained modal/window ownership");
+        need(!FindWindowExW(rt.window->handle(),nullptr,L"SimpsonsNativeStorageSelector",nullptr)&&IsWindowEnabled(rt.window->handle()),"Original retirement retained modal/window ownership");
         PPC_STORE_U32(0x82E31728,savedDriver);retired=true;
     }
     std::string auditText(){std::ifstream input(audit);return {std::istreambuf_iterator<char>(input),{}};}
@@ -95,44 +95,58 @@ struct Fixture {
         PPCContext c{};std::memset(&c,0xA5,sizeof(c));c.r13.u32=entry.r13.u32;c.r3.u64=0;c.r4.u64=1;c.r5.u64=0x300;c.r6.u64=requested;c.r7.u64=device;c.r8.u64=ov;return c;
     }
 };
-std::wstring text(HWND hwnd){const int n=GetWindowTextLengthW(hwnd);std::wstring value(size_t(n)+1,L'\0');
-    const int used=GetWindowTextW(hwnd,value.data(),n+1);need(used==n,"Native UI text read failed");value.resize(size_t(n));return value;}
-void capture(HWND hwnd,const fs::path& path){
-    RECT rect{};need(GetWindowRect(hwnd,&rect)!=FALSE,"UI capture extent failed");const int w=rect.right-rect.left,h=rect.bottom-rect.top;
-    HDC screen=GetDC(hwnd),memory=CreateCompatibleDC(screen);need(screen&&memory,"UI capture DC creation failed");
-    BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=w;info.bmiHeader.biHeight=-h;
-    info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
-    void* pixels{};HBITMAP bitmap=CreateDIBSection(screen,&info,DIB_RGB_COLORS,&pixels,nullptr,0);need(bitmap&&pixels,"UI capture bitmap creation failed");
-    const auto old=SelectObject(memory,bitmap);need(PrintWindow(hwnd,memory,0)!=FALSE,"Native UI PrintWindow failed");
-    BITMAPFILEHEADER header{};header.bfType=0x4D42;header.bfOffBits=sizeof(header)+sizeof(info.bmiHeader);header.bfSize=header.bfOffBits+DWORD(w*h*4);
-    std::ofstream output(path,std::ios::binary|std::ios::trunc);output.write(reinterpret_cast<const char*>(&header),sizeof(header));
-    output.write(reinterpret_cast<const char*>(&info.bmiHeader),sizeof(info.bmiHeader));output.write(static_cast<const char*>(pixels),w*h*4);output.close();
-    SelectObject(memory,old);DeleteObject(bitmap);DeleteDC(memory);ReleaseDC(hwnd,screen);need(bool(output),"Native UI capture write failed");
-}
-template<class Invoke>void drive(Fixture& f,Invoke&& invoke,const char* command,bool enabled,const fs::path& screenshot={},bool stop=false){
+template<class Invoke>void drive(Fixture& f,Invoke&& invoke,const char* command,bool enabled,const fs::path& screenshot={},bool stop=false,bool heldKeyboard=false){
+    if(!screenshot.empty())need(SetEnvironmentVariableW(L"SIMPSONS_STORAGE_CAPTURE",screenshot.c_str())!=FALSE,"UI capture request failed");
     std::exception_ptr error;std::jthread user([&]{HWND window=nullptr;try{
+        // Query and click in the same physical-pixel coordinates as the game
+        // and selector threads, including when Windows scales this monitor.
+        struct DpiContext {
+            DPI_AWARENESS_CONTEXT previous=SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            ~DpiContext(){if(previous)SetThreadDpiAwarenessContext(previous);}
+        } dpi;
+        need(dpi.previous!=nullptr,"UI fixture DPI context failed");
         const auto deadline=GetTickCount64()+5000;bool opened=false;
         while(GetTickCount64()<deadline){if(auto n=f.observed->read(9)){need(n->parameter==1,"Native UI did not publish an actual opening");opened=true;break;}Sleep(5);}
         need(opened,"Native UI did not open within bound");
-        window=FindWindowW(L"SimpsonsNativeStorageSelector",L"The Simpsons Game — Save storage");DWORD process{};
+        window=FindWindowExW(f.rt.window->handle(),nullptr,L"SimpsonsNativeStorageSelector",L"Save Storage");DWORD process{};
         need(window&&GetWindowThreadProcessId(window,&process)!=0&&process==GetCurrentProcessId()&&IsWindowVisible(window),"Actual owned native selector is not visible");
-        need(!IsWindowEnabled(f.rt.window->handle()),"Game window remained enabled behind a modal selector");
-        need(text(GetDlgItem(window,102))==f.rt.contentRoot.native(),"Selector displayed a different folder");
-        need(text(GetDlgItem(window,101))==L"Player: Player","Selector displayed a different local player");
-        need((IsWindowEnabled(GetDlgItem(window,IDOK))!=FALSE)==enabled,"Native selector capacity enablement differs");
-        RECT client{};GetClientRect(window,&client);
-        for(int id:{100,101,102,103,IDOK,IDCANCEL}){RECT r{};need(GetWindowRect(GetDlgItem(window,id),&r)!=FALSE,"Selector control is absent");
-            MapWindowPoints(nullptr,window,reinterpret_cast<POINT*>(&r),2);
-            need(r.left>=0&&r.top>=0&&r.right<=client.right&&r.bottom<=client.bottom&&r.right>r.left&&r.bottom>r.top,"Selector control escapes its client layout");}
-        if(!screenshot.empty())capture(window,screenshot);
+        need(GetParent(window)==f.rt.window->handle()&&IsWindowEnabled(f.rt.window->handle()),"Storage screen is not inside its enabled game owner");
+        const auto style=GetWindowLongPtrW(window,GWL_STYLE);
+        need((style&WS_CHILD)&&!(style&WS_CAPTION)&&!GetDlgItem(window,IDOK),"Storage screen retained decorated dialog controls");
+        RECT client{},parent{},bounds{};need(GetClientRect(window,&client)&&GetClientRect(f.rt.window->handle(),&parent)&&GetWindowRect(window,&bounds),"UI extent query failed");
+        MapWindowPoints(nullptr,f.rt.window->handle(),reinterpret_cast<POINT*>(&bounds),2);
+        if(!EqualRect(&client,&parent)||!EqualRect(&bounds,&parent))std::fprintf(stderr,
+            "[STORAGE EXTENT] child=%ld,%ld,%ld,%ld parent=%ld,%ld,%ld,%ld mapped=%ld,%ld,%ld,%ld\n",
+            client.left,client.top,client.right,client.bottom,parent.left,parent.top,parent.right,parent.bottom,
+            bounds.left,bounds.top,bounds.right,bounds.bottom);
+        need(EqualRect(&client,&parent)&&EqualRect(&bounds,&parent),"Storage screen does not cover the game client");
+        if(!screenshot.empty())need(fs::file_size(screenshot)==sizeof(BITMAPFILEHEADER)+sizeof(BITMAPINFOHEADER)+size_t(client.right)*size_t(client.bottom)*4,"GPU screen capture is absent or truncated");
         if(stop){f.rt.requestStop("Storage UI cancellation fixture");return;}
+        if(heldKeyboard){
+            SendMessageW(f.rt.window->handle(),WM_KEYDOWN,VK_SPACE,LPARAM(1)<<30);
+            Sleep(80);need(IsWindowVisible(window)!=FALSE,"Held initiating Space auto-repeat accepted storage before release");
+            f.rt.window->keyboard->key(VK_SPACE,false);Sleep(40);
+        }
         if(!enabled){SendMessageW(window,WM_COMMAND,IDOK,0);need(IsWindowVisible(window)!=FALSE,"Insufficient-capacity folder was selected");}
         XINPUT_STATE state{};for(int i=0;i<10;++i)need(f.rt.controllers->state(0,state)==0&&!state.Gamepad.wButtons,"Game input escaped the modal selector");
+        if(!std::strcmp(command,"mouse-accept")||!std::strcmp(command,"mouse-cancel")){
+            const int x=client.right/2,y=MulDiv(!std::strcmp(command,"mouse-accept")?480:537,client.bottom,720);
+            SendMessageW(window,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(x,y));return;
+        }
+        if(!std::strcmp(command,"keyboard-row-cancel")){
+            SendMessageW(f.rt.window->handle(),WM_SETFOCUS,0,0);
+            SendMessageW(f.rt.window->handle(),WM_KEYDOWN,'S',0);Sleep(80);
+            SendMessageW(f.rt.window->handle(),WM_KEYUP,'S',0);Sleep(40);
+            SendMessageW(f.rt.window->handle(),WM_KEYDOWN,VK_RETURN,0);Sleep(80);
+            SendMessageW(f.rt.window->handle(),WM_KEYUP,VK_RETURN,0);
+            f.rt.window->keyboard->focus(false);return;
+        }
         f.append(command);
     }catch(...){error=std::current_exception();if(window)PostMessageW(window,WM_CLOSE,0,0);f.rt.requestStop("Native storage UI fixture failed");}});
     std::exception_ptr invocation;try{invoke();}catch(...){invocation=std::current_exception();}
-    user.join();if(error)std::rethrow_exception(error);if(invocation)std::rethrow_exception(invocation);
-    need(FindWindowW(L"SimpsonsNativeStorageSelector",nullptr)==nullptr&&IsWindowEnabled(f.rt.window->handle()),"Native selector leaked its window/disabled owner");
+    user.join();if(!screenshot.empty())SetEnvironmentVariableW(L"SIMPSONS_STORAGE_CAPTURE",nullptr);
+    if(error)std::rethrow_exception(error);if(invocation)std::rethrow_exception(invocation);
+    need(FindWindowExW(f.rt.window->handle(),nullptr,L"SimpsonsNativeStorageSelector",nullptr)==nullptr&&IsWindowEnabled(f.rt.window->handle()),"Native selector leaked its child window or changed its owner's enablement");
     const auto closed=f.observed->read(9);need(closed&&closed->parameter==0&&!f.observed->read(9),"Native UI did not publish exactly one paired closing");
 }
 void original(Fixture& f,const fs::path& screenshot,uint32_t flagPair=3){
@@ -158,8 +172,46 @@ void original(Fixture& f,const fs::path& screenshot,uint32_t flagPair=3){
         "Original selector prevalidation receipt omitted producer/ownership context");
     std::printf("[ORIGINAL STORAGE FLAGS] flags=%03X constructor/setters/request/modal/open+close polls passed; device=1 completion=0 caller=8285CF64\n",flagPair<<8);
 }
+void saveRootResolution(Fixture& f){
+    const auto originalGameRoot=f.rt.gameRoot,explicitRoot=f.rt.contentRoot;
+    const auto launchRoot=f.temp.root/L"private-game-root";
+    const auto defaultRoot=launchRoot/L"saves";
+    f.rt.gameRoot=launchRoot/L"Simpsons Game, The (USA)";
+    need(fs::create_directories(f.rt.gameRoot)&&fs::create_directory(defaultRoot),"Default save destination fixture creation failed");
+    for(bool explicitOverride:{false,true}){
+        f.rt.contentRoot=explicitOverride?explicitRoot:fs::path{};
+        f.rt.resourceAudit.action(explicitOverride?"explicit private content override":"default sibling save directory");
+        const auto before=f.auditText();auto c=f.prepare();
+        drive(f,[&]{__imp__XamShowDeviceSelectorUI(c,f.rt.base);},"A\n",true);
+        auto* base=f.rt.base;
+        need(c.r3.u64==ERROR_IO_PENDING&&PPC_LOAD_U32(device)==1&&!PPC_LOAD_U32(ov)&&!PPC_LOAD_U32(ov+0x18),
+            "Resolved native save folder did not complete the accepted choice");
+        const auto after=f.auditText();need(after.starts_with(before),"Save destination audit lost earlier receipts");
+        const auto segment=after.substr(before.size());
+        const auto& expected=explicitOverride?explicitRoot:defaultRoot;
+        const auto& excluded=explicitOverride?defaultRoot:explicitRoot;
+        need(segment.find("\"asset\":\""+expected.generic_string()+"\"")!=std::string::npos&&
+            segment.find("\"asset\":\""+excluded.generic_string()+"\"")==std::string::npos,
+            "Storage selector audited a different folder than its default or explicit private override");
+        need(fs::is_empty(defaultRoot)&&fs::is_empty(explicitRoot)&&!fs::exists(launchRoot/L"userdata"),
+            "Save destination selection created save data or used the old default directory");
+    }
+    f.rt.gameRoot=originalGameRoot;f.rt.contentRoot=explicitRoot;
+    f.rt.resourceAudit.action("original construct/request/modal/poll/release");
+    std::printf("Storage destination: accepted sibling saves default and explicit private override with exact folder audit; no save data written\n");
+}
 void contracts(Fixture& f){
+    saveRootResolution(f);
     auto* base=f.rt.base;const auto saved=PPCFPSCRRegister::getcsr();
+    f.rt.window->keyboard->focus(true);f.rt.window->keyboard->key(VK_SPACE,true);
+    auto held=f.prepare();drive(f,[&]{__imp__XamShowDeviceSelectorUI(held,base);},"A\n",true,{},false,true);
+    need(PPC_LOAD_U32(device)==1&&!PPC_LOAD_U32(ov),"Fresh selection after releasing initiating key failed");
+    f.rt.window->keyboard->focus(false);
+    for(const auto command:{"mouse-accept","mouse-cancel","keyboard-row-cancel"}){
+        auto c=f.prepare();drive(f,[&]{__imp__XamShowDeviceSelectorUI(c,base);},command,true);
+        const bool accepted=!std::strcmp(command,"mouse-accept");
+        need(PPC_LOAD_U32(device)==unsigned(accepted)&&PPC_LOAD_U32(ov)==(accepted?0:ERROR_CANCELLED),"In-game pointer/keyboard row choice returned the wrong completion");
+    }
     for(uint32_t fp:{0x1F80u,0x3FC0u,0x5F80u,0x9FC0u,0xE07Fu}){
         auto c=f.prepare();PPCContext expected;std::memcpy(&expected,&c,sizeof(c));expected.r3.u64=997;
         drive(f,[&]{PPCFPSCRRegister::restoreHostCSR(fp);SetLastError(0x12345678);__imp__XamShowDeviceSelectorUI(c,base);
@@ -175,7 +227,7 @@ void contracts(Fixture& f){
         std::array<uint8_t,0x2C> bytes{};std::memcpy(bytes.data(),f.rt.pointer(ov-8,unsigned(bytes.size()),false),bytes.size());const auto originalDevice=PPC_LOAD_U32(device);
         bool failed=false;try{__imp__XamShowDeviceSelectorUI(value,base);}catch(const Failure&){failed=true;}
         need(failed&&!std::memcmp(&value,&before,sizeof(value))&&!std::memcmp(bytes.data(),f.rt.pointer(ov-8,unsigned(bytes.size()),false),bytes.size())&&PPC_LOAD_U32(device)==originalDevice,
-            "Rejected selector changed CPU/output bytes");need(!FindWindowW(L"SimpsonsNativeStorageSelector",nullptr)&&!f.observed->read(9),"Rejected selector showed a UI");};
+            "Rejected selector changed CPU/output bytes");need(!FindWindowExW(f.rt.window->handle(),nullptr,L"SimpsonsNativeStorageSelector",nullptr)&&!f.observed->read(9),"Rejected selector showed a UI");};
     c=f.prepare();c.r3.u32=4;rejects(c);c=f.prepare();c.r4.u32=2;rejects(c);
     for(uint32_t bit:{1u,0x400u,0x80000000u}){c=f.prepare();c.r5.u32|=bit;rejects(c);}
     c=f.prepare();c.r7.u32=ov;rejects(c);c=f.prepare();c.r8.u32=0x40000;rejects(c);
@@ -194,6 +246,6 @@ int main(int argc,char** argv){try{
     for(uint32_t pair=0;pair<4;++pair)original(f,argc==3&&pair==3?fs::path(argv[2]):fs::path{},pair);
     contracts(f);f.retire();
     auto c=f.prepare();bool cancelled=false;try{drive(f,[&]{__imp__XamShowDeviceSelectorUI(c,f.rt.base);},"",true,{},true);}catch(const Failure&){cancelled=true;}
-    need(cancelled&&f.rt.stopping&&!FindWindowW(L"SimpsonsNativeStorageSelector",nullptr)&&IsWindowEnabled(f.rt.window->handle()),"Stop did not retire actual native UI ownership");
+    need(cancelled&&f.rt.stopping&&!FindWindowExW(f.rt.window->handle(),nullptr,L"SimpsonsNativeStorageSelector",nullptr)&&IsWindowEnabled(f.rt.window->handle()),"Stop did not retire actual native UI ownership");
     std::printf("PASS native storage selector:%zu checks; real visible UI, file commands, native directory/capacity, original request/poll/notifications, cancellation and CPU/host state\n",checks.load());return 0;
 }catch(const std::exception& error){std::fprintf(stderr,"FAIL native storage selector:%s\n",error.what());return 1;}}

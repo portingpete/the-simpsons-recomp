@@ -1,5 +1,6 @@
 #include "runtime.h"
 #include "ppc_recomp_shared.h"
+#include "stall_profiler.h"
 namespace Simpsons {
 namespace {
 // Keep SEH in separate functions: the C++ wrapper owns FP restoration even
@@ -15,6 +16,7 @@ uint32_t runThreadEntryChecked(PPCContext& ctx,uint8_t* base,uint32_t address) {
 }
 int runOriginal(PPCContext& ctx,uint8_t* base) {
     PPCGuestFloatingPointScope floatingPoint(ctx.fpscr);
+    StallProfiler::ThreadScope profiling(&ctx,true);
     try {
         const auto result=runOriginalChecked(ctx,base);
         if(result==3) unwindAudioReaderCall(ctx);
@@ -23,6 +25,7 @@ int runOriginal(PPCContext& ctx,uint8_t* base) {
 }
 uint32_t runThreadEntry(PPCContext& ctx,uint8_t* base,uint32_t address) {
     PPCGuestFloatingPointScope floatingPoint(ctx.fpscr);
+    StallProfiler::ThreadScope profiling(&ctx);
     try {return runThreadEntryChecked(ctx,base,address);}
     catch(...) {unwindAudioReaderCall(ctx);throw;}
 }

@@ -1,4 +1,5 @@
 #include "runtime.h"
+#include "stall_profiler.h"
 #include <cstdio>
 #include <cstring>
 
@@ -46,6 +47,32 @@ struct EventHostState {
     EventHostState(){PPCFPSCRRegister::restoreHostCSR(PPCFPSCRRegister::DefaultCSR);}
     ~EventHostState(){PPCFPSCRRegister::restoreHostCSR(fp);SetLastError(error);}
 };
+bool diagnosticStackWord(const Simpsons::Runtime& rt,uint32_t address,uint32_t& value) noexcept {
+    // Guest stacks use the direct virtual mapping. Two bounded reads are enough
+    // to recover this ABI's saved LR; never probe aliases or throw on bad frames.
+    if(!rt.base || (address&3u) || address<0x10000u || address>=0x82000000u ||
+        !(rt.pageAccess.load(address>>12,std::memory_order_acquire)&1u)) return false;
+    const auto* bytes=rt.base+address;
+    value=(uint32_t(bytes[0])<<24)|(uint32_t(bytes[1])<<16)|(uint32_t(bytes[2])<<8)|bytes[3];
+    return true;
+}
+uint32_t diagnosticCaller(const Simpsons::Runtime& rt,const PPCContext& ctx) noexcept {
+    const uint32_t stack=ctx.r1.u32;
+    uint32_t previous{},caller{};
+    if((stack&15u) || !diagnosticStackWord(rt,stack,previous) || (previous&15u) ||
+        previous<=stack || uint64_t(previous)-stack>0x10000u ||
+        !diagnosticStackWord(rt,previous-8u,caller)) return 0;
+    // An original call site must be aligned and in mapped original code. A
+    // malformed or unavailable frame is recorded as unknown, never repaired.
+    return !(caller&3u) && caller>=0x82000000u && caller<0xa0000000u &&
+        (rt.pageAccess.load(caller>>12,std::memory_order_acquire)&1u)?caller:0;
+}
+uint64_t diagnosticOwner(uint32_t caller) noexcept {
+    const DWORD error=GetLastError();
+    const uint64_t owner=(uint64_t(GetCurrentThreadId())<<32)|caller;
+    SetLastError(error);
+    return owner;
+}
 Simpsons::Runtime& eventRuntime(uint8_t* base) {
     if(!Simpsons::active || base!=Simpsons::active->base)throw Simpsons::Failure("Invalid native event runtime");
     Simpsons::active->checkRunning();return *Simpsons::active;
@@ -103,6 +130,8 @@ PPC_FUNC(__imp__NtCreateMutant) {
         std::shared_ptr<Simpsons::KernelHandle> object;
         try {object=std::make_shared<Simpsons::KernelHandle>(handle,Simpsons::KernelHandle::Type::Mutant);}
         catch(...) {CloseHandle(handle);throw;}
+        if(Simpsons::StallProfiler::enabled && ctx.r5.u32)
+            object->stallMutantOwner.store(diagnosticOwner(diagnosticCaller(rt,ctx)),std::memory_order_relaxed);
         const uint32_t id=rt.addHandle(std::move(object));
         PPC_STORE_U32(output,id);
         std::fprintf(stderr,"[OBJECT] native mutant handle=0x%X initial_owner=%u\n",id,ctx.r5.u32!=0);
@@ -121,7 +150,16 @@ PPC_FUNC(__imp__NtReleaseMutant) {
     static auto release=native<NtReleaseMutantFn>("NtReleaseMutant");
     // Guest threads have dedicated native threads. Windows supplies recursive
     // ownership, non-owner rejection and abandonment on actual thread exit.
-    ctx.r3.u64=uint32_t(release(object->native,nullptr));
+    const bool profile=Simpsons::StallProfiler::enabled;
+    uint64_t observed=profile?object->stallMutantOwner.load(std::memory_order_relaxed):0;
+    LONG previous{};
+    const LONG status=release(object->native,profile?&previous:nullptr);
+    // A native mutant's count is zero at its final owned level and negative
+    // while recursively owned. Only observe the optional host previous-count
+    // output; guest r4 remains reserved, with no guest memory output.
+    if(profile && status>=0 && previous==0)
+        object->stallMutantOwner.compare_exchange_strong(observed,0,std::memory_order_relaxed);
+    ctx.r3.u64=uint32_t(status);
 }
 
 PPC_FUNC(__imp__NtCreateSemaphore) {
@@ -161,7 +199,22 @@ PPC_FUNC(__imp__NtWaitForSingleObjectEx) {
     if(ctx.r6.u32) timeout.QuadPart=int64_t(PPC_LOAD_U64(ctx.r6.u32));
     static auto wait=native<NtWaitMultipleFn>("NtWaitForMultipleObjects");
     HANDLE waited[]={object->native,Simpsons::active->stopEvent};
+    const bool profileMutant=Simpsons::StallProfiler::enabled && object->type==Simpsons::KernelHandle::Type::Mutant;
+    const uint64_t ownerAtEntry=profileMutant?object->stallMutantOwner.load(std::memory_order_relaxed):0;
+    const uint32_t waitCaller=profileMutant?diagnosticCaller(*Simpsons::active,ctx):0;
+    Simpsons::StallProfiler::Scope waitProfile(Simpsons::StallProfiler::Section::Wait,"NtWaitForSingleObjectEx",&ctx,ctx.r3.u32);
     LONG status=wait(2,waited,1,ctx.r5.u32!=0,ctx.r6.u32?&timeout:nullptr);
+    if(profileMutant) {
+        if(status==0 || status==0x80) {
+            const uint64_t acquired=diagnosticOwner(waitCaller);
+            // Keep the original acquisition call site during recursive entry.
+            // Abandonment always replaces the departed native owner's record.
+            if(status==0x80 || uint32_t(object->stallMutantOwner.load(std::memory_order_relaxed)>>32)!=uint32_t(acquired>>32))
+                object->stallMutantOwner.store(acquired,std::memory_order_relaxed);
+        }
+        waitProfile.setWaitDetails(uint32_t(ownerAtEntry>>32),uint32_t(ownerAtEntry),waitCaller,uint32_t(status));
+    }
+    waitProfile.finish();
     // Guest APC enqueue/completion services currently fail explicitly; the
     // modeled guest queue is empty. Never misreport an unknown host APC as a
     // delivered guest callback if another component introduces one.

@@ -2,6 +2,7 @@
 #include "native_window.h"
 #include "checked_running.h"
 #include "thread_placement.h"
+#include "stall_profiler.h"
 #include "ppc_image_metadata.h"
 #include <algorithm>
 #include <bit>
@@ -140,7 +141,10 @@ GuestThread::~GuestThread() {
         }
         // finished is published before the OS thread epilogue/TLS teardown.
         // Never destroy its context or close its gate until the HANDLE signals.
-        if(WaitForSingleObject(native,INFINITE)!=WAIT_OBJECT_0) {
+        StallProfiler::Scope joinProfile(StallProfiler::Section::Wait,"GuestThread::~GuestThread.join",nullptr,reinterpret_cast<uintptr_t>(native));
+        const DWORD joined=WaitForSingleObject(native,INFINITE);
+        joinProfile.finish();
+        if(joined!=WAIT_OBJECT_0) {
             fprintf(stderr,"[THREAD FAILURE] Cannot safely destroy an unjoined native worker\n");
             std::terminate();
         }
@@ -176,7 +180,9 @@ void Runtime::stopThreads() {
         if(!thread || !thread->native || thread->native==INVALID_HANDLE_VALUE) continue;
         // Cancellation is polled at original function entry and in waits, so a guest
         // thread spinning in a call-free loop cannot observe it: bound the join.
+        StallProfiler::Scope joinProfile(StallProfiler::Section::Wait,"Runtime::stopThreads.join",nullptr,reinterpret_cast<uintptr_t>(thread->native));
         DWORD result=WaitForSingleObject(thread->native,20000);
+        joinProfile.finish();
         if(result==WAIT_TIMEOUT) {
             fprintf(stderr,"[THREAD FAILURE] A guest thread did not observe cancellation within 20 s; terminating the process"); fputc(10,stderr);
             fflush(stderr);
@@ -211,7 +217,10 @@ void Runtime::initializeThread(PPCContext& ctx,uint32_t pcr,uint32_t thread,uint
 static DWORD WINAPI threadMain(void* argument) {
     auto& thread=*static_cast<GuestThread*>(argument);
     auto& rt=*thread.runtime;
-    if(WaitForSingleObject(thread.startEvent,INFINITE)!=WAIT_OBJECT_0) {
+    StallProfiler::Scope gateProfile(StallProfiler::Section::Wait,"GuestThread.startGate",&thread.context,reinterpret_cast<uintptr_t>(thread.startEvent));
+    const DWORD started=WaitForSingleObject(thread.startEvent,INFINITE);
+    gateProfile.finish();
+    if(started!=WAIT_OBJECT_0) {
         rt.requestStop("Native worker creation gate wait failed");thread.finished=true;return 1;
     }
     if(thread.cancelled) {thread.finished=true;return 0;}

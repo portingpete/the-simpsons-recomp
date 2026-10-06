@@ -6,6 +6,7 @@
 #include "engine_cpu_calls.h"
 #include "engine_im2d_program.h"
 #include "frame_timing.h"
+#include "stall_profiler.h"
 #include "engine_state_bridge.h"
 #include "engine_dynamic_buffers.h"
 #include "engine_materials.h"
@@ -45,6 +46,7 @@
 #include <cstdio>
 #include <unordered_set>
 #include <algorithm>
+#include <condition_variable>
 #include <chrono>
 // Keep this last: shared header bodies retain their normal definitions.
 #include "aot_inline_memory.h"
@@ -114,6 +116,15 @@ struct EngineDriver::State {
     const uint32_t thread,engine,width,height;
     FrameTiming timing;
     Graphics::NativeBackend backend;
+    // Original storage requests execute on their own native worker. The
+    // renderer services this one-shot request at a real present boundary.
+    std::atomic<bool> menuFrameRequested=false;
+    std::mutex menuFrameMutex;
+    std::condition_variable menuFrameReady;
+    bool menuFrameWaiting=false,menuFrameCompleted=false;
+    uint32_t menuFrameWidth{},menuFrameHeight{};
+    std::vector<uint8_t> menuFramePixels;
+    std::exception_ptr menuFrameError;
     Graphics::StartupResources resources;
     std::unique_ptr<EngineScratchResources> scratch;
     std::unique_ptr<EngineRenderState> renderState;
@@ -183,7 +194,7 @@ struct EngineDriver::State {
     } screenEffect;
     uint32_t effectShadow{},effectStaging{};
     std::array<uint64_t,7> screenEffectDraws{};
-    std::array<uint64_t,3> screenEffectSuppressed{};
+    std::array<uint64_t,7> screenEffectSuppressed{};
     // Native sampler for a screen-effect stage from the effective state: the
     // original clamp fields must be applied; filters follow the SDK setters.
     D3D11_SAMPLER_DESC screenEffectSampler(const Graphics::EngineState& ef,uint32_t stage) const {
@@ -3070,8 +3081,23 @@ void EngineDriver::present(PPCContext& incoming,uint8_t* base,uint32_t raster) {
             fprintf(stderr,"[NATIVE CAPTURE] preserved completed front readback draws=%llu display=%s; no color correction or overlays\n",
                 static_cast<unsigned long long>(draws),record.displayAccepted?"accepted":"occluded");
         }
+        if(s.menuFrameRequested.load(std::memory_order_acquire)) {
+            std::lock_guard lock(s.menuFrameMutex);
+            if(s.menuFrameRequested.load(std::memory_order_relaxed)) {
+                uint32_t frameWidth{},frameHeight{};
+                auto pixels=readbackMenuFrame(frameWidth,frameHeight);
+                s.menuFrameWidth=frameWidth;s.menuFrameHeight=frameHeight;
+                s.menuFramePixels=std::move(pixels);s.menuFrameCompleted=true;
+                s.menuFrameRequested.store(false,std::memory_order_release);
+                s.menuFrameReady.notify_one();
+            }
+        }
         presentTimer.finish();s.timing.frame(s.frontCopies,record.displayAccepted);
     } catch(...) {
+        if(s.menuFrameRequested.load(std::memory_order_acquire)) {
+            std::lock_guard lock(s.menuFrameMutex);s.menuFrameError=std::current_exception();
+            s.menuFrameCompleted=true;s.menuFrameReady.notify_one();
+        }
         s.presenting=false;s.ready=false;
         s.runtime.requestStop("Native presentation failed after front-role/GPU publication");
         throw; // Keep submitted leases until terminal GPU retirement; no fabricated CPU/GPU rollback.
@@ -3082,6 +3108,47 @@ double EngineDriver::renderAspect() const {state->requireCaller(state->runtime.b
 void EngineDriver::setUiDrawing(bool drawing) {state->requireCaller(state->runtime.base);state->uiDrawing=drawing;}
 uint64_t EngineDriver::presentationAttemptCount() const {state->requireCaller(state->runtime.base);return state->presentAttempts;}
 uint64_t EngineDriver::frontCopyCount() const {state->requireCaller(state->runtime.base);return state->frontCopies;}
+std::vector<uint8_t> EngineDriver::readbackMenuFrame(uint32_t& width,uint32_t& height) {
+    auto& s=*state;
+    if(GetCurrentThreadId()!=s.thread) {
+        StallProfiler::Scope menuLock(StallProfiler::Section::Wait,"EngineDriver::readbackMenuFrame mutex",currentContext,
+            uint64_t(reinterpret_cast<uintptr_t>(&s.menuFrameMutex)));
+        std::unique_lock lock(s.menuFrameMutex);s.runtime.checkRunning();
+        menuLock.finish();
+        if(s.menuFrameWaiting)throw Failure("Native menu background already has a requester");
+        s.menuFrameWaiting=true;s.menuFrameCompleted=false;s.menuFrameError=nullptr;s.menuFramePixels.clear();
+        s.menuFrameRequested.store(true,std::memory_order_release);
+        struct Retire {State& owner;~Retire(){owner.menuFrameWaiting=false;owner.menuFrameRequested.store(false,std::memory_order_release);}} retire{s};
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+        StallProfiler::Scope menuWait(StallProfiler::Section::Wait,"EngineDriver::readbackMenuFrame completion",currentContext,
+            uint64_t(reinterpret_cast<uintptr_t>(&s.menuFrameReady)));
+        while(!s.menuFrameCompleted) {
+            s.menuFrameReady.wait_for(lock,std::chrono::milliseconds(16));s.runtime.checkRunning();
+            if(std::chrono::steady_clock::now()>=deadline&&!s.menuFrameCompleted)
+                throw Failure("Native menu background request did not reach a presentation within five seconds");
+        }
+        menuWait.finish();
+        if(s.menuFrameError)std::rethrow_exception(s.menuFrameError);
+        width=s.menuFrameWidth;height=s.menuFrameHeight;return std::move(s.menuFramePixels);
+    }
+    s.requireCaller(s.runtime.base);
+    if(!s.ready || s.presenting || !s.presentAttempts)
+        throw Failure("Native menu background requires an ended presented frame");
+    s.completePendingPresentation();bool alphaOne=false;
+    const auto front=color(s.frontRoles[1],alphaOne);
+    if(!alphaOne || front->format!=Graphics::TargetFormat::RGB10A2)
+        throw Failure("Native menu background is not an owned RGB10A2 front");
+    width=front->pixelWidth();height=front->pixelHeight();
+    auto pixels=s.backend.readbackTarget(front);
+    if(pixels.size()!=size_t(width)*height*4)throw Failure("Native menu background extent differs");
+    for(size_t i=0;i<pixels.size();i+=4){
+        uint32_t packed{};std::memcpy(&packed,pixels.data()+i,4);
+        pixels[i]=uint8_t((packed&1023)*255/1023);
+        pixels[i+1]=uint8_t(((packed>>10)&1023)*255/1023);
+        pixels[i+2]=uint8_t(((packed>>20)&1023)*255/1023);pixels[i+3]=255;
+    }
+    return pixels;
+}
 bool EngineDriver::submissionCompleted(uint32_t receipt) const {
     state->requireCaller(state->runtime.base);
     const auto found=state->runtime.graphicsPresentReceipts.find(receipt);
@@ -3552,7 +3619,7 @@ void EngineDriver::drawIm2D(PPCContext& c,uint8_t* base) {
     if(draw.depthTest && (!depth || PPC_LOAD_U32(0x82E3DD08)!=0x1A220197))
         throw Failure("Original Im2D enabled depth requires the qualified D24FS8 working surface");
     draw.stencil=effective.scalar(S::StencilEnable)!=0;
-    draw.preserveAspect=s.uiDrawing;
+    draw.preserveAspect=s.uiDrawing && !Graphics::isFullCanvasUiFill(draw);
     if(raster) {
         draw.sampler.Filter=D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
         draw.sampler.AddressU=checked.sampler->addressU==2?D3D11_TEXTURE_ADDRESS_CLAMP:D3D11_TEXTURE_ADDRESS_WRAP;
@@ -3570,9 +3637,11 @@ void EngineDriver::drawIm2D(PPCContext& c,uint8_t* base) {
     // Substitute only the submitted UI draw. The original atlas remains bound
     // in the engine cache, so device changes cannot invalidate binding checks.
     if(raster && s.itxdTextures && s.runtime.controllers && s.runtime.controllers->usesKeyboardMouse()) {
-        if(auto prompts=s.itxdTextures->inputPromptTexture(base,raster)) {
+        const auto* controls=s.runtime.window&&!s.runtime.window->isMenuMouse()?&s.runtime.controlSettings:nullptr;
+        if(auto prompts=s.itxdTextures->inputPromptTexture(base,raster,controls)) {
             draw.texture=std::move(prompts);
-            Graphics::enlargeInputPromptGlyphs(draw);
+            if(controls)Graphics::enlargeInputPromptGlyphs(draw,Graphics::keyboardMousePromptLayout(*controls));
+            else Graphics::enlargeInputPromptGlyphs(draw);
         }
     }
     s.backend.setViewport({0,0,float(binding.viewport[2]),float(binding.viewport[3]),0,1});
@@ -4107,6 +4176,10 @@ void EngineDriver::screenEffectOperation(PPCContext& c,uint8_t* base,uint32_t si
     if(!fx.cpu) {
         // Blur's first activation primes its history through the final resolve only.
         need(e.order==0||(e.op==Op::Resolve&&last),"pass entered at an unqualified endpoint");
+        if(s.luma.cpu||s.postFilter.cpu||s.distortion.cpu||s.ballEffect.cpu||s.im2d.active||s.directSprite.active||s.coronaQueries.active)
+            std::fprintf(stderr,"[NATIVE SCREEN EFFECT SCOPE] site=%08X luma=%u post=%u distortion=%u ball=%u im2d=%u sprite=%u corona=%u\n",
+                site,unsigned(bool(s.luma.cpu)),unsigned(bool(s.postFilter.cpu)),unsigned(bool(s.distortion.cpu)),unsigned(bool(s.ballEffect.cpu)),
+                unsigned(s.im2d.active),unsigned(s.directSprite.active),unsigned(s.coronaQueries.active));
         need(!s.luma.cpu&&!s.postFilter.cpu&&!s.distortion.cpu&&!s.ballEffect.cpu&&!s.im2d.active&&!s.directSprite.active&&!s.coronaQueries.active,
              "pass overlaps another native scope");
         const auto camera=cameraBinding();
@@ -4198,7 +4271,8 @@ void EngineDriver::screenEffectOperation(PPCContext& c,uint8_t* base,uint32_t si
         // every resolve. Blur's final resolve therefore keeps history current
         // while disabled; enabling it never reuses a stale pre-toggle frame.
         const auto& settings=s.runtime.videoSettings;
-        const bool submit=fx.pass==0?settings.depthOfField:fx.pass==1?settings.motionBlur:fx.pass==2?settings.bloom:true;
+        const bool submit=fx.pass==0?settings.depthOfField:fx.pass==1?settings.motionBlur:fx.pass==2?settings.bloom:
+            fx.pass==3?settings.atmosphericFog:fx.pass==4?settings.colorGrading:fx.pass==5?settings.cinematicLetterbox:true;
         s.backend.drawPostFilter(fx.main,d,submit);
         static constexpr const char* names[]{"dof","blur","bloom","fog","sat","letterbox","overlay"};
         if(submit){const auto draws=++s.screenEffectDraws[fx.pass];
@@ -4480,11 +4554,15 @@ bool SimpsonsNativeDriverRequest(PPCContext& ctx,uint8_t* base) {
         if(active->engineDriver) throw Failure("Native engine already owns a driver lifetime");
         observeRegistry(base);
         auto driver=std::make_shared<EngineDriver>(*active,PPC_LOAD_U32(0x82E3DF84),PPC_LOAD_U32(0x82E3DF88));
-        driver->start(ctx,base);active->engineDriver=std::move(driver);ctx.r3.u32=1;return true;
+        driver->start(ctx,base);
+        {std::lock_guard lifetime(active->engineDriverMutex);active->engineDriver=std::move(driver);}
+        ctx.r3.u32=1;return true;
     }
     case 3:
         if(!active->engineDriver) throw Failure("Original stop requested without a native driver owner");
-        active->engineDriver->stop(ctx,base);active->engineDriver.reset();ctx.r3.u32=1;return true;
+        active->engineDriver->stop(ctx,base);
+        {std::lock_guard lifetime(active->engineDriverMutex);active->engineDriver.reset();}
+        ctx.r3.u32=1;return true;
     case 8:
         ctx.r3.u32=active->engineDriver && active->engineDriver->started();return true;
     case 1:

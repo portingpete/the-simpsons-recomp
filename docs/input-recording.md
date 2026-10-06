@@ -37,6 +37,21 @@ recorded after keyboard/controller selection and movie/modal filtering; native
 dialog input is marked separately. Timestamps are elapsed monotonic microseconds,
 and sequence numbers count polls, not simulation frames.
 
+New version-one recordings also include `mouse_native`, `mouse_x` and `mouse_y`
+on each input row, identified by `mouse_camera` in the header. These capture raw
+relative mouse counts separately from the neutral fallback right stick, allowing
+the original camera's direct mouse path to replay. Only successful slot-zero game
+polls can carry native mouse data. Old recordings without these fields continue
+through the original controller path. Trimming a neutral prefix now checks mouse
+counts too; the approximate `--keyboard` replay requires direct input playback
+when raw mouse movement is present.
+
+Raw mouse fields describe the snapshot at the input poll. If focus, capture or
+menu ownership changes before the camera consumes that snapshot, live input
+discards it. That later invalidation is not recorded, so playback can apply the
+polled movement across such a transition. These fields do not promise an exact
+camera trajectory through focus or capture changes.
+
 Each complete line is written directly to Windows before the input call returns.
 A process crash does not require stopping the recorder to retain earlier lines.
 Power loss is not covered by that guarantee. Abrupt death may leave no `end`

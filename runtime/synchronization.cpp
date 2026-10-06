@@ -1,4 +1,5 @@
 #include "runtime.h"
+#include "stall_profiler.h"
 #include <algorithm>
 #include <chrono>
 
@@ -50,11 +51,14 @@ void publish(uint8_t* base,uint32_t address,const Simpsons::CriticalSection& sec
 bool acquire(PPCContext& ctx,uint8_t* base,bool onlyTry) {
     uint32_t address=ctx.r3.u32,thread=currentThread(ctx,base);
     auto section=getSection(base,address,false);
+    Simpsons::StallProfiler::Scope mutexProfile(Simpsons::StallProfiler::Section::Wait,onlyTry?"RtlTryEnterCriticalSection.mutex":"RtlEnterCriticalSection.mutex",&ctx,address);
     std::unique_lock lock(section->mutex);
+    mutexProfile.finish();
     if(PPC_LOAD_U32(address+20)!=section->recursion || PPC_LOAD_U32(address+24)!=section->owner)
         throw Simpsons::Failure("Guest modified native critical-section ownership outside its service boundary");
     if(section->owner && section->owner!=thread) {
         if(onlyTry) return false;
+        Simpsons::StallProfiler::Scope contentionProfile(Simpsons::StallProfiler::Section::Wait,"RtlEnterCriticalSection.contention",&ctx,address);
         ++section->waiters;
         publish(base,address,*section);
         try {

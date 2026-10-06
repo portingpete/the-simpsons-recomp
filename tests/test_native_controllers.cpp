@@ -168,6 +168,57 @@ void keyboardNavigationQueries(){
     nav=poll();need(nav.active,"Keyboard menu input did not resume after command stick release");
     keys.reset();need(!native->keyboardNavigation().active,"Retired window retained menu navigation");
 }
+void rebindQueries(){
+    samples={};auto native=source();auto keys=std::make_shared<Platform::NativeKeyboard>();native->attachKeyboard(keys);keys->focus(true);
+    XINPUT_STATE state{};
+    const auto poll=[&]()->const XINPUT_GAMEPAD& {need(native->state(0,state)==0,"Rebound keyboard disconnected");return state.Gamepad;};
+    auto controls=keys->controls();controls.setBinding(ControlAction::Jump,0,'V');controls.setBinding(ControlAction::MoveForward,0,'I');
+    keys->configureControls(controls);keys->key('V',true);
+    need(poll().wButtons==XINPUT_GAMEPAD_A,"Rebound keyboard jump did not reach the ordinary controller path");
+    keys->key('V',false);poll();keys->key(VK_SPACE,true);
+    need(!poll().wButtons,"Previous gameplay jump binding remained active after rebind");keys->key(VK_SPACE,false);poll();
+    keys->key('W',true);poll();const auto nav=native->keyboardNavigation();
+    need(!state.Gamepad.sThumbLY&&nav.held==XINPUT_GAMEPAD_DPAD_UP&&nav.pressed==XINPUT_GAMEPAD_DPAD_UP,"Fixed menu navigation followed a gameplay movement rebind");
+    keys->key('W',false);poll();keys->key('I',true);
+    need(poll().sThumbLY==32767&&!native->keyboardNavigation().held,"Rebound movement changed fixed menu navigation");keys->key('I',false);poll();
+    keys->menuMode(true);keys->key(VK_SPACE,true);need(poll().wButtons==XINPUT_GAMEPAD_A,"Gameplay rebind disabled fixed menu Space confirm");
+    keys->key(VK_SPACE,false);poll();keys->key('K',true);need(poll().wButtons==XINPUT_GAMEPAD_B,"Fixed menu cancel keyboard binding changed");keys->key('K',false);poll();
+    keys->key(VK_ESCAPE,true);need(poll().wButtons==XINPUT_GAMEPAD_B,"Escape did not use the native menu Back action");
+    keys->key(VK_ESCAPE,false);need(!poll().wButtons,"Menu Escape Back remained held after release");
+    {
+        const auto before=keys->controls();keys->beginRebind(ControlAction::Attack,1);keys->key(VK_ESCAPE,true);
+        need(keys->rebindActive()&&!poll().wButtons,"Capture Escape leaked native menu Back");
+        keys->key(VK_ESCAPE,false);const auto cancelled=keys->takeRebindResult();
+        need(cancelled&&cancelled->status==Platform::NativeRebindStatus::Cancelled&&keys->controls()==before&&!poll().wButtons,
+            "Capture Escape changed controls or replayed native menu Back");
+    }
+    keys->key(VK_RETURN,true);poll();keys->beginRebind(ControlAction::Jump,1);keys->key(VK_RETURN,true);
+    need(keys->rebindActive()&&!poll().wButtons&&!keys->takeRebindResult(),"Held menu confirm rebound itself or leaked into capture");
+    keys->key(VK_RETURN,false);keys->key('N',true);
+    need(keys->rebindActive()&&!poll().wButtons&&!keys->takeRebindResult(),"Captured key reached gameplay before release");
+    keys->key('N',false);auto result=keys->takeRebindResult();
+    need(result&&result->status==Platform::NativeRebindStatus::Bound&&result->action==ControlAction::Jump&&result->slot==1&&result->code=='N'&&!keys->rebindActive(),"Released key did not finish the requested binding");
+    keys->menuMode(false);need(!poll().wButtons,"Capture release left a pending gameplay tap");keys->key('N',true);need(poll().wButtons==XINPUT_GAMEPAD_A,"Captured binding did not activate after a fresh press");keys->key('N',false);poll();
+    keys->beginRebind(ControlAction::Attack,0);keys->key('N',true);keys->key('N',false);result=keys->takeRebindResult();
+    need(result&&result->status==Platform::NativeRebindStatus::Bound&&keys->controls().bindings[uint32_t(ControlAction::Jump)][1]=='J',"Binding conflict did not exchange actions");
+    keys->beginRebind(ControlAction::Jump,0);keys->key(VK_F6,true);result=keys->takeRebindResult();
+    need(result&&result->status==Platform::NativeRebindStatus::Rejected&&keys->rebindActive(),"Reserved hotkey was bound or ended capture");keys->key(VK_F6,false);
+    keys->mouseButton(VK_XBUTTON1,true);need(keys->rebindActive()&&!poll().wButtons,"Captured extra mouse button reached gameplay before release");
+    keys->mouseButton(VK_XBUTTON1,false);result=keys->takeRebindResult();
+    need(result&&result->status==Platform::NativeRebindStatus::Bound&&result->code==VK_XBUTTON1&&!poll().wButtons,"Mouse 4 did not finish as a consumed binding");
+    keys->mouseButton(VK_XBUTTON1,true);need(poll().wButtons==XINPUT_GAMEPAD_A,"Mouse 4 binding did not activate gameplay");keys->mouseButton(VK_XBUTTON1,false);poll();
+    keys->beginRebind(ControlAction::Jump,0);keys->key(VK_DELETE,true);keys->key(VK_DELETE,false);result=keys->takeRebindResult();
+    need(result&&result->status==Platform::NativeRebindStatus::Cleared&&!keys->controls().bindings[uint32_t(ControlAction::Jump)][0],"Delete did not clear the selected alias");
+    keys->beginRebind(ControlAction::Attack,0);const auto beforeCancel=keys->controls();keys->key(VK_ESCAPE,true);
+    need(keys->rebindActive()&&!poll().wButtons,"Escape cancel leaked pause during capture");keys->key(VK_ESCAPE,false);result=keys->takeRebindResult();
+    need(result&&result->status==Platform::NativeRebindStatus::Cancelled&&keys->controls()==beforeCancel&&!poll().wButtons,"Escape cancel changed bindings or replayed pause");
+    controls=keys->controls();controls.setBinding(ControlAction::Pause,0,0);keys->configureControls(controls);
+    keys->key(VK_ESCAPE,true);need(poll().wButtons==XINPUT_GAMEPAD_START,"Cleared Pause binding removed fixed Escape recovery");keys->key(VK_ESCAPE,false);poll();
+    keys->beginRebind(ControlAction::Attack,1);keys->focus(false);result=keys->takeRebindResult();
+    need(result&&result->status==Platform::NativeRebindStatus::Cancelled&&!keys->rebindActive()&&!poll().wButtons,"Focus loss retained capture ownership or input");
+    keys->focus(true);keys->beginRebind(ControlAction::Attack,1);keys->cancelRebind();result=keys->takeRebindResult();
+    need(result&&result->status==Platform::NativeRebindStatus::Cancelled&&!keys->rebindActive(),"Explicit capture cancellation did not release input");
+}
 void mouseQueries(){
     samples={};auto native=source();auto keys=std::make_shared<Platform::NativeKeyboard>();native->attachKeyboard(keys);
     XINPUT_STATE state{};
@@ -219,43 +270,46 @@ void mouseQueries(){
     need(poll().bLeftTrigger==255,"Short Ctrl press was lost");need(!poll().bLeftTrigger,"Short Ctrl release was lost");
     keys->mouseMotion(1,0);
     need(native->connectionStatus(0)==ERROR_SUCCESS&&native->connectionStatus(0)==ERROR_SUCCESS,"Connection probes lost the captured mouse source");
-    need(poll().sThumbRX>XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE&&state.Gamepad.sThumbRX<32767&&!state.Gamepad.sThumbRY,
-        "Gentle mouse motion remained inside the right-stick deadzone");
-    const auto gentleX=state.Gamepad.sThumbRX;
-    keys->mouseMotion(2,0);need(poll().sThumbRX>gentleX&&state.Gamepad.sThumbRX<32767,"Mouse response lost proportional magnitude");
+    need(!poll().sThumbRX&&!state.Gamepad.sThumbRY,"Native mouse still entered the controller camera curve");
+    need(native->takeMouseMotion()==Platform::NativeMouseMotion{true,1,0},"Gentle mouse displacement was lost or boosted");
+    need(native->takeMouseMotion()==Platform::NativeMouseMotion{true,0,0},"Mouse displacement was applied more than once");
+    keys->mouseMotion(2,0);poll();
+    need(native->takeMouseMotion()==Platform::NativeMouseMotion{true,2,0},"Mouse response lost proportional magnitude");
     keys->mouseMotion(2,-3);keys->mouseMotion(1,1);
     poll();
-    const auto directionError=int32_t(state.Gamepad.sThumbRX)*2-int32_t(state.Gamepad.sThumbRY)*3;
-    need(state.Gamepad.sThumbRX>0&&state.Gamepad.sThumbRY>0&&directionError>=-3&&directionError<=3,
-        "Relative mouse motion lost accumulated direction or Y inversion");
-    const auto motionPacket=state.dwPacketNumber;
-    need(!poll().sThumbRX&&!state.Gamepad.sThumbRY&&state.dwPacketNumber!=motionPacket,"Consumed mouse motion did not return to neutral with a new packet");
+    need(native->takeMouseMotion()==Platform::NativeMouseMotion{true,3,-2},"Relative mouse motion lost accumulated device counts");
+    need(!poll().sThumbRX&&!state.Gamepad.sThumbRY&&native->takeMouseMotion()==Platform::NativeMouseMotion{true,0,0},"Consumed mouse motion did not return to neutral");
     const auto neutralPacket=state.dwPacketNumber;
     poll();need(state.dwPacketNumber==neutralPacket,"Idle mouse changed the packet number");
-    keys->mouseMotion(INT32_MAX,0);
-    need(poll().sThumbRX==32767&&!state.Gamepad.sThumbRY,"Positive mouse saturation overflowed");
-    keys->mouseMotion(INT32_MIN,0);
-    need(poll().sThumbRX==-32768&&!state.Gamepad.sThumbRY,"Negative mouse saturation overflowed");
-    keys->mouseMotion(0,INT32_MIN);
-    need(!poll().sThumbRX&&state.Gamepad.sThumbRY==32767,"Upward mouse saturation overflowed");
-    keys->mouseMotion(0,INT32_MAX);
-    need(!poll().sThumbRX&&state.Gamepad.sThumbRY==-32768,"Downward mouse saturation overflowed");
+    keys->mouseMotion(400,40);keys->mouseMotion(-400,-40);poll();
+    need(native->takeMouseMotion()==Platform::NativeMouseMotion{true,0,0},"Opposing fast mouse packets did not cancel");
+    keys->mouseMotion(400,40);keys->mouseMotion(-100,-10);poll();
+    const auto segmented=native->takeMouseMotion();
+    keys->mouseMotion(300,30);poll();
+    need(segmented==native->takeMouseMotion()&&segmented==Platform::NativeMouseMotion{true,300,30},"Fast motion changed with packet grouping or diagonal direction");
+    keys->mouseMotion(INT32_MAX,0);keys->mouseMotion(1,0);poll();
+    need(native->takeMouseMotion()==Platform::NativeMouseMotion{true,INT32_MAX,0},"Positive mouse accumulation overflowed");
+    keys->mouseMotion(INT32_MIN,0);keys->mouseMotion(-1,0);poll();
+    need(native->takeMouseMotion()==Platform::NativeMouseMotion{true,INT32_MIN,0},"Negative mouse accumulation overflowed");
+    keys->mouseMotion(0,INT32_MIN);poll();
+    need(native->takeMouseMotion()==Platform::NativeMouseMotion{true,0,INT32_MIN},"Upward mouse counts overflowed");
+    keys->mouseMotion(0,INT32_MAX);poll();
+    need(native->takeMouseMotion()==Platform::NativeMouseMotion{true,0,INT32_MAX},"Downward mouse counts overflowed");
     keys->mouseMotion(INT32_MAX,INT32_MIN);poll();
-    const auto diagonalSquared=int64_t(state.Gamepad.sThumbRX)*state.Gamepad.sThumbRX+int64_t(state.Gamepad.sThumbRY)*state.Gamepad.sThumbRY;
-    need(state.Gamepad.sThumbRX>0&&state.Gamepad.sThumbRY>0&&diagonalSquared<=int64_t(32768)*32768,
-        "Diagonal mouse response exceeded the stick's radial range");
+    need(native->takeMouseMotion()==Platform::NativeMouseMotion{true,INT32_MAX,INT32_MIN},"Mouse diagonal was normalized to stick range");
     keys->mouseButton(VK_LBUTTON,true);keys->mouseButton(VK_RBUTTON,true);keys->mouseMotion(4,5);
     keys->captureMouse(false);
-    need(!poll().wButtons&&!state.Gamepad.bRightTrigger&&!state.Gamepad.sThumbRX&&!state.Gamepad.sThumbRY,"Capture release retained mouse input");
+    need(!poll().wButtons&&!state.Gamepad.bRightTrigger&&!native->takeMouseMotion().active,"Capture release retained mouse input");
     keys->captureMouse(true);keys->mouseButton(VK_MBUTTON,true);keys->mouseMotion(8,9);keys->key(VK_LCONTROL,true);
     keys->focus(false);
-    need(!poll().wButtons&&!state.Gamepad.bLeftTrigger&&!state.Gamepad.sThumbRX&&!state.Gamepad.sThumbRY,"Focus loss retained mouse or Ctrl input");
+    need(!poll().wButtons&&!state.Gamepad.bLeftTrigger&&!native->takeMouseMotion().active,"Focus loss retained mouse or Ctrl input");
     keys->focus(true);keys->mouseMotion(3,4);keys->mouseButton(VK_LBUTTON,true);
     need(poll().wButtons==XINPUT_GAMEPAD_X&&!state.Gamepad.sThumbRX&&!state.Gamepad.sThumbRY,"Focus return blocked mouse buttons or silently restored camera capture");
     keys->mouseButton(VK_LBUTTON,false);poll();
     keys->captureMouse(true);keys->mouseButton(VK_LBUTTON,true);keys->mouseButton(VK_LBUTTON,false);keys->mouseMotion(7,8);
     samples[0].status=ERROR_SUCCESS;samples[0].state={90,{XINPUT_GAMEPAD_A,0,0,0,0,123,456}};
     need(poll().wButtons==XINPUT_GAMEPAD_A&&state.Gamepad.sThumbRX==123&&state.Gamepad.sThumbRY==456&&!native->usesKeyboardMouse(),"Mouse replaced physical controller state or prompts");
+    need(!native->takeMouseMotion().active,"Physical controller retained a native camera override");
     samples[0].status=ERROR_DEVICE_NOT_CONNECTED;
     need(!poll().wButtons&&!state.Gamepad.sThumbRX&&!state.Gamepad.sThumbRY&&native->usesKeyboardMouse(),"Stale mouse input replayed after controller removal");
 }
@@ -312,7 +366,10 @@ void windowMouseQueries(){
     samples={};auto native=source();NativeWindow window;native->attachKeyboard(window.keyboard);
     const auto hwnd=window.handle();XINPUT_STATE state{};
     const auto poll=[&]()->const XINPUT_GAMEPAD& {need(native->state(0,state)==0,"Window mouse fallback disconnected");return state.Gamepad;};
-    SetForegroundWindow(hwnd);
+    // Foreground capture is opt-in; ordinary fixtures must leave desktop focus
+    // with the user and still exercise the owned window's message delivery.
+    wchar_t captureTest[2]{};
+    if(GetEnvironmentVariableW(L"SIMPSONS_TEST_MOUSE_CAPTURE",captureTest,2)&&captureTest[0]==L'1')SetForegroundWindow(hwnd);
     // Exercise the actual window procedure even if desktop focus cannot be
     // acquired in an unattended run. The capture check below requires real focus.
     SendMessageW(hwnd,WM_SETFOCUS,0,0);
@@ -320,9 +377,9 @@ void windowMouseQueries(){
     need(poll().wButtons==XINPUT_GAMEPAD_X,"The first client click was swallowed instead of attacking");
     GUITHREADINFO gui{};gui.cbSize=sizeof(gui);
     need(GetGUIThreadInfo(GetWindowThreadProcessId(hwnd,nullptr),&gui)!=FALSE,"Cannot inspect test window capture");
-    if(GetForegroundWindow()==hwnd&&gui.hwndFocus==hwnd)
+    if(IsWindowEnabled(hwnd)&&!(GetWindowLongPtrW(hwnd,GWL_EXSTYLE)&WS_EX_NOACTIVATE)&&GetForegroundWindow()==hwnd&&gui.hwndFocus==hwnd)
         need(gui.hwndCapture==hwnd,"Focused client click did not capture the mouse automatically");
-    else std::printf("Window click delivery tested; real cursor capture requires available desktop foreground focus\n");
+    else std::printf("Window click delivery tested; physical cursor capture requires an opted-in foreground window\n");
     SendMessageW(hwnd,WM_LBUTTONUP,0,MAKELPARAM(20,20));need(!poll().wButtons,"Window left-click release was lost");
     SendMessageW(hwnd,WM_RBUTTONDOWN,MK_RBUTTON,MAKELPARAM(20,20));
     need(poll().wButtons==XINPUT_GAMEPAD_B&&!state.Gamepad.bRightTrigger,"Window right click did not deliver special attack/back");
@@ -731,6 +788,65 @@ void playbackQueries(){
     scene=40;
     rejects([&]{rejected->state(0,state);});
     std::filesystem::remove(path);
+}
+void nativeMousePlaybackQueries(){
+    CommandFixture fixture;
+    const auto directory=std::filesystem::path(fixture.path.wstring()+L".mouse-recording");
+    need(CreateDirectoryW(directory.c_str(),nullptr)!=FALSE,"Cannot create native mouse replay fixture");
+    std::filesystem::path path;
+    {
+        Platform::NativeInputRecording recording(directory);recording.toggle();path=recording.path();
+        const XINPUT_STATE zero{9,{}};
+        recording.sample(0,ERROR_SUCCESS,zero,false,{true,300,-80});
+        for(uint32_t slot=1;slot<4;++slot)recording.sample(slot,ERROR_DEVICE_NOT_CONNECTED,{});
+        recording.stop();
+    }
+    std::atomic<uint64_t> scene{0};
+    auto playback=std::make_shared<Platform::NativeInputPlayback>(path,0,scene);
+    samples={};auto native=source();auto keys=std::make_shared<Platform::NativeKeyboard>();
+    native->attachKeyboard(keys);keys->focus(true);keys->captureMouse(true);native->attachPlayback(playback);
+    keys->mouseMotion(111,222);keys->focus(false);
+    XINPUT_STATE state{};
+    need(native->state(0,state)==ERROR_SUCCESS&&!state.Gamepad.sThumbRX&&!state.Gamepad.sThumbRY,
+         "Mouse playback changed the recorded neutral controller axes");
+    need(native->takeMouseMotion()==Platform::NativeMouseMotion{true,300,-80},"Mouse playback lost exact raw displacement or used live focus/input");
+    need(native->takeMouseMotion()==Platform::NativeMouseMotion{true,0,0},"Mouse playback repeated camera motion");
+    for(uint32_t slot=1;slot<4;++slot)native->state(slot,state);
+    native->state(0,state);need(!native->takeMouseMotion().active,"Ended mouse playback retained camera displacement");
+    const auto original=[&] {std::ifstream stream(path);return std::string(std::istreambuf_iterator<char>(stream),{});}();
+    const auto invalid=[&](const char* field,const char* replacement) {
+        auto text=original;const auto at=text.find(field);need(at!=std::string::npos,"Mouse replay mutation field absent");
+        text.replace(at,std::strlen(field),replacement);
+        {std::ofstream stream(path);stream<<text;}
+        rejects([&]{Platform::NativeInputPlayback bad(path,0,scene);});
+    };
+    invalid("\"mouse_native\":1","\"mouse_native\":2");
+    invalid("\"mouse_x\":300","\"mouse_x\":2147483648");
+    invalid("\"mouse_y\":-80","\"mouse_other\":-80");
+    invalid("\"mouse_native\":1","\"mouse_native\":0");
+    invalid("\"rx\":0","\"rx\":123");
+    DeleteFileW(path.c_str());need(RemoveDirectoryW(directory.c_str())!=FALSE,"Mouse replay fixture directory remained nonempty");
+}
+void nativeMouseOwnershipQueries(){
+    samples={};auto native=source();auto keys=std::make_shared<Platform::NativeKeyboard>();
+    native->attachKeyboard(keys);keys->focus(true);keys->captureMouse(true);
+    XINPUT_STATE state{};
+    const auto motion=[&] {keys->mouseMotion(10,20);native->state(0,state);};
+    motion();keys->focus(false);need(!native->takeMouseMotion().active,"Focus loss replayed already-polled mouse motion");
+    keys->focus(true);keys->captureMouse(true);motion();keys->focus(false);keys->focus(true);keys->captureMouse(true);
+    need(!native->takeMouseMotion().active,"Focus/capture return replayed a previous capture's displacement");
+    motion();for(uint32_t slot=1;slot<4;++slot)native->state(slot,state);
+    need(native->takeMouseMotion()==Platform::NativeMouseMotion{true,10,20},"Other controller slots erased pending native mouse motion");
+    keys->focus(true);keys->captureMouse(true);motion();keys->menuMode(true);
+    need(!native->takeMouseMotion().active,"Menu opening replayed already-polled mouse motion");
+    keys->menuMode(false);keys->captureMouse(true);motion();native->beginMovie(0x50000);
+    need(!native->takeMouseMotion().active,"Movie opening retained mouse motion");
+    native->endMovie();need(!native->takeMouseMotion().active,"Movie exit restored stale mouse motion");
+    motion();const auto token=native->beginModal(0);keys->mouseMotion(30,40);native->modalState(token,state);
+    need(!native->takeMouseMotion().active,"Native modal UI exposed mouse camera motion");
+    native->endModal(token);need(!native->takeMouseMotion().active,"Native modal exit restored stale mouse motion");
+    native->state(0,state);need(!native->takeMouseMotion().active,"Modal release poll exposed the native camera");
+    native->state(0,state);need(native->takeMouseMotion()==Platform::NativeMouseMotion{true,0,0},"Modal mouse motion survived into gameplay");
 }
 void neutralReplayCatchup(){
     CommandFixture fixture;
@@ -1249,9 +1365,9 @@ void originalPoll(const char* image){
     poll();
     need(!PPC_LOAD_U8(buttons)&&PPC_LOAD_U8(buttons+1)==8,
          "Null-output probes drained special attack before the original input manager");
-    need(int32_t(PPC_LOAD_U32(axes+8))>0&&int32_t(PPC_LOAD_U32(axes+8))<=1000&&
-         int32_t(PPC_LOAD_U32(axes+12))>0&&int32_t(PPC_LOAD_U32(axes+12))<=1000,
-         "Original input manager lost native mouse camera motion or its Y direction");
+    need(!PPC_LOAD_U32(axes+8)&&!PPC_LOAD_U32(axes+12)&&
+         rt.controllers->takeMouseMotion()==Platform::NativeMouseMotion{true,2,-3},
+         "Original input manager lost direct mouse counts or retained stick camera motion");
     poll();need(!PPC_LOAD_U8(buttons+1)&&!PPC_LOAD_U32(axes+8)&&!PPC_LOAD_U32(axes+12),
                 "Original input manager retained consumed mouse buttons or camera motion");
     keyboard->mouseMotion(4,5);keyboard->focus(false);poll();
@@ -1296,7 +1412,11 @@ int main(int argc,char** argv){
             std::printf("PASS checkpoint controllers:%zu checks; F9 marker, first-poll recording, neutral catch-up, replay-to-live handoff and scene divergence\n",checks);
             return 0;
         }
-        hostQueries();keyboardQueries();keyboardNavigationQueries();mouseQueries();menuPointerQueries();windowMouseQueries();earlyControllerWindowQueries();commandQueries();padQueries();forwardDoubleJumpQueries();modalQueries();movieQueries();recordingQueries();playbackQueries();neutralReplayCatchup();records(argv[1]);movieBoundarySnapshots(argv[1]);originalPoll(argv[1]);std::printf("PASS native controllers:%zu checks; real Windows query,original ABI and input manager,raw state/capabilities,disconnect/reconnect,window keyboard and mouse,local command stream,exclusive native UI input,movie skip edges,F8 input recording,exact poll playback;no gameplay claim,ALL MUTED\n",checks);return 0;
+        if(std::strcmp(argv[1],"--controls-only")==0) {
+            keyboardQueries();keyboardNavigationQueries();rebindQueries();mouseQueries();menuPointerQueries();
+            std::printf("PASS native control bindings:%zu checks; defaults, independent menu navigation, capture release gating, conflict exchange and cancellation\n",checks);return 0;
+        }
+        hostQueries();keyboardQueries();keyboardNavigationQueries();rebindQueries();mouseQueries();menuPointerQueries();windowMouseQueries();earlyControllerWindowQueries();commandQueries();padQueries();forwardDoubleJumpQueries();modalQueries();movieQueries();recordingQueries();playbackQueries();nativeMousePlaybackQueries();nativeMouseOwnershipQueries();neutralReplayCatchup();records(argv[1]);movieBoundarySnapshots(argv[1]);originalPoll(argv[1]);std::printf("PASS native controllers:%zu checks; real Windows query,original ABI and input manager,raw state/capabilities,disconnect/reconnect,window keyboard and mouse,local command stream,exclusive native UI input,movie skip edges,F8 input recording,exact poll playback;no gameplay claim,ALL MUTED\n",checks);return 0;
     }
     catch(const std::exception& e){std::fprintf(stderr,"FAIL native controllers:%zu checks:%s\n",checks,e.what());return 1;}
 }

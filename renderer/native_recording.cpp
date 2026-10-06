@@ -1,4 +1,5 @@
 #include "native_backend.h"
+#include "runtime/stall_profiler.h"
 #include <algorithm>
 #include <cstdio>
 #include <limits>
@@ -483,9 +484,12 @@ void NativeBackend::executeRecordingPayload(const std::shared_ptr<NativeRecordin
     // Preparation updates each draw's retained native constant buffers on the
     // immediate context. No inherited-buffer Update* is recorded in the list.
     // A failed preparation submits no list, changes no counts, and is retryable.
-    for(const auto& entry:payload->draws)if(entry.prepare) {
-        RecordingCallbackScope callback;
-        entry.prepare(context.Get(),entry.owner,std::span<const uint8_t>(payload->data).subspan(entry.offset,entry.bytes));
+    {
+        StallProfiler::Scope prepareProfile(StallProfiler::Section::Rendering,"D3D11.PrepareRecordingDraws",nullptr,reinterpret_cast<uintptr_t>(payload->commands.Get()));
+        for(const auto& entry:payload->draws)if(entry.prepare) {
+            RecordingCallbackScope callback;
+            entry.prepare(context.Get(),entry.owner,std::span<const uint8_t>(payload->data).subspan(entry.offset,entry.bytes));
+        }
     }
     requireOwner();
     // Retain before issuing anything: even a post-submission device failure
@@ -496,7 +500,9 @@ void NativeBackend::executeRecordingPayload(const std::shared_ptr<NativeRecordin
     // Its new event is the latest submission: keep the list in event submission order.
     if(!alreadyPending)pendingRecordingPayloads.push_back(payload);
     else std::rotate(pendingAt,pendingAt+1,pendingRecordingPayloads.end());
+    StallProfiler::Scope executeProfile(StallProfiler::Section::Rendering,"D3D11.ExecuteCommandList",nullptr,reinterpret_cast<uintptr_t>(payload->commands.Get()));
     context->ExecuteCommandList(payload->commands.Get(),TRUE);
+    executeProfile.finish();
     context->End(payload->completion.Get());
     ++payload->receipt.executions;payload->receipt.executedDraws+=drawCount;recordingExecutedDraws+=drawCount;
     requireOwner();

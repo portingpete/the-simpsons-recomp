@@ -11,10 +11,19 @@ ROOT = Path(__file__).resolve().parents[1]
 OPTIONS_SHA = '1d0f8d2fc3a72b2f676932976eae422c2aa10dfabd6226607f64671b6f7725ad'
 PACKAGES = ('frontend/frontend.str', 'simpsons_chars/simpsons_chars_global.str')
 NATIVE_ROWS = ('resolution','windowsize','windowmode','vsync','framecap','filtering','antialiasing',
-               'fov','renderscale','bloom','depthoffield','motionblur')
+               'fov','renderscale','bloom','depthoffield','motionblur','atmosphericfog','colorgrading','cinematicbars')
 ROW_IDS = ('Resolution','WindowSize','WindowMode','VSync','FrameRate','Filtering','Antialiasing',
-           'FieldOfView','RenderScale','Bloom','DepthOfField','MotionBlur')
-ROW_FONT_SIZE, ROW_TOP, ROW_SPACING, FIRST_ROW_GAP = 20.0, -115.0, 21.0, 45.0
+           'FieldOfView','RenderScale','Bloom','DepthOfField','MotionBlur','AtmosphericFog','ColorGrading','CinematicBars')
+VIDEO_PAGES = (('page','brightness',*NATIVE_ROWS[:7]),('page',*NATIVE_ROWS[7:]))
+PAGE_ROW_ID = len(NATIVE_ROWS)+1
+ROW_FONT_SIZE, ROW_TOP, ROW_SPACING, FIRST_ROW_GAP = 20.0, -115.0, 24.0, 45.0
+
+def row_y(row):
+    if row=='page':return ROW_TOP
+    if row=='brightness':return ROW_TOP+35
+    page=0 if row in NATIVE_ROWS[:7] else 1
+    index=VIDEO_PAGES[page].index(row)
+    return ROW_TOP+35+(FIRST_ROW_GAP if page==0 else 0)+ROW_SPACING*(index-(2 if page==0 else 1))
 
 def u(data, at): return struct.unpack_from('>I', data, at)[0]
 def put(data, at, value): struct.pack_into('>I', data, at, value)
@@ -49,8 +58,12 @@ class Actions:
         self.string(name); self.integer(value); self.op(0x1d)
     def array(self, name, values):
         self.string(name)
-        for value in reversed(values): self.string(value)
+        for value in reversed(values):
+            self.string(value) if isinstance(value,str) else self.integer(value)
         self.integer(len(values)); self.string('Array'); self.op(0x40); self.op(0x1d)
+    def jump(self,op=0x99):
+        self.op(op);self.aligned();at=len(self.apt);self.apt.extend(b'\0'*4);return at
+    def target(self,at):put(self.apt,at,(len(self.apt)-at-4)&0xffffffff)
     def method(self, receiver, method, count=0):
         self.integer(count); self.variable(receiver); self.string(method); self.op(0x52); self.op(0x17)
     def function(self, name, body, parameter=False):
@@ -106,7 +119,7 @@ def patch_options(original):
     apt.extend(apt[0x7da8:0x7f3e])
     a=Actions(apt,cons)
     def move(right):
-        a.string('nativeAction'); a.variable('currentSelection'); a.integer(2); a.op(0x0c)
+        a.string('nativeAction'); a.variable('NativeRowIds'); a.variable('currentSelection'); a.op(0x4e); a.integer(2); a.op(0x0c)
         a.integer(101 if right else 100); a.op(0x0a); a.op(0x1d)
         a.integer(0); a.variable('_root'); a.member('_screen'); a.string('SaveVideoSettings'); a.op(0x52); a.op(0x17)
     a.function('moveLeft',lambda:move(False)); a.function('moveRight',lambda:move(True))
@@ -114,26 +127,65 @@ def patch_options(original):
         a.variable('nativeAction'); a.integer(1); a.variable('_level0'); a.member('screen')
         a.string('SetSafeString'); a.op(0x52); a.op(0x17); a.assign('nativeAction',0)
     a.function('getNativeAction',getter)
-    rows=['brightness',*NATIVE_ROWS]
+    rows=['brightness',*NATIVE_ROWS,'page']
+    def video_clip():a.variable('_root');a.member('VideoMenu')
+    def video_method(name):
+        a.integer(0);video_clip();a.string(name);a.op(0x52);a.op(0x17)
+    def clip_property(name,property,value):
+        video_clip();a.member(name);a.string(property);a.integer(value);a.op(0x4f)
     def set_label(row):
+        # Inactive pages have only their source text; initializeButtons creates
+        # the selected page's wrappers at the original display depths.
+        video_clip();a.member('btn_'+row);a.op(0x12);missing=a.jump(0x9d)
         a.variable('_root');a.member('VideoMenu');a.member('btn_'+row);a.string('variable_text');a.string('');a.op(0x4f)
         a.variable('_root');a.member('VideoMenu');a.member('btn_'+row);a.string('text_str');a.push(4,1);a.op(0x4f)
         a.variable('_root');a.member('VideoMenu');a.member('btn_'+row);a.member('DynamicText_mc');a.member('dynamicText');a.string('variable');a.string('');a.op(0x4f)
         a.variable('_root');a.member('VideoMenu');a.member('btn_'+row);a.member('DynamicText_mc');a.member('dynamicText');a.string('text');a.push(4,1);a.op(0x4f)
+        a.target(missing)
         a.variable('_root');a.member('VideoMenu');a.member('text_'+row);a.member('text_entry');a.string('text');a.push(4,1);a.op(0x4f)
     for row in rows[1:]:a.function('set_'+row,lambda row=row:set_label(row),parameter=True)
-    a.array('MenuItemButtons',['btn_'+row for row in rows])
-    a.array('TextRefs',['text_'+row for row in rows])
-    a.array('MenuItemIds',['Brightness',*ROW_IDS])
-    a.array('Gizmos',['brightnessSlider']); a.array('ColorRefs',['brightnessColorRef']); a.array('GizmoTypes',['slider'])
-    a.assign('nativeAction',0); a.method('_root','initializeButtons'); a.assign('currentSelection',0)
+    def layout_page():
+        for row in rows:
+            video_clip();a.member('btn_'+row);a.op(0x12);missing=a.jump(0x9d)
+            clip_property('btn_'+row,'_visible',0);a.target(missing)
+            clip_property('text_'+row,'_visible',0)
+        a.variable('nativePage');effects=a.jump(0x9d)
+        def configure(page):
+            names=VIDEO_PAGES[page]
+            a.array('MenuItemButtons',['btn_'+row for row in names])
+            a.array('TextRefs',['text_'+row for row in names])
+            a.array('MenuItemIds',['NativeVideoPage' if row=='page' else 'Brightness' if row=='brightness' else ROW_IDS[NATIVE_ROWS.index(row)] for row in names])
+            a.array('NativeRowIds',[PAGE_ROW_ID if row=='page' else 0 if row=='brightness' else NATIVE_ROWS.index(row)+1 for row in names])
+            a.array('Gizmos',['','brightnessSlider'] if page==0 else [])
+            a.array('ColorRefs',['','brightnessColorRef'] if page==0 else [])
+            a.array('GizmoTypes',['','slider'] if page==0 else [])
+            clip_property('brightnessSlider','_visible',int(page==0))
+            # The color source remains an authored clip; it is only hidden
+            # on the page that has no brightness slider.
+            clip_property('brightnessColorRef','_visible',int(page==0))
+            a.string('nativePageLabel');a.string('Video page: '+('1/2 Display' if page==0 else '2/2 Effects')+' (Left/Right)');a.op(0x1d)
+        configure(0);done=a.jump();a.target(effects);configure(1);a.target(done)
+        a.method('_root','initializeButtons')
+        a.variable('nativePageLabel');a.integer(1);video_clip();a.string('set_page');a.op(0x52);a.op(0x17)
+    a.function('layoutNativePage',layout_page)
+    def next_page():
+        a.string('nativePage');a.integer(1);a.variable('nativePage');a.op(0x0b);a.op(0x1d)
+        video_method('layoutNativePage')
+        a.method('_root','activateGizmos')
+        a.string('rememberedSelection');a.variable('_root');a.member('InitialSelection');a.op(0x1d)
+        a.variable('_root');a.string('InitialSelection');a.string('');a.op(0x4f)
+        a.string('currentSelection');a.integer(0);a.integer(1);a.variable('_root');a.string('activateMenuButtons');a.op(0x52);a.op(0x1d)
+        a.variable('_root');a.string('InitialSelection');a.variable('rememberedSelection');a.op(0x4f)
+    a.function('nextPage',next_page)
+    a.assign('nativeAction',0);a.assign('nativePage',0);video_method('layoutNativePage');a.assign('currentSelection',0)
     a.finish()
     # Original text movie, font and transform. Separate depths and names make
     # these normal display-list members of VideoMenu, not a drawing overlay.
     additions=[];characters=[]
     defaults=['Render resolution: 1280x720 (restart)','Window size: 1280 x 720','Display mode: Windowed','VSync: Off','Frame limit: 120 FPS','Texture filtering: Original (restart)','Antialiasing: Original (restart)',
-              'FOV (16:9): Original','Render scale: 100% (restart)','Bloom: On','Depth of field: On','Motion blur: On']
-    assert len(defaults)==len(NATIVE_ROWS)==len(ROW_IDS)
+              'FOV (16:9): Original','Render scale: 100% (restart)','Bloom: On','Depth of field: On','Motion blur: On',
+              'Atmospheric fog: On','Color grading: On','Cinematic bars: On','Video page: 1/2 Display (Left/Right)']
+    assert len(defaults)==len(NATIVE_ROWS)+1==len(ROW_IDS)+1
     for i,row in enumerate(rows[1:],1):
         # Give each row its own text character. The retail character is bound
         # to the localization variable $FE_Brightness, which would overwrite
@@ -148,15 +200,15 @@ def patch_options(original):
         sprite_at=len(apt);sprite=bytearray(apt[0xdec:0xe00]);put(sprite,12,frames_at);apt.extend(sprite);characters.append(sprite_at)
         at=len(apt); item=bytearray(apt[0x3aa4:0x3ae4])
         put(item,8,30+i);put(item,12,text_id+1); put(item,52,at+64)
-        struct.pack_into('>f',item,36,ROW_TOP+FIRST_ROW_GAP+ROW_SPACING*(i-1))
+        struct.pack_into('>f',item,36,row_y(row))
         apt.extend(item); apt.extend(('text_'+row).encode()+b'\0'); apt.extend(b'\0'*(-len(apt)%4)); additions.append(at)
     character_table=len(apt);old_character_table=u(apt,0x5f8+24)
     apt.extend(apt[old_character_table:old_character_table+92*4])
     for at in characters:apt.extend(struct.pack('>I',at))
     put(apt,0x5f8+20,92+len(characters));put(apt,0x5f8+24,character_table)
-    # Brightness is the first row. Its original slider and reference move with
-    # the label; original menu layout subsequently computes the row spacing.
-    for at,y in ((0x3a24,ROW_TOP+10),(0x3a64,ROW_TOP+10),(0x3aa4,ROW_TOP)): struct.pack_into('>f',apt,at+36,y)
+    # Brightness follows the page row on Display. Its original slider and
+    # reference move with the label; the original button layout stays in use.
+    for at,y in ((0x3a24,row_y('brightness')+10),(0x3a64,row_y('brightness')+10),(0x3aa4,row_y('brightness'))): struct.pack_into('>f',apt,at+36,y)
     struct.pack_into('>f',apt,0xdb0+36,ROW_FONT_SIZE)
     put(apt,old_controls[0]+4,stream)
     new_table=len(apt)
@@ -175,6 +227,8 @@ def patch_options(original):
 def build(source):
     # Import lazily: the mouse assembler shares the byte/constant writer above.
     from build_native_mouse_menu import MENU_NAMES, patch_mouse
+    from build_native_control_menu import patch_controls
+    from build_native_main_menu import patch_main_menu
     data=source.read_bytes(); entries=stoc_entries(data)['entries']; output=bytearray(data[:entries[0]['file_offset']])
     found=False
     for e in entries:
@@ -185,7 +239,9 @@ def build(source):
         for c in reversed(list(resource_chunks(decoded))):
             if c.get('name') in MENU_NAMES:
                 at=c['payload_decoded_offset']; size=c['payload_size']; original=decoded[at:at+size]
-                patch=patch_mouse(patch_options(original) if c['name']=='options.swf' else original)
+                if c['name']=='options.swf':original=patch_controls(patch_options(original))
+                elif c['name']=='frontend.swf':original=patch_main_menu(original)
+                patch=patch_mouse(original)
                 end=at+size; new=bytearray(decoded[:at]+patch+b'\0'*(-len(patch)%4)+decoded[align(end,4):])
                 desc=c['decoded_offset']+16
                 _,pos=padded_string(decoded,desc)

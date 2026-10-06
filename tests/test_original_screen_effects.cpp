@@ -46,7 +46,8 @@ void exercise(const char* image){
     rt.audioBoundaryObserver=[](uint32_t pc,PPCContext&,uint8_t*){if(pc==0x828166FC)throw Observed{};};
     bool observed=false;try{runOriginal(startup,base);}catch(const Observed&){observed=true;}rt.audioBoundaryObserver={};need(observed,"Original startup checkpoint missing");
     auto& d=*rt.engineDriver;EngineCpuCalls cpu(entry,base);auto& c=cpu.registers();rt.map(0x50000,0x1000,true,"screen-effect fixture arguments");
-    need(rt.videoSettings.bloom&&rt.videoSettings.depthOfField&&rt.videoSettings.motionBlur,"Original screen effects are not enabled by default");
+    need(rt.videoSettings.bloom&&rt.videoSettings.depthOfField&&rt.videoSettings.motionBlur&&rt.videoSettings.atmosphericFog&&
+         rt.videoSettings.colorGrading&&rt.videoSettings.cinematicLetterbox,"Original screen effects are not enabled by default");
     const auto camera=PPC_LOAD_U32(0x82E07248),color=PPC_LOAD_U32(0x82D0CB00),depth=PPC_LOAD_U32(0x82D0CAFC);
     auto& viewport=d.viewportSurfaces();
     auto storeFloat=[&](uint32_t address,float value){PPC_STORE_U32(address,std::bit_cast<uint32_t>(value));};
@@ -80,19 +81,21 @@ void exercise(const char* image){
     need(PPC_LOAD_U8(blur+0x20)==1,"Inactive original Blur did not arm its first-frame flag");
     const auto sceneDepth=d.readbackDepth(depth);
     // Sat: layer color/weight at 82CF24C0; the original CPU derives c0/c1 on its stack.
-    {
+    for(bool enabled:{false,true,false}) {
+        rt.videoSettings.colorGrading=enabled;
         const auto scene=flat(.5f,.25f,.75f);const auto before=draws();const auto copies=viewport.colorCopyCount();
         for(uint32_t i=0;i<4;++i)storeFloat(sat+4*i,std::array<float,4>{.9f,.6f,.3f,.8f}[i]);storeFloat(sat+16,1);
         invoke(0x8276FE60,0x827517B8,camera);
         const auto k=d.screenEffectConstants();const Pixel s=unpack(scene);Pixel out{};
         for(uint32_t i=0;i<3;++i)out[i]=s[i]*k[0][i]*(k[1][3]*8+k[1][i]);out[3]=k[0][3];
-        need(draws()[4]==before[4]+1&&viewport.colorCopyCount()==copies+1,"Original Sat did not resolve and draw once");
+        need(draws()[4]==before[4]+uint64_t(enabled)&&viewport.colorCopyCount()==copies+1,"Live color grading toggle lost its original resolve");
         need(k[0][0]>.89f&&k[0][0]<.91f,"Original Sat c0 is not its normalized layer color");
-        std::vector<uint32_t> expected(1280*720,blend(out,scene,0x10006));compare(d.readbackColor(color),expected,"Original Sat pixels differ");
+        std::vector<uint32_t> expected(1280*720,enabled?blend(out,scene,0x10006):scene);compare(d.readbackColor(color),expected,"Live color grading pixels differ");
         need(d.readbackDepth(depth)==sceneDepth,"Original Sat changed depth/stencil");finalState(true);
         need(PPC_LOAD_U32(0x82CD1A70)==PPC_LOAD_U32(0x82CF24B4),"Original Sat pixel shader cache differs");
         need(std::bit_cast<float>(PPC_LOAD_U32(sat+16))==0,"Original Sat did not reset its weight");
     }
+    rt.videoSettings.colorGrading=true;
     // Blur: arm, prime history (resolve only), then blend history over a new scene.
     {
         rt.videoSettings.motionBlur=false;
@@ -151,19 +154,21 @@ void exercise(const char* image){
     }
     rt.videoSettings.bloom=true;
     // Fog through 82751700: far-plane depth exports zero color and alpha.
-    for(uint32_t type:{1u,2u,3u}) {
+    for(uint32_t type:{1u,2u,3u}) for(bool enabled:{false,true,false}) {
+        rt.videoSettings.atmosphericFog=enabled;
         const auto scene=flat(.4f,.6f,.2f);const auto before=draws();
         // Request: +10 color/alpha, +20 start, +24 end, +28/+2C curve; the original clamps start below end.
         PPC_STORE_U32(fog,type);const std::array<float,11> values{0,0,0,.4f,.6f,.2f,.8f,10,200,.25f,1.5f};
         for(uint32_t i=0;i<11;++i)storeFloat(fog+4+4*i,values[i]);storeFloat(fog+0x30,1);
         invoke(0x82751700,0x82751770,camera);
-        need(draws()[3]==before[3]+1&&draws()[0]==before[0],"Original Fog did not draw once");
+        need(draws()[3]==before[3]+uint64_t(enabled)&&draws()[0]==before[0],"Live Fog toggle drew an unrelated effect");
         need(PPC_LOAD_U32(0x82CD1A70)==PPC_LOAD_U32(type==1?0x82CF2408:type==2?0x82CF2414:0x82CF2420),"Original Fog selected a different shader");
-        Pixel s=unpack(scene);s[3]=0;std::vector<uint32_t> expected(1280*720,pack(s));
+        Pixel s=unpack(scene);s[3]=0;std::vector<uint32_t> expected(1280*720,enabled?pack(s):scene);
         compare(d.readbackColor(color),expected,"Original far-plane Fog pixels differ");
         need(d.readbackDepth(depth)==sceneDepth,"Original Fog changed depth/stencil");finalState(false);
         std::memset(rt.pointer(fog,0x80,true),0,0x80);
     }
+    rt.videoSettings.atmosphericFog=true;
     // Dof through 82751700: far-plane depth collapses every tap to the center.
     // Original reciprocal math also permits zero focus distance/range. These
     // inputs intentionally produce infinite c1.z/w, without changing the request.
@@ -212,22 +217,24 @@ void exercise(const char* image){
     rt.videoSettings.bloom=rt.videoSettings.depthOfField=rt.videoSettings.motionBlur=true;
     // Letterbox 82756268 (screen command case 5): two flat full-width bars of
     // height clamp(alpha,0,0.5)*2 in clip space, drawn with PSFlat and copy blend.
-    {
+    for(bool enabled:{false,true,false}) {
+        rt.videoSettings.cinematicLetterbox=enabled;
         const auto scene=flat(.3f,.6f,.2f);const auto before=draws();const auto copies=viewport.colorCopyCount();
         const std::array<float,4> bar{.8f,.1f,.5f,.4f};for(uint32_t i=0;i<4;++i)storeFloat(0x50100+4*i,bar[i]);
         c.r4.u32=0x50100;invoke(0x82756268,0x8276E3FC,camera);
-        need(draws()[5]==before[5]+2&&viewport.colorCopyCount()==copies,"Original letterbox did not draw both bars without a resolve");
+        need(draws()[5]==before[5]+(enabled?2u:0u)&&viewport.colorCopyCount()==copies,"Live letterbox toggle lost its original lifecycle");
         need(PPC_LOAD_U32(0x82CD1A6C)==PPC_LOAD_U32(0x82CF231C)&&PPC_LOAD_U32(0x82CD1A70)==PPC_LOAD_U32(0x82CF2310),"Original letterbox shader caches differ");
         const float height=std::clamp(bar[3],0.0f,.5f)*2;const uint32_t barWord=pack(bar);
         const auto got=d.readbackColor(color);need(got.size()==1280*720*4,"Letterbox readback extent differs");
         for(uint32_t row=0;row<720;++row){const float y=1.0f-(float(row)+.5f)/360.0f;
             if(std::abs(y-(height-1))<1e-3f||std::abs(y-(1-height))<1e-3f)continue;
-            const bool covered=y<=height-1||y>=1-height;std::vector<uint32_t> expected(1280,covered?barWord:scene);
+            const bool covered=enabled&&(y<=height-1||y>=1-height);std::vector<uint32_t> expected(1280,covered?barWord:scene);
             compare(std::vector<uint8_t>(got.begin()+size_t(row)*1280*4,got.begin()+size_t(row+1)*1280*4),expected,"Original letterbox bar coverage differs");}
         need(d.readbackDepth(depth)==sceneDepth,"Original letterbox changed depth/stencil");finalState(false);
         const auto state=d.effectiveState();c.r4.u32=0x50100;storeFloat(0x5010C,0);invoke(0x82756268,0x8276E3FC,camera);
-        need(draws()[5]==before[5]+2,"Transparent letterbox drew");sameState(state,"Transparent letterbox changed state");
+        need(draws()[5]==before[5]+(enabled?2u:0u),"Transparent letterbox drew");sameState(state,"Transparent letterbox changed state");
     }
+    rt.videoSettings.cinematicLetterbox=true;
     // Actual type-zero producer 8276DF38 derives the modulated flag from its
     // input byte at DFC0 and calls 82755FD0 at DFC4 (LR DFC8). The unrelated
     // 8276E344 call site always passes zero and cannot exercise this route.

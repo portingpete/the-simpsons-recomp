@@ -1,5 +1,11 @@
 # Recorded automatic startup
 
+The October 5 Main Menu cue uses its static title to recognize the six-row menu
+with Exit Game. It retains the 97% match threshold and avoids the selected row's
+pulse animation. Retained completed-front captures verify keyboard/mouse menu
+recognition and reject loading frames and startup dialogs; the full automatic
+startup route has not been replayed after this calibration update.
+
 September19 replay update: Continue Game now accepts either a fresh opening
 movie or direct resume into an accepted scene presentation. Route evidence is
 bounded by the actual Continue command queue, after its neutral wait. A direct

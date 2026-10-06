@@ -1,8 +1,10 @@
 """Check native menu generation against every original frontend resource."""
 import struct, unittest
-from build_native_video_menu import ROOT, PACKAGES, build, patch_options, u
+from build_native_video_menu import ROOT, PACKAGES, NATIVE_ROWS, ROW_IDS, VIDEO_PAGES, PAGE_ROW_ID, row_y, build, patch_options, u
 from inspect_assets import stoc_entries, decode_entry, resource_chunks
 from build_native_mouse_menu import MENU_NAMES, patch_mouse, constant_references
+from build_native_control_menu import patch_controls
+from build_native_main_menu import patch_main_menu
 
 def resources(data):
     result={}
@@ -34,23 +36,33 @@ class NativeActions:
                 self.functions[arg[0]]=arg[1:3];self.parameters[arg[0]]=arg[3]
 
     def instructions(self,begin,end):
-        apt=self.apt;at=begin
+        at=begin
         while at<end:
-            op=apt[at];at+=1;arg=None
+            op,arg,at=self.instruction(at)
             if op==0:break
-            if op==0x96:
-                at=(at+3)&~3;count,table=u(apt,at),u(apt,at+4);at+=8
-                arg=[self.constants[u(apt,table+4*i)] for i in range(count)]
-            elif op==0x8e:
-                at=(at+3)&~3;name=u(apt,at);size=u(apt,at+16);params=u(apt,at+12)
-                registers=[u(apt,params+8*i) for i in range(u(apt,at+4))]
-                arg=(apt[name:apt.index(0,name)].decode('ascii'),at+28,at+28+size,registers)
-                at+=28+size
             yield op,arg
 
+    def instruction(self,at):
+        apt=self.apt;op=apt[at];at+=1;arg=None
+        if op==0x96:
+            at=(at+3)&~3;count,table=u(apt,at),u(apt,at+4);at+=8
+            arg=[self.constants[u(apt,table+4*i)] for i in range(count)]
+        elif op==0x8e:
+            at=(at+3)&~3;name=u(apt,at);size=u(apt,at+16);params=u(apt,at+12)
+            registers=[u(apt,params+8*i) for i in range(u(apt,at+4))]
+            arg=(apt[name:apt.index(0,name)].decode('ascii'),at+28,at+28+size,registers)
+            at+=28+size
+        elif op in (0x99,0x9d):
+            at=(at+3)&~3;arg=struct.unpack_from('>i',apt,at)[0];at+=4
+        return op,arg,at
+
     def evaluate(self,begin,end,scope,argument=None):
-        stack=[]
-        for op,arg in self.instructions(begin,end):
+        stack=[];at=begin;steps=0
+        while at<end:
+            steps+=1
+            if steps>20000:raise AssertionError('Video function did not terminate')
+            op,arg,at=self.instruction(at)
+            if op==0:break
             if op==0x8e:continue
             if op==0x96:
                 for value in arg:
@@ -58,22 +70,29 @@ class NativeActions:
                         if value!=(4,1):raise AssertionError('Unsupported action constant '+repr(value))
                         value=argument
                     stack.append(value)
-            elif op==0x1c:stack.append(scope[stack.pop()])
+            elif op==0x1c:stack.append(scope.get(stack.pop()))
             elif op==0x1d:
                 value,name=stack.pop(),stack.pop();scope[name]=value
             elif op==0x4e:
-                name,obj=stack.pop(),stack.pop();stack.append(obj[name])
+                name,obj=stack.pop(),stack.pop()
+                stack.append(obj[name] if isinstance(obj,(list,tuple)) else obj.get(name) if isinstance(obj,dict) else None)
             elif op==0x4f:
                 value,name,obj=stack.pop(),stack.pop(),stack.pop();obj[name]=value
-            elif op in (0x0a,0x0c):
-                right,left=stack.pop(),stack.pop();stack.append(left+right if op==0x0a else left*right)
+            elif op in (0x0a,0x0b,0x0c):
+                right,left=stack.pop(),stack.pop();stack.append(left+right if op==0x0a else left-right if op==0x0b else left*right)
+            elif op==0x12:stack.append(not bool(stack.pop()))
+            elif op in (0x99,0x9d):
+                if op==0x99 or bool(stack.pop()):at+=arg
             elif op==0x40:
                 constructor,count=stack.pop(),stack.pop()
                 if constructor!='Array':raise AssertionError('Unsupported constructor '+constructor)
                 stack.append([stack.pop() for _ in range(count)])
             elif op==0x52:
                 method,obj,count=stack.pop(),stack.pop(),stack.pop()
-                stack.append(obj[method](*[stack.pop() for _ in range(count)]))
+                arguments=[stack.pop() for _ in range(count)]
+                if obj is scope and method in self.functions:
+                    self.call(method,scope,arguments[0] if arguments else None);stack.append(None)
+                else:stack.append(obj[method](*arguments))
             elif op==0x17:stack.pop()
             else:raise AssertionError('Unsupported action opcode '+hex(op))
         if stack:raise AssertionError('Action left values on its stack')
@@ -93,23 +112,24 @@ class NativeMenuTests(unittest.TestCase):
         self.assertEqual(original.keys(),native.keys())
         for name in original:
             if name not in MENU_NAMES:self.assertEqual(original[name],native[name],name)
+            elif name=='frontend.swf':self.assertEqual(native[name],patch_mouse(patch_main_menu(original[name])),name)
             elif name!='options.swf':self.assertEqual(native[name],patch_mouse(original[name]),name)
         self.assertEqual(source.read_bytes(),before)
-        self.assertEqual(native['options.swf'],patch_mouse(patch_options(original['options.swf'])))
+        self.assertEqual(native['options.swf'],patch_mouse(patch_controls(patch_options(original['options.swf']))))
         for entry in stoc_entries(build(source))['entries']:
             if entry['encoding']=='raw':
                 self.assertEqual(entry['word_20'],0)
                 self.assertGreaterEqual(entry['word_12'],entry['stored_size'])
         apt=native['options.swf'][0x20:]
         frames=u(apt,0xe0c)
-        self.assertEqual(u(apt,frames),20) # Eight existing controls plus twelve ordinary placed rows.
+        self.assertEqual(u(apt,frames),24) # Eight existing controls plus fifteen settings and native page row.
         self.assertIn(b'getNativeAction\0',apt)
-        rows=('resolution','windowsize','windowmode','vsync','framecap','filtering','antialiasing',
-              'fov','renderscale','bloom','depthoffield','motionblur')
+        rows=(*NATIVE_ROWS,'page')
         for row in rows:
             self.assertIn(('text_'+row+'\0').encode(),apt)
             self.assertIn(('set_'+row+'\0').encode(),apt)
-        # Existing audio, controls and credits character records stay identical.
+        # Existing audio and credits retain their authored records. The separate
+        # control-menu tests pin its native additions and retained methods.
         old=original['options.swf'][0x20:0xc4d2]
         changed=set(range(frames,frames+8))|set(range(0x3920,0x3924))|set(range(0x23c8,0x23cc))|set(range(0x5f8+20,0x5f8+28))
         # Original imported footer wrappers have no instance name. Expose the
@@ -125,9 +145,9 @@ class NativeMenuTests(unittest.TestCase):
             pointer=u(apt,at+52)
             self.assertEqual(apt[pointer:apt.index(0,pointer)],name.encode('ascii'))
             changed.update(range(at+4,at+8));changed.update(range(at+52,at+56))
-        self.assertEqual(u(apt,0x5f8+20),116)
+        self.assertEqual(u(apt,0x5f8+20),144)
         character_table=u(apt,0x5f8+24)
-        for i in range(92,116,2):
+        for i in range(92,124,2):
             text=u(apt,character_table+i*4)
             self.assertEqual(u(apt,text),2)
             self.assertEqual(apt[u(apt,text+56)],0) # No shared Brightness localization binding.
@@ -136,7 +156,7 @@ class NativeMenuTests(unittest.TestCase):
         for i,row in enumerate(rows,1):
             placement=u(apt,control_table+(8+i-1)*4)
             self.assertEqual(u(apt,placement+12),93+(i-1)*2)
-            self.assertEqual(struct.unpack_from('>f',apt,placement+36)[0],-115+45+21*(i-1))
+            self.assertEqual(struct.unpack_from('>f',apt,placement+36)[0],row_y(row))
         self.assertEqual(struct.unpack_from('>f',apt,0xdb0+36)[0],20)
         changed.update(range(0xdb0+36,0xdb0+40))
         aa_text=u(apt,character_table+104*4)
@@ -146,6 +166,10 @@ class NativeMenuTests(unittest.TestCase):
         for at in (0x3a24,0x3a64,0x3aa4):changed.update(range(at+36,at+40))
         root_frames=u(old,0x5f8+12)
         changed.update(range(root_frames,root_frames+8))
+        for at in (0x3BB0,):changed.update(range(at,at+4))
+        changed.update(range(0x1708,0x1710))
+        for at in (0x3CB4,0x3DB4,0x3E74,0x3DF4,0x3E34,0x3EB4,0x3CF4,0x3D34,0x3D74):changed.update(range(at+36,at+40))
+        for at in (0xE50,0xEA0,0xEF0):changed.update(range(at+36,at+40))
         # The native unloader rewrites every constant-table element to its
         # traversal ordinal. These four-byte indices must be canonicalized;
         # opcode bytes, geometry and all timeline structures remain pinned.
@@ -158,32 +182,64 @@ class NativeMenuTests(unittest.TestCase):
                 actions=NativeActions(resources(build(source))['options.swf'])
                 exports=[];saves=[]
                 scope={'_root':{'_screen':{'SaveVideoSettings':lambda:saves.append(True)},
-                                'initializeButtons':lambda:None},
+                                'InitialSelection':'Brightness'},
                        '_level0':{'screen':{'SetSafeString':lambda value:exports.append(value)}}}
+                scope['_root']['VideoMenu']=scope
+                for row in ('brightness',*NATIVE_ROWS,'page'):
+                    scope['text_'+row]={'_visible':True,'text_entry':{'text':'Source '+row}}
+                scope['brightnessSlider']={'_visible':True};scope['brightnessColorRef']={'_visible':True}
+                def initialize():
+                    for button,text in zip(scope['MenuItemButtons'],scope['TextRefs']):
+                        scope[button]={'_visible':False,'text_str':scope[text]['text_entry']['text'],
+                                       'DynamicText_mc':{'dynamicText':{}}}
+                        scope[text]['_visible']=False
+                def activate(index):
+                    self.assertEqual(scope['_root']['InitialSelection'],'')
+                    for button in scope['MenuItemButtons']:scope[button]['_visible']=True
+                    return index
+                def activate_gizmos():
+                    # The original Apt routine consumes and hides slider ColorRefs.
+                    for index,kind in enumerate(scope['GizmoTypes']):
+                        if kind=='slider':scope[scope['ColorRefs'][index]]['_visible']=False
+                scope['_root']['activateGizmos']=activate_gizmos
+                scope['_root']['initializeButtons']=initialize;scope['_root']['activateMenuButtons']=activate
                 actions.evaluate(actions.begin,len(actions.apt),scope)
                 self.assertEqual(scope['currentSelection'],0)
                 self.assertEqual(scope['nativeAction'],0)
-                self.assertEqual(scope['MenuItemIds'],['Brightness','Resolution','WindowSize','WindowMode',
-                                                      'VSync','FrameRate','Filtering','Antialiasing',
-                                                      'FieldOfView','RenderScale','Bloom','DepthOfField','MotionBlur'])
-                self.assertEqual(len(scope['MenuItemButtons']),13)
-                for row in range(13):
-                    for method,direction in (('moveLeft',0),('moveRight',1)):
-                        with self.subTest(row=row,method=method):
-                            scope['currentSelection']=row;before=len(saves)
-                            actions.call(method,scope)
-                            expected=100+row*2+direction # Render row specifically exports 102/103.
-                            self.assertIs(type(scope['nativeAction']),int)
-                            self.assertEqual(scope['nativeAction'],expected)
-                            self.assertEqual(len(saves),before+1)
-                            actions.call('getNativeAction',scope)
-                            self.assertIs(type(exports[-1]),int)
-                            self.assertEqual(exports[-1],expected)
-                            self.assertEqual(scope['nativeAction'],0)
-                            self.assertEqual(scope['currentSelection'],row)
-                            actions.call('getNativeAction',scope)
-                            self.assertEqual(exports[-1],0)
-                            self.assertEqual(scope['currentSelection'],row)
+                seen=set()
+                for page in (0,1,0):
+                    self.assertEqual(scope['nativePage'],page)
+                    self.assertEqual(scope['MenuItemButtons'],['btn_'+row for row in VIDEO_PAGES[page]])
+                    self.assertEqual(scope['MenuItemIds'],['NativeVideoPage','Brightness',*ROW_IDS[:7]] if page==0 else ['NativeVideoPage',*ROW_IDS[7:]])
+                    self.assertEqual(len(scope['MenuItemButtons']),9)
+                    self.assertEqual(scope['brightnessSlider']['_visible'],int(page==0))
+                    self.assertEqual(scope['GizmoTypes'],['','slider'] if page==0 else [])
+                    self.assertEqual(scope['Gizmos'],['','brightnessSlider'] if page==0 else [])
+                    self.assertTrue(all(not scope['text_'+row]['_visible'] for row in ('brightness',*NATIVE_ROWS,'page')))
+                    for selection,row in enumerate(scope['NativeRowIds']):
+                        seen.add(row)
+                        for method,direction in (('moveLeft',0),('moveRight',1)):
+                            with self.subTest(page=page,row=row,method=method):
+                                scope['currentSelection']=selection;before=len(saves)
+                                actions.call(method,scope)
+                                expected=100+row*2+direction
+                                self.assertIs(type(scope['nativeAction']),int)
+                                self.assertEqual(scope['nativeAction'],expected)
+                                self.assertEqual(len(saves),before+1)
+                                actions.call('getNativeAction',scope)
+                                self.assertIs(type(exports[-1]),int)
+                                self.assertEqual(exports[-1],expected)
+                                self.assertEqual(scope['nativeAction'],0)
+                                self.assertEqual(scope['currentSelection'],selection)
+                                actions.call('getNativeAction',scope)
+                                self.assertEqual(exports[-1],0)
+                    actions.call('nextPage',scope)
+                    self.assertFalse(scope['brightnessColorRef']['_visible'])
+                    self.assertEqual(scope['currentSelection'],0)
+                    self.assertEqual(scope['_root']['InitialSelection'],'Brightness')
+                    visible=[name for name in ('brightness',*NATIVE_ROWS,'page') if scope.get('btn_'+name,{}).get('_visible')]
+                    self.assertEqual(set(visible),set(VIDEO_PAGES[1-page]))
+                self.assertEqual(seen,set(range(PAGE_ROW_ID+1)))
                 for extent in ('2560x1080','3440x1440','3840x1600','5120x1440'):
                     label='Render resolution: '+extent+' Ultrawide (restart)'
                     button={'DynamicText_mc':{'dynamicText':{'variable':'$FE_Brightness'}}}
@@ -198,13 +254,19 @@ class NativeMenuTests(unittest.TestCase):
                     self.assertEqual(text['text_entry']['text'],label)
                     self.assertEqual(scope['currentSelection'],selection)
                 for row,label in (('fov','FOV (16:9): 110 degrees'),('renderscale','Render scale: 67% (restart)'),
-                                  ('bloom','Bloom: Off'),('depthoffield','Depth of field: Off'),('motionblur','Motion blur: Off')):
+                                  ('bloom','Bloom: Off'),('depthoffield','Depth of field: Off'),('motionblur','Motion blur: Off'),
+                                  ('atmosphericfog','Atmospheric fog: Off'),('colorgrading','Color grading: Off'),('cinematicbars','Cinematic bars: Off')):
                     button={'DynamicText_mc':{'dynamicText':{'variable':'$FE_Brightness'}}}
                     text={'text_entry':{}}
                     scope['_root']['VideoMenu']={'btn_'+row:button,'text_'+row:text}
                     actions.call('set_'+row,scope,label)
                     self.assertEqual(button['DynamicText_mc']['dynamicText']['text'],label)
                     self.assertEqual(text['text_entry']['text'],label)
+                    # A never-visited page has no wrapper yet. The source label
+                    # must still populate without trying to dereference it.
+                    del scope['_root']['VideoMenu']['btn_'+row]
+                    actions.call('set_'+row,scope,label+' again')
+                    self.assertEqual(text['text_entry']['text'],label+' again')
     def test_rejects_modified_asset(self):
         with self.assertRaises(ValueError):patch_options(b'unsupported UIX')
 

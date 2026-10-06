@@ -166,6 +166,29 @@ void run(const std::vector<uint8_t>& image,bool hardware,bool opaque) {
     // Linear filtering/UNORM conversion can round this exact midpoint to
     // either adjacent RGB10 code on hardware. Endpoint colors stay exact.
     solid(execute(first),1023u<<10);solid(execute(second),(512u<<10)|512u,1);
+    {
+        std::array<std::shared_ptr<RenderTarget>,2> queued;
+        for(auto& target:queued)target=backend.createTarget(extent,extent,TargetFormat::RGB10A2);
+        // copyFront validates the selected OM source. Restore the fixture's
+        // sibling selection after testing this ordered queue.
+        backend.bindTargets({color,nullptr,nullptr,nullptr},depth);
+        const EngineBindingResetProbe::Snapshot queueBefore(context);
+        const auto executions=backend.recordingPayloadReceipt(first).executions;
+        for(auto& target:queued) {
+            backend.clearTarget(color,{1,0,1,1});backend.executeRecordingPayload(first);
+            (void)backend.copyFront(color,target);
+        }
+        vc[22][0]=0;backend.updateSkyReplayConstants(live,vc,pc);
+        backend.clearTarget(color,{1,0,1,1});backend.executeRecordingPayload(first);backend.waitIdle();
+        require(EngineBindingResetProbe::Snapshot(context)==queueBefore&&backend.recordingPayloadReceipt(first).executions==executions+3,
+                "Queued sky replays changed bindings or execution accounting");
+        for(const auto& target:queued)solid(backend.readbackTarget(target),1023u<<10);
+        solid(backend.readbackTarget(color),1023);
+        require(backend.readbackDepthTarget(depth)==depthBefore&&backend.readbackTarget(sibling)==siblingBefore,
+                "Queued sky replay changed unrelated attachments");
+        vc[22][0]=1;backend.updateSkyReplayConstants(live,vc,pc);
+        backend.bindTargets({sibling,nullptr,nullptr,nullptr},depth);
+    }
     vc[22][0]=0;backend.updateSkyReplayConstants(live,vc,pc);solid(execute(first),1023);solid(execute(second),(512u<<10)|512u,1);
     vc[22][0]=1;backend.updateSkyReplayConstants(live,vc,pc);const auto recorded=execute(first);solid(recorded,1023u<<10);
     // Compare real immediate and recorded draws using the same effective banks.

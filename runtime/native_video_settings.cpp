@@ -20,16 +20,16 @@ bool NativeVideoSettings::validRendering() const {
 NativeVideoSettings NativeVideoSettings::load(const std::filesystem::path& file) {
     NativeVideoSettings out;
     std::ifstream in(file);uint32_t version{},res{},mode{},sync{},rate{};
-    if(!(in>>version>>res>>mode>>sync>>rate) || version<1 || version>5 || mode>=2 || sync>=2 ||
-       !(version==5?validFrameRate(rate):(rate==0||rate==60||rate==120)))return out;
-    if(res>=(version>=4?windowResolutionCount:3u))return out;
+    if(!(in>>version>>res>>mode>>sync>>rate) || version<1 || version>6 || mode>=2 || sync>=2 ||
+       !(version>=5?validFrameRate(rate):(rate==0||rate==60||rate==120)))return out;
+    if(res>=(version>=6?windowResolutionCount:version>=4?7u:3u))return out;
     if(version==1)out={res,mode!=0,sync!=0,rate,res,0,0};
     else {
         uint32_t render{},filter{},aa{};
         if(!(in>>render>>filter) || render>=(version>=4?renderResolutionCount:5u) || filter>=4)return out;
         if(version>=3 && (!(in>>aa) || aa>=4))return out;
         out={res,mode!=0,sync!=0,rate,render,filter,aa};
-        if(version==5) {
+        if(version>=5) {
             uint32_t fov{},scale{},glow{},dof{},blur{};
             if(!(in>>fov>>scale>>glow>>dof>>blur) ||
                (fov!=0&&(fov<60||fov>110||fov%5)) ||
@@ -37,6 +37,11 @@ NativeVideoSettings NativeVideoSettings::load(const std::filesystem::path& file)
                glow>1||dof>1||blur>1)return {};
             out.fieldOfView=fov;out.renderScale=scale;
             out.bloom=glow!=0;out.depthOfField=dof!=0;out.motionBlur=blur!=0;
+            if(version>=6) {
+                uint32_t fog{},grading{},bars{};
+                if(!(in>>fog>>grading>>bars)||fog>1||grading>1||bars>1)return {};
+                out.atmosphericFog=fog!=0;out.colorGrading=grading!=0;out.cinematicLetterbox=bars!=0;
+            }
             if(!out.validRendering())return {};
         }
     }
@@ -48,8 +53,9 @@ void NativeVideoSettings::save(const std::filesystem::path& file) const {
     // preference file is separate from the strict profile directory; a partial
     // write is rejected by load() and safely falls back to defaults.
     std::filesystem::create_directories(file.parent_path());
-    std::ofstream out(file,std::ios::trunc);out<<5<<' '<<resolution<<' '<<fullscreen<<' '<<vsync<<' '<<frameRate<<' '<<renderResolution<<' '<<textureFiltering<<' '<<antialiasing
-        <<' '<<fieldOfView<<' '<<renderScale<<' '<<bloom<<' '<<depthOfField<<' '<<motionBlur<<'\n';out.close();
+    std::ofstream out(file,std::ios::trunc);out<<6<<' '<<resolution<<' '<<fullscreen<<' '<<vsync<<' '<<frameRate<<' '<<renderResolution<<' '<<textureFiltering<<' '<<antialiasing
+        <<' '<<fieldOfView<<' '<<renderScale<<' '<<bloom<<' '<<depthOfField<<' '<<motionBlur
+        <<' '<<atmosphericFog<<' '<<colorGrading<<' '<<cinematicLetterbox<<'\n';out.close();
     if(!out)throw Failure("Unable to save native video settings");
 }
 void NativeVideoSettings::step(uint32_t row,int direction) {
@@ -70,7 +76,7 @@ void NativeVideoSettings::step(uint32_t row,int direction) {
         static_assert(order.size()==renderResolutionCount);
         cycle(renderResolution,order,true);
     }
-    else if(row==2)resolution=(resolution+(direction>0?1u:windowResolutionCount-1))%windowResolutionCount;
+    else if(row==2){constexpr std::array order{0u,1u,2u,3u,7u,4u,5u,8u,6u};cycle(resolution,order);}
     else if(row==3)fullscreen=!fullscreen;
     else if(row==4)vsync=!vsync;
     else if(row==5)cycle(frameRate,frameRates);
@@ -81,6 +87,9 @@ void NativeVideoSettings::step(uint32_t row,int direction) {
     else if(row==10)bloom=!bloom;
     else if(row==11)depthOfField=!depthOfField;
     else if(row==12)motionBlur=!motionBlur;
+    else if(row==13)atmosphericFog=!atmosphericFog;
+    else if(row==14)colorGrading=!colorGrading;
+    else if(row==15)cinematicLetterbox=!cinematicLetterbox;
     else throw Failure("Unknown native video settings row");
 }
 std::string NativeVideoSettings::renderLabel() const {
@@ -102,11 +111,12 @@ void applyNativeVideoSettings(Runtime& rt) {
     rt.window->configureVideo(rt.videoSettings.width(),rt.videoSettings.height(),rt.videoSettings.fullscreen);
     applyNativeFrameRate(rt);
     rt.vsyncEnabled=rt.videoSettings.vsync;rt.videoSettingsPending=false;
-    std::fprintf(stderr,"[NATIVE VIDEO] window=%ux%u fullscreen=%u vsync=%u frame_rate=%u render_index=%u render=%ux%u aa=%u anisotropy=%u fov=%u render_scale=%u bloom=%u dof=%u motion_blur=%u; render/AA/filter/scale changes apply after restart\n",
+    std::fprintf(stderr,"[NATIVE VIDEO] window=%ux%u fullscreen=%u vsync=%u frame_rate=%u render_index=%u render=%ux%u aa=%u anisotropy=%u fov=%u render_scale=%u bloom=%u dof=%u motion_blur=%u fog=%u grading=%u letterbox=%u; render/AA/filter/scale changes apply after restart\n",
         rt.window->presentationWidth.load(),rt.window->presentationHeight.load(),rt.videoSettings.fullscreen,rt.videoSettings.vsync,rt.videoSettings.frameRate,
         rt.videoSettings.renderResolution,rt.videoSettings.renderWidth(),rt.videoSettings.renderHeight(),
         rt.videoSettings.antialiasing,rt.videoSettings.anisotropy(),rt.videoSettings.fieldOfView,rt.videoSettings.renderScale,
-        rt.videoSettings.bloom,rt.videoSettings.depthOfField,rt.videoSettings.motionBlur);
+        rt.videoSettings.bloom,rt.videoSettings.depthOfField,rt.videoSettings.motionBlur,
+        rt.videoSettings.atmosphericFog,rt.videoSettings.colorGrading,rt.videoSettings.cinematicLetterbox);
 }
 }
 namespace {
@@ -130,8 +140,11 @@ void labels(PPCContext& ctx,uint8_t* base) {
         "Render scale: "+std::to_string(video.renderScale)+"% (restart)",
         std::string("Bloom: ")+(video.bloom?"On":"Off"),
         std::string("Depth of field: ")+(video.depthOfField?"On":"Off"),
-        std::string("Motion blur: ")+(video.motionBlur?"On":"Off")};
-    const std::array names{"resolution","windowsize","windowmode","vsync","framecap","filtering","antialiasing","fov","renderscale","bloom","depthoffield","motionblur"};
+        std::string("Motion blur: ")+(video.motionBlur?"On":"Off"),
+        std::string("Atmospheric fog: ")+(video.atmosphericFog?"On":"Off"),
+        std::string("Color grading: ")+(video.colorGrading?"On":"Off"),
+        std::string("Cinematic bars: ")+(video.cinematicLetterbox?"On":"Off")};
+    const std::array names{"resolution","windowsize","windowmode","vsync","framecap","filtering","antialiasing","fov","renderscale","bloom","depthoffield","motionblur","atmosphericfog","colorgrading","cinematicbars"};
     static_assert(names.size()==values.size());
     // Use the same string-argument Apt bridge as the original brightness row.
     for(size_t i=0;i<values.size();++i) {
@@ -171,6 +184,10 @@ void SimpsonsNativeVideoSave(PPCContext& ctx,uint8_t* base) {
         std::fprintf(stderr,"[NATIVE VIDEO MENU] action=%u row=%u direction=%d render_index=%u->%u label=\"%s\"\n",
             action,row,direction,before,rt.videoSettings.renderResolution,rt.videoSettings.renderLabel().c_str());
         labels(ctx,base);
+    } else if(action==100+2*Simpsons::NativeVideoSettings::nativePageRow||action==101+2*Simpsons::NativeVideoSettings::nativePageRow) {
+        cpu.invoke(0x827BF8F8,guestText(cpu,base,"VideoMenu.nextPage"),0,target,0);
+        labels(ctx,base);
+        std::fprintf(stderr,"[NATIVE VIDEO MENU] switched page; native settings unchanged\n");
     } else if(action==0||action==100||action==101) {
         if(action)cpu.invoke(0x827BF8F8,guestText(cpu,base,action==100?"gizmoMoveLeft":"gizmoMoveRight"),0,target,0);
         // The existing brightness slider still uses the original save path.

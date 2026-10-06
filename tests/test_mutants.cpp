@@ -1,6 +1,7 @@
 // Real native mutants and PPC imports; no original image, mock ownership or
 // forced thread termination. NativeMutantTests links SimpsonsRuntime.
 #include "runtime/runtime.h"
+#include "runtime/stall_profiler.h"
 #include "ppc_recomp_shared.h"
 #include <array>
 #include <chrono>
@@ -111,7 +112,12 @@ void recursiveOwnershipContracts(Runtime& rt) {
     auto* base=rt.base;
     const uint32_t id=makeMutant(rt,0x100); // Nonzero u32 with a zero low byte.
     auto object=rt.getHandle(id);
+    const uint64_t initialOwner=object->stallMutantOwner.load(std::memory_order_relaxed);
+    require(!Simpsons::StallProfiler::enabled || uint32_t(initialOwner>>32)==GetCurrentThreadId(),
+            "Initially owned mutant diagnostic did not identify its native owner");
     require(wait(rt,id)==success,"Initially owned mutant was not recursively acquirable"); // Depth two.
+    require(object->stallMutantOwner.load(std::memory_order_relaxed)==initialOwner,
+            "Recursive acquisition replaced the initial owner observation");
     PPC_STORE_U32(output+4,0x11223344);
     rejects([&]{release(rt,id,output+4);},"Release interpreted reserved r4 as a previous-count pointer","Unsupported native mutant release control");
     require(PPC_LOAD_U32(output+4)==0x11223344,"Rejected release wrote the reserved argument as output");
@@ -123,16 +129,25 @@ void recursiveOwnershipContracts(Runtime& rt) {
         require(wait(rt,id)==timeout,"Rejected controls/release made another thread's mutant available");
     });
     nonowner.finish();
+    require(object->stallMutantOwner.load(std::memory_order_relaxed)==initialOwner,
+            "Non-owner release or timed-out wait changed the owner observation");
     require(release(rt,id)==success,"First recursive release failed");
+    require(object->stallMutantOwner.load(std::memory_order_relaxed)==initialOwner,
+            "Recursive release prematurely cleared the owner observation");
     Worker stillOwned([&]{require(wait(rt,id)==timeout,"One release incorrectly exhausted recursive ownership");});
     stillOwned.finish();
     Worker blocked([&] {
         require(wait(rt,id,true)==success,"Cross-thread wait did not acquire after final owner release");
+        require(!Simpsons::StallProfiler::enabled ||
+                uint32_t(object->stallMutantOwner.load(std::memory_order_relaxed)>>32)==GetCurrentThreadId(),
+                "Handoff did not record the new native owner");
         require(release(rt,id)==success,"Acquiring native thread could not release its mutant");
     });
     awaitWaitLease(object);
     require(release(rt,id)==success,"Final recursive owner release failed");
     blocked.finish();
+    require(object->stallMutantOwner.load(std::memory_order_relaxed)==0,
+            "Final release retained a stale owner observation");
     require(release(rt,id)==notOwned,"Unowned mutant release reported fabricated success");
     require(wait(rt,id)==success && release(rt,id)==success,"Mutant could not be acquired again after handoff");
     require(close(rt,id)==success,"Recursive fixture close failed");
@@ -140,18 +155,55 @@ void recursiveOwnershipContracts(Runtime& rt) {
 
 void abandonmentContracts(Runtime& rt) {
     const uint32_t id=makeMutant(rt);
+    auto object=rt.getHandle(id);
     require(release(rt,id)==notOwned,"Unowned creation granted implicit ownership");
     Worker owner([&] {
         require(wait(rt,id)==success && wait(rt,id)==success,"Native owner did not acquire recursive mutant");
         // Deliberately return with recursion depth two. No Release/TerminateThread.
     });
     owner.finish(); // Actual native owner exit is the abandonment trigger.
+    const uint32_t departedOwner=uint32_t(object->stallMutantOwner.load(std::memory_order_relaxed)>>32);
+    require(!Simpsons::StallProfiler::enabled || (departedOwner && departedOwner!=GetCurrentThreadId()),
+            "Departed owner diagnostic did not retain its observed native thread");
     require(wait(rt,id)==abandoned,"Owner exit did not return ABANDONED_WAIT_0 through the real wait import");
+    require(!Simpsons::StallProfiler::enabled ||
+            uint32_t(object->stallMutantOwner.load(std::memory_order_relaxed)>>32)==GetCurrentThreadId(),
+            "Abandonment did not replace the departed owner observation");
     require(wait(rt,id)==success,"Abandonment did not transfer ownership to the waiting thread");
     require(release(rt,id)==success && release(rt,id)==success && release(rt,id)==notOwned,
             "Abandoned recursion was not reset or new recursive ownership was lost");
     require(wait(rt,id)==success && release(rt,id)==success,"Abandonment incorrectly persisted into later ownership");
     require(close(rt,id)==success,"Abandonment fixture close failed");
+}
+
+void diagnosticCallerContracts(Runtime& rt) {
+    auto* base=rt.base;
+    constexpr uint32_t stack=0x10100,previous=0x10200,caller=0x82010004;
+    rt.map(0x82010000,0x1000,false,"mutant diagnostic original code fixture");
+    PPC_STORE_U32(stack,previous);PPC_STORE_U32(previous-8,caller);
+    const uint32_t id=makeMutant(rt);auto object=rt.getHandle(id);
+    require(object->stallMutantOwner.load(std::memory_order_relaxed)==0,"Unowned create published diagnostic ownership");
+    PPCContext ctx{};ctx.r3.u64=id;ctx.r4.u64=1;ctx.r6.u64=pollTimeout;ctx.r1.u64=stack;ctx.lr=0x82434fc8;
+    const uint32_t fp=PPCFPSCRRegister::getcsr();
+    constexpr DWORD error=0x12347890;
+    SetLastError(error);
+    __imp__NtWaitForSingleObjectEx(ctx,base);
+    const DWORD resultingError=GetLastError();
+    require(resultingError==error && PPCFPSCRRegister::getcsr()==fp,"Mutant diagnostics changed host state");
+    require(ctx.r3.u64==success && ctx.r1.u64==stack && ctx.lr==0x82434fc8,
+            "Mutant diagnostic stack read changed guest wait state");
+    const uint64_t observed=object->stallMutantOwner.load(std::memory_order_relaxed);
+    require(Simpsons::StallProfiler::enabled?
+            uint32_t(observed>>32)==GetCurrentThreadId() && uint32_t(observed)==caller:observed==0,
+            "Mutant diagnostics did not recover the bounded saved outer caller");
+    require(release(rt,id)==success,"Diagnostic caller fixture release failed");
+    require(object->stallMutantOwner.load(std::memory_order_relaxed)==0,"Diagnostic caller final release did not clear observation");
+    ctx.r3.u64=id;ctx.r1.u64=0x30000; // An unmapped frame must stay diagnostic-only.
+    __imp__NtWaitForSingleObjectEx(ctx,base);
+    require(ctx.r3.u64==success && ctx.r1.u64==0x30000 &&
+            uint32_t(object->stallMutantOwner.load(std::memory_order_relaxed))==0,
+            "Unmapped diagnostic frame threw or fabricated an outer caller");
+    require(release(rt,id)==success && close(rt,id)==success,"Diagnostic caller fixture cleanup failed");
 }
 
 void closeDuringActualWaitContracts(Runtime& rt) {
@@ -209,7 +261,7 @@ int main() {
         auto* base=rt.base;
         PPC_STORE_U64(pollTimeout,0);
         PPC_STORE_U64(boundedTimeout,uint64_t(-20000000ll)); // Relative NT 100 ns units: two seconds.
-        invalidCreationContracts(rt);recursiveOwnershipContracts(rt);abandonmentContracts(rt);
+        invalidCreationContracts(rt);recursiveOwnershipContracts(rt);abandonmentContracts(rt);diagnosticCallerContracts(rt);
         closeDuringActualWaitContracts(rt);invalidHandleAndCancellationContracts(rt);
         std::puts("NativeMutantOwnership PASS: real recursion, thread handoff/abandonment, checked imports and in-flight close");
         return 0;

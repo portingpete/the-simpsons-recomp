@@ -7,7 +7,7 @@ namespace Simpsons {
 std::shared_ptr<Platform::NativeSaveStore> Runtime::nativeSaveSource(bool create){
     if(active!=this)throw Failure("Native save store belongs to another runtime");checkRunning();std::lock_guard lock(nativeSaveMutex);
     if(!nativeSaves&&create){if(!gameRoot.is_absolute())throw Failure("Native save store has no original image root");
-        nativeSaves=std::make_shared<Platform::NativeSaveStore>(contentRoot.empty()?gameRoot.parent_path()/"userdata"/"content":contentRoot);}
+        nativeSaves=std::make_shared<Platform::NativeSaveStore>(contentRoot.empty()?gameRoot.parent_path()/"saves":contentRoot);}
     return nativeSaves;
 }
 }

@@ -392,7 +392,7 @@ std::shared_ptr<Graphics::Texture> EngineITXDTextures::textureFromHeader(uint8_t
     need(header>=0xCC,"unknown copied texture header");auto& record=s.find(header-0xCC);
     return s.nativeTexture(record);
 }
-std::shared_ptr<Graphics::Texture> EngineITXDTextures::inputPromptTexture(uint8_t* base,uint32_t raster){
+std::shared_ptr<Graphics::Texture> EngineITXDTextures::inputPromptTexture(uint8_t* base,uint32_t raster,const NativeControlSettings* controls){
     auto& s=*state;std::lock_guard lock(s.mutex);s.require(base);s.backend.validateSubmissionContext();
     if(raster<0x78)return {};
     const auto found=s.records.find(raster-0x78);
@@ -403,7 +403,7 @@ std::shared_ptr<Graphics::Texture> EngineITXDTextures::inputPromptTexture(uint8_
     const auto end=std::find(name,name+64,'\0');
     if(!Graphics::isInputPromptAtlas(std::string_view(name,size_t(end-name)),word(r.relocated,0x84),word(r.relocated,0x88)))return {};
     s.metadata(r,true);
-    return s.inputPrompts.texture(s.backend);
+    return controls?s.inputPrompts.texture(s.backend,Graphics::keyboardMousePromptLayout(*controls)):s.inputPrompts.texture(s.backend);
 }
 std::shared_ptr<Graphics::Texture> EngineITXDTextures::paletteFromHeader(uint8_t* base,uint32_t header){
     auto& s=*state;std::lock_guard lock(s.mutex);s.require(base);s.backend.validateSubmissionContext();

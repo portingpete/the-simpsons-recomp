@@ -1,5 +1,6 @@
 #pragma once
 #include "runtime.h"
+#include "stall_profiler.h"
 
 namespace Simpsons {
 // Checked ABI frame for native-to-original CPU service calls. All memory effects
@@ -26,6 +27,7 @@ public:
     PPCContext& registers() {return call;}
     uint32_t invoke(uint32_t address) {
         PPCGuestFloatingPointScope floatingPoint(call.fpscr);
+        StallProfiler::Scope profiling(StallProfiler::Section::Guest,"EngineCpuCalls::invoke",&call,address);
         try {PPCSafeIndirect(call,base,address);}
         catch(...) {unwindAudioReaderCall(call);throw;}
         return call.r3.u32;

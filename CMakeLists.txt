@@ -6,6 +6,7 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(SIMPSONS_DIAGNOSTIC "Permit explicit traps for incomplete translation" OFF)
+option(SIMPSONS_STALL_PROFILER "Compile opt-in frame/HLE stall profiling (enable at runtime with SIMPSONS_STALL_PROFILE=1)" ON)
 # The title-screen ThinLTO gain did not transfer to measured gameplay. Keep
 # ordinary code generation as the default; ThinLTO remains an opt-in trial.
 option(SIMPSONS_THINLTO "Enable Clang ThinLTO for the native game" OFF)
@@ -65,7 +66,7 @@ set(NATIVE_VIDEO_PACKAGE "${CMAKE_SOURCE_DIR}/build/native-assets/frontend/front
 set(NATIVE_VIDEO_GAME_PACKAGE "${CMAKE_SOURCE_DIR}/build/native-assets/simpsons_chars/simpsons_chars_global.str")
 add_custom_command(OUTPUT "${NATIVE_VIDEO_PACKAGE}" "${NATIVE_VIDEO_GAME_PACKAGE}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/build_native_video_menu.py" --output-root "${CMAKE_SOURCE_DIR}/build/native-assets"
-  DEPENDS tools/build_native_video_menu.py tools/build_native_mouse_menu.py tools/inspect_assets.py "Simpsons Game, The (USA)/frontend/frontend.str" "Simpsons Game, The (USA)/simpsons_chars/simpsons_chars_global.str"
+  DEPENDS tools/build_native_video_menu.py tools/build_native_control_menu.py tools/build_native_main_menu.py tools/build_native_mouse_menu.py tools/inspect_assets.py "Simpsons Game, The (USA)/frontend/frontend.str" "Simpsons Game, The (USA)/simpsons_chars/simpsons_chars_global.str"
   VERBATIM)
 add_custom_target(NativeVideoMenu
   COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/native-assets/frontend"
@@ -73,6 +74,39 @@ add_custom_target(NativeVideoMenu
   COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/native-assets/simpsons_chars"
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${NATIVE_VIDEO_GAME_PACKAGE}" "${CMAKE_CURRENT_BINARY_DIR}/native-assets/simpsons_chars/simpsons_chars_global.str"
   DEPENDS "${NATIVE_VIDEO_PACKAGE}" "${NATIVE_VIDEO_GAME_PACKAGE}" VERBATIM)
+set(NATIVE_STORAGE_ASSET_DIR "${CMAKE_SOURCE_DIR}/build/native-assets/storage-screen")
+add_custom_command(OUTPUT "${NATIVE_STORAGE_ASSET_DIR}/storage-font.dat" "${NATIVE_STORAGE_ASSET_DIR}/storage-title.dat"
+  COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/prepare_native_storage_assets.py" --output-root "${CMAKE_SOURCE_DIR}/build/native-assets"
+  DEPENDS tools/prepare_native_storage_assets.py tools/extract_resource.py tools/decode_itxd.py "Simpsons Game, The (USA)/frontend/frontend.str"
+  VERBATIM)
+add_custom_target(NativeStorageAssets
+  COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/native-assets/storage-screen"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${NATIVE_STORAGE_ASSET_DIR}/storage-font.dat" "${CMAKE_CURRENT_BINARY_DIR}/native-assets/storage-screen/storage-font.dat"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${NATIVE_STORAGE_ASSET_DIR}/storage-title.dat" "${CMAKE_CURRENT_BINARY_DIR}/native-assets/storage-screen/storage-title.dat"
+  DEPENDS "${NATIVE_STORAGE_ASSET_DIR}/storage-font.dat" "${NATIVE_STORAGE_ASSET_DIR}/storage-title.dat" VERBATIM)
+add_dependencies(NativeVideoMenu NativeStorageAssets)
+set(NATIVE_PC_TEXT_STAGES bargainbin bigsuperhappy brt cheater colossaldonut
+  dayofthedolphins dayspringfieldstoodstill eighty_bites frontend gamehub
+  grand_theft_scratchy loc medal_of_homer meetthyplayer mob_rules neverquest
+  rhymes simpsons_chars spr_hub tree_hugger)
+set(NATIVE_PC_TEXT_PACKAGES)
+set(NATIVE_PC_TEXT_SOURCES)
+foreach(STAGE IN LISTS NATIVE_PC_TEXT_STAGES)
+  list(APPEND NATIVE_PC_TEXT_PACKAGES "${CMAKE_SOURCE_DIR}/build/native-assets/${STAGE}/text/e172a05c.str")
+  list(APPEND NATIVE_PC_TEXT_SOURCES "${CMAKE_SOURCE_DIR}/Simpsons Game, The (USA)/${STAGE}/text/e172a05c.str")
+endforeach()
+add_custom_command(OUTPUT ${NATIVE_PC_TEXT_PACKAGES}
+  COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/build_native_pc_text.py" --output-root "${CMAKE_SOURCE_DIR}/build/native-assets"
+  DEPENDS tools/build_native_pc_text.py tools/inspect_assets.py ${NATIVE_PC_TEXT_SOURCES}
+  VERBATIM)
+add_custom_target(NativePCText DEPENDS ${NATIVE_PC_TEXT_PACKAGES})
+foreach(STAGE IN LISTS NATIVE_PC_TEXT_STAGES)
+  add_custom_command(TARGET NativePCText POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/native-assets/${STAGE}/text"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_SOURCE_DIR}/build/native-assets/${STAGE}/text/e172a05c.str" "${CMAKE_CURRENT_BINARY_DIR}/native-assets/${STAGE}/text/e172a05c.str"
+    VERBATIM)
+endforeach()
+add_dependencies(NativeVideoMenu NativePCText)
 set(SIMPSONS_AUDIO_CODEC "${CMAKE_SOURCE_DIR}/build/audio-codec/install")
 execute_process(COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/build_native_audio_codec.py" --verify
   RESULT_VARIABLE audio_result)
@@ -130,10 +164,18 @@ if(NOT result EQUAL 0)
 endif()
 include("${SIMPSONS_GENERATED_DIR}/sources.cmake")
 add_custom_target(VerifyAOT COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/recompile.py" ${GATE_ARGS})
+add_library(SimpsonsStallProfiler STATIC runtime/stall_profiler.cpp)
+target_include_directories(SimpsonsStallProfiler PUBLIC "${CMAKE_SOURCE_DIR}" "${SIMPSONS_GENERATED_DIR}"
+  "${CMAKE_SOURCE_DIR}/third_party/XenonRecomp/thirdparty/simde")
+target_compile_definitions(SimpsonsStallProfiler PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN
+  SIMPSONS_STALL_PROFILER=$<BOOL:${SIMPSONS_STALL_PROFILER}>)
+target_compile_options(SimpsonsStallProfiler PRIVATE /fp:strict /W4 /WX /EHsc /clang:-mssse3)
 add_library(SimpsonsPPC STATIC ${SIMPSONS_PPC_SOURCES})
 add_dependencies(SimpsonsPPC VerifyAOT)
-target_include_directories(SimpsonsPPC PUBLIC "${SIMPSONS_GENERATED_DIR}" "${CMAKE_SOURCE_DIR}/third_party/XenonRecomp/thirdparty/simde")
-target_compile_definitions(SimpsonsPPC PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+target_link_libraries(SimpsonsPPC PUBLIC SimpsonsStallProfiler)
+target_include_directories(SimpsonsPPC PUBLIC "${SIMPSONS_GENERATED_DIR}" "${CMAKE_SOURCE_DIR}" "${CMAKE_SOURCE_DIR}/third_party/XenonRecomp/thirdparty/simde")
+target_compile_definitions(SimpsonsPPC PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS
+  SIMPSONS_STALL_PROFILER=$<BOOL:${SIMPSONS_STALL_PROFILER}>)
 target_compile_options(SimpsonsPPC PRIVATE /fp:strict /clang:-mssse3)
 # Keep the checked scalar memory helper visible to the native compiler only in
 # the measured hot chunks. The original generated bodies and FP rules remain.
@@ -174,6 +216,7 @@ foreach(INDEX RANGE ${NATIVE_SOURCE_LAST})
   string(JSON SOURCE GET "${NATIVE_SOURCES_JSON}" ${INDEX})
   list(APPEND NATIVE_SOURCES "${SOURCE}")
 endforeach()
+list(REMOVE_ITEM NATIVE_SOURCES "runtime/stall_profiler.cpp")
 add_library(SimpsonsRuntime STATIC ${NATIVE_SOURCES})
 target_include_directories(SimpsonsRuntime PUBLIC "${CMAKE_SOURCE_DIR}")
 target_link_libraries(SimpsonsRuntime PUBLIC SimpsonsPPC SimpsonsAudio SimpsonsAudioOutput bcrypt user32 gdi32 xinput)
@@ -1140,6 +1183,7 @@ add_library(SimpsonsGraphics STATIC
   renderer/native_backend.cpp
   renderer/d3d_call_stats.cpp
   renderer/native_input_prompts.cpp
+  renderer/native_storage_screen.cpp
   renderer/cube_texture.cpp
   renderer/screen_pipeline.cpp
   renderer/shadow_mesh.cpp
@@ -1195,8 +1239,9 @@ add_library(SimpsonsGraphics STATIC
 add_dependencies(SimpsonsGraphics VerifyEffectCatalog)
 target_include_directories(SimpsonsGraphics PRIVATE "${SIMPSONS_SHADER_DIR}" "${SIMPSONS_GENERATED_DIR}")
 target_include_directories(SimpsonsGraphics PUBLIC "${CMAKE_SOURCE_DIR}")
-target_compile_definitions(SimpsonsGraphics PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
-target_link_libraries(SimpsonsGraphics PUBLIC d3d11 dxgi)
+target_compile_definitions(SimpsonsGraphics PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN
+  SIMPSONS_STALL_PROFILER=$<BOOL:${SIMPSONS_STALL_PROFILER}>)
+target_link_libraries(SimpsonsGraphics PUBLIC d3d11 dxgi SimpsonsStallProfiler)
 target_link_libraries(SimpsonsRuntime PUBLIC SimpsonsGraphics)
 add_executable(ParticleBackendTests tests/test_particle_backend.cpp)
 target_link_libraries(ParticleBackendTests PRIVATE SimpsonsGraphics)
@@ -1255,6 +1300,23 @@ target_compile_options(SimpsonsLauncher PRIVATE /W4 /WX /EHsc)
 target_link_libraries(SimpsonsLauncher PRIVATE user32 gdi32 shell32)
 include(CTest)
 if(BUILD_TESTING)
+  add_executable(StallProfilerTests tests/test_stall_profiler.cpp runtime/stall_profiler.cpp)
+  target_include_directories(StallProfilerTests PRIVATE "${CMAKE_SOURCE_DIR}" "${SIMPSONS_GENERATED_DIR}"
+    "${CMAKE_SOURCE_DIR}/third_party/XenonRecomp/thirdparty/simde")
+  target_compile_definitions(StallProfilerTests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
+    SIMPSONS_STALL_PROFILER=1 SIMPSONS_STALL_PROFILER_TESTING=1)
+  target_compile_options(StallProfilerTests PRIVATE /fp:strict /W4 /WX /EHsc /clang:-mssse3)
+  add_test(NAME RuntimeStallProfiler COMMAND StallProfilerTests)
+  set_tests_properties(RuntimeStallProfiler PROPERTIES ENVIRONMENT "SIMPSONS_STALL_PROFILE=1")
+  add_test(NAME RuntimeStallProfilerDisabled COMMAND StallProfilerTests --disabled)
+  set_tests_properties(RuntimeStallProfilerDisabled PROPERTIES ENVIRONMENT "SIMPSONS_STALL_PROFILE=0")
+  add_executable(StallProfilerCompiledOutTests tests/test_stall_profiler_compiled_out.cpp)
+  target_include_directories(StallProfilerCompiledOutTests PRIVATE "${CMAKE_SOURCE_DIR}")
+  target_compile_definitions(StallProfilerCompiledOutTests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN SIMPSONS_STALL_PROFILER=0)
+  target_compile_options(StallProfilerCompiledOutTests PRIVATE /W4 /WX /EHsc)
+  add_test(NAME RuntimeStallProfilerCompiledOut COMMAND StallProfilerCompiledOutTests)
+  add_test(NAME RuntimeStallProfilerGeneration COMMAND "${Python3_EXECUTABLE}" -B
+    "${CMAKE_SOURCE_DIR}/tests/test_stall_profile_generation.py" -v)
   include(cmake/remaining_effect_tests.cmake)
   add_executable(InputRecordingCrashFixture tests/input_recording_crash_fixture.cpp runtime/native_input_recording.cpp)
   target_include_directories(InputRecordingCrashFixture PRIVATE "${CMAKE_SOURCE_DIR}")
@@ -1942,9 +2004,28 @@ if(BUILD_TESTING)
   target_link_libraries(NativeControllerTests PRIVATE SimpsonsRuntime)
   target_link_options(NativeControllerTests PRIVATE /STACK:67108864,1048576)
   add_test(NAME OriginalNativeControllers COMMAND NativeControllerTests "${CMAKE_SOURCE_DIR}/analysis/simpsons.pe")
+  add_test(NAME NativeControlRebinding COMMAND NativeControllerTests --controls-only)
   add_test(NAME NativeCheckpointControllers COMMAND NativeControllerTests --checkpoint-only)
   add_test(NAME OriginalControllerMovieAction COMMAND NativeControllerTests --movie-action-only "${CMAKE_SOURCE_DIR}/analysis/simpsons.pe")
   set_tests_properties(OriginalNativeControllers OriginalControllerMovieAction PROPERTIES TIMEOUT 60)
+  set_tests_properties(OriginalNativeControllers NativeControlRebinding NativeCheckpointControllers OriginalControllerMovieAction
+    PROPERTIES ENVIRONMENT "SIMPSONS_BACKGROUND_WINDOW=1")
+  add_executable(NativeMouseRecordingTests tests/test_native_mouse_recording.cpp runtime/native_input_recording.cpp)
+  target_include_directories(NativeMouseRecordingTests PRIVATE "${CMAKE_SOURCE_DIR}")
+  target_compile_definitions(NativeMouseRecordingTests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(NativeMouseRecordingTests PRIVATE /fp:strict /W4 /WX)
+  add_test(NAME NativeMouseRecording COMMAND NativeMouseRecordingTests)
+  add_executable(NativeMouseCaptureTests tests/test_native_mouse_capture.cpp)
+  target_compile_options(NativeMouseCaptureTests PRIVATE /fp:strict /W4 /WX)
+  target_link_libraries(NativeMouseCaptureTests PRIVATE SimpsonsRuntime)
+  add_test(NAME NativeMouseCaptureLifecycle COMMAND NativeMouseCaptureTests)
+  set_tests_properties(NativeMouseCaptureLifecycle PROPERTIES ENVIRONMENT "SIMPSONS_BACKGROUND_WINDOW=1")
+  add_executable(NativeMouseCameraTests tests/test_native_mouse_camera.cpp)
+  target_compile_options(NativeMouseCameraTests PRIVATE /fp:strict /W4 /WX)
+  target_link_libraries(NativeMouseCameraTests PRIVATE SimpsonsRuntime)
+  target_link_options(NativeMouseCameraTests PRIVATE /STACK:67108864,1048576)
+  add_test(NAME OriginalNativeMouseCamera COMMAND NativeMouseCameraTests "${CMAKE_SOURCE_DIR}/analysis/simpsons.pe")
+  set_tests_properties(OriginalNativeMouseCamera NativeMouseCaptureLifecycle NativeMouseRecording PROPERTIES TIMEOUT 60)
   add_executable(NativeMenuNavigationTests tests/test_native_menu_navigation.cpp)
   target_compile_options(NativeMenuNavigationTests PRIVATE /fp:strict /W4 /WX)
   target_link_libraries(NativeMenuNavigationTests PRIVATE SimpsonsRuntime)
@@ -1977,6 +2058,17 @@ if(BUILD_TESTING)
   add_test(NAME OriginalPlayerFrameTelemetry COMMAND PlayerTelemetryTests)
   add_executable(NativeFrameRateTests tests/test_native_frame_rate.cpp)
   add_executable(NativeVideoSettingsTests tests/test_native_video_settings.cpp)
+  add_executable(NativeControlSettingsTests tests/test_native_control_settings.cpp)
+  target_compile_options(NativeControlSettingsTests PRIVATE /fp:strict /W4 /WX)
+  target_link_libraries(NativeControlSettingsTests PRIVATE SimpsonsRuntime)
+  add_test(NAME NativeControlSettings COMMAND NativeControlSettingsTests)
+  add_executable(NativeControlMenuTests tests/test_native_control_menu.cpp)
+  target_compile_options(NativeControlMenuTests PRIVATE /fp:strict /W4 /WX)
+  target_link_libraries(NativeControlMenuTests PRIVATE SimpsonsRuntime)
+  target_link_options(NativeControlMenuTests PRIVATE /STACK:67108864,1048576)
+  add_test(NAME OriginalNativeControlMenu COMMAND NativeControlMenuTests "${CMAKE_SOURCE_DIR}/analysis/simpsons.pe")
+  set_tests_properties(OriginalNativeControlMenu PROPERTIES ENVIRONMENT "SIMPSONS_BACKGROUND_WINDOW=1" TIMEOUT 60)
+  add_test(NAME NativeControlMenuAssets COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/test_native_control_menu.py")
   add_executable(InternalResolutionTests tests/test_internal_resolution.cpp)
   target_compile_options(InternalResolutionTests PRIVATE /fp:strict /W4 /WX)
   target_link_libraries(InternalResolutionTests PRIVATE SimpsonsGraphics)
@@ -2003,6 +2095,7 @@ if(BUILD_TESTING)
   add_test(NAME NativeVideoSettings COMMAND NativeVideoSettingsTests)
   set_tests_properties(NativeVideoSettings PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
   add_test(NAME NativeVideoMenuAssets COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/test_native_video_menu.py")
+  add_test(NAME NativeMainMenuAssets COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/test_native_main_menu.py")
   add_executable(NativeChainTraversalTests tests/test_guest_chain.cpp)
   target_include_directories(NativeChainTraversalTests PRIVATE "${CMAKE_SOURCE_DIR}")
   target_compile_options(NativeChainTraversalTests PRIVATE /W4 /WX)
@@ -2014,14 +2107,21 @@ if(BUILD_TESTING)
   # Real-time pacing bounds: keep parallel test load from delaying its wakeups.
   set_tests_properties(OriginalNativeFrameRate PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
   add_executable(NativeStorageSelectorTests tests/test_storage_selector.cpp)
+  add_executable(NativeStorageScreenTests tests/test_native_storage_screen.cpp)
+  target_compile_options(NativeStorageScreenTests PRIVATE /fp:strict /W4 /WX)
+  target_link_libraries(NativeStorageScreenTests PRIVATE SimpsonsGraphics user32)
+  add_dependencies(NativeStorageScreenTests NativeStorageAssets)
+  add_test(NAME NativeStorageScreenRenderer COMMAND NativeStorageScreenTests "${CMAKE_CURRENT_BINARY_DIR}/native-assets/storage-screen")
+  set_tests_properties(NativeStorageScreenRenderer PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+  add_dependencies(NativeStorageSelectorTests NativeStorageAssets)
   target_compile_options(NativeStorageSelectorTests PRIVATE /fp:strict /W4 /WX)
   target_link_libraries(NativeStorageSelectorTests PRIVATE SimpsonsRuntime)
   target_link_options(NativeStorageSelectorTests PRIVATE /STACK:67108864,1048576)
   add_test(NAME OriginalNativeStorageSelector COMMAND NativeStorageSelectorTests "${CMAKE_SOURCE_DIR}/analysis/simpsons.pe")
-  set_tests_properties(OriginalNativeStorageSelector PROPERTIES TIMEOUT 60)
+  set_tests_properties(OriginalNativeStorageSelector PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "SIMPSONS_BACKGROUND_WINDOW=1")
   foreach(storage_flag_pair IN ITEMS 0 1 2 3)
     add_test(NAME OriginalNativeStorageSelectorFlags${storage_flag_pair} COMMAND NativeStorageSelectorTests "${CMAKE_SOURCE_DIR}/analysis/simpsons.pe" --flags ${storage_flag_pair})
-    set_tests_properties(OriginalNativeStorageSelectorFlags${storage_flag_pair} PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+    set_tests_properties(OriginalNativeStorageSelectorFlags${storage_flag_pair} PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "SIMPSONS_BACKGROUND_WINDOW=1")
   endforeach()
   add_executable(ViewportCameraPassTests tests/test_viewport_camera_pass.cpp)
   target_compile_options(ViewportCameraPassTests PRIVATE /fp:strict /W4 /WX)
@@ -2561,11 +2661,13 @@ if(BUILD_TESTING)
   add_test(NAME NativeHostFloatingPoint COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tests/test_host_fp.py")
   set_tests_properties(NativeHostFloatingPoint PROPERTIES TIMEOUT 120)
   add_executable(FilesystemTests tests/test_filesystem.cpp runtime/filesystem.cpp runtime/native_saves.cpp runtime/native_content.cpp)
-  target_link_libraries(FilesystemTests PRIVATE bcrypt)
+  target_link_libraries(FilesystemTests PRIVATE bcrypt SimpsonsStallProfiler)
   target_compile_definitions(FilesystemTests PRIVATE SIMPSONS_FILESYSTEM_STANDALONE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_include_directories(FilesystemTests PRIVATE "${CMAKE_SOURCE_DIR}" "${SIMPSONS_GENERATED_DIR}" "${CMAKE_SOURCE_DIR}/third_party/XenonRecomp/thirdparty/simde")
   add_test(NAME OriginalAssetFilesystem COMMAND FilesystemTests)
+  add_test(NAME NativePCMenuText COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/test_native_pc_text.py")
   add_executable(ThreadLifecycleTests tests/test_thread_lifecycle.cpp runtime/threads.cpp runtime/thread_objects.cpp runtime/kernel_objects.cpp runtime/guest_write_watch.cpp)
+  target_link_libraries(ThreadLifecycleTests PRIVATE SimpsonsStallProfiler)
   target_compile_definitions(ThreadLifecycleTests PRIVATE SIMPSONS_THREAD_LIFECYCLE_STANDALONE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_include_directories(ThreadLifecycleTests PRIVATE "${CMAKE_SOURCE_DIR}" "${SIMPSONS_GENERATED_DIR}" "${CMAKE_SOURCE_DIR}/third_party/XenonRecomp/thirdparty/simde")
   add_test(NAME NativeThreadLifecycle COMMAND ThreadLifecycleTests)

@@ -224,6 +224,11 @@ def patch_mouse(original):
                 for name in names:
                     a.local('clip',member(receiver,name));hit(v('clip'));a.op(0x12);skip=a.jump(0x9d)
                     a.call(v('clip'),'rollOver',discard=True)
+                    if event==6 and name=='AcceptButton':
+                        a.variable('_root');a.member('nativePointerPressed');a.op(0x12);hover_only=a.jump(0x9d)
+                        a.variable('ActiveMenu');a.variable('_root');a.member('ControlsMenu');a.op(0x49);a.op(0x12);other_menu=a.jump(0x9d)
+                        a.call(member(v('_root'),'ControlsMenu'),'nativeFooterAccept',discard=True)
+                        a.target(other_menu);a.target(hover_only)
                     a.return_int(100+event);a.target(skip)
     def popup_body():
         a.local('popup',lambda:(a.variable('popupScreens'),a.variable('top'),a.op(0x4e)))
@@ -295,6 +300,11 @@ def patch_mouse(original):
         a.target(no_languages);a.target(no_count);a.target(hidden_languages);a.return_int(0)
     a.function_named('nativeMouseCustom',('mx','my','update'),custom_body)
     def query_body():
+        # Host update3 marks an actual press. Normalize it for the authored
+        # hover/select paths while keeping footer acceptance click-specific.
+        a.variable('_root');a.string('nativePointerPressed');a.variable('update');a.op(0x4a);a.integer(3);a.op(0x49);a.op(0x4f)
+        a.variable('_root');a.member('nativePointerPressed');a.op(0x12);no_press=a.jump(0x9d)
+        a.local('update',integer(1));a.target(no_press)
         a.local('popupHit',lambda:a.call(v('_root'),'nativeMousePopup',(v('mx'),v('my'),v('update'))))
         a.variable('popupHit');a.op(0x12);no_popup=a.jump(0x9d)
         a.variable('popupHit');a.op(0x3e);a.target(no_popup)
@@ -327,7 +337,8 @@ def patch_mouse(original):
         # Flash drawing order when those rectangles overlap. initializeButtons
         # copies TextRefs into those wrappers and hides the source TextRefs.
         # Ordinary rows keep the already authored menu traversal.
-        a.local('reverseRows',lambda:(a.variable('menu'),a.variable('_root'),a.member('VideoMenu'),a.op(0x49)))
+        a.local('isVideo',lambda:(a.variable('menu'),a.variable('_root'),a.member('VideoMenu'),a.op(0x49)))
+        a.local('reverseRows',lambda:(a.variable('isVideo'),a.variable('menu'),a.variable('_root'),a.member('ControlsMenu'),a.op(0x49),a.op(0x11)))
         a.local('hitNames',member(v('menu'),'MenuItemButtons'))
         a.local('i',integer(0))
         a.variable('reverseRows');a.op(0x12);forward_rows=a.jump(0x9d)
@@ -338,9 +349,20 @@ def patch_mouse(original):
         a.op(0x12);done=a.jump(0x9d)
         a.local('clip',lambda:(a.variable('menu'),a.variable('hitNames'),a.variable('i'),a.op(0x4e),a.op(0x4e)))
         hit(v('clip'));a.op(0x12);next_row=a.jump(0x9d)
-        a.local('editRow',v('reverseRows'))
+        a.local('editRow',v('isVideo'))
         a.variable('editRow');is_video=a.jump(0x9d)
         a.local('editRow',lambda:(a.variable('i'),a.variable('menu'),a.member('GizmoTypes'),a.member('length'),a.op(0x48)))
+        a.variable('editRow');a.op(0x12);no_gizmo=a.jump(0x9d)
+        a.local('editRow',lambda:(a.variable('menu'),a.member('GizmoTypes'),a.variable('i'),a.op(0x4e),a.string(''),a.op(0x49),a.op(0x12)))
+        a.target(no_gizmo)
+        # Controls has three host value rows followed by a Select-only Reset
+        # and three original selector gizmos. Empty placeholders are not edits.
+        a.variable('menu');a.variable('_root');a.member('ControlsMenu');a.op(0x49);a.op(0x12);not_controls=a.jump(0x9d)
+        a.variable('menu');a.member('nativeMousePageActive');a.op(0x12);not_mouse_page=a.jump(0x9d)
+        a.variable('i');a.integer(1);a.op(0x48);before_values=a.jump(0x9d)
+        a.variable('i');a.integer(4);a.op(0x48);a.op(0x12);after_values=a.jump(0x9d)
+        a.local('editRow',integer(1))
+        a.target(after_values);a.target(before_values);a.target(not_mouse_page);a.target(not_controls)
         a.target(is_video)
         # Wheel-only queries retain keyboard/controller navigation for normal
         # lists. A setting wheel still targets its actual hovered value row.

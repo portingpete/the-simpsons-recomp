@@ -769,19 +769,29 @@ private:
     ComPtr<ID3D11SamplerState> sceneSamplerState(const D3D11_SAMPLER_DESC& desc);
     ComPtr<ID3D11Buffer> sceneDepthConstantBuffer(uint32_t reverse,uint32_t constantBits,uint32_t slopeBits);
     // Backend-owned DYNAMIC constant banks for per-draw material commits. Each
-    // publish rewrites every byte through Map(WRITE_DISCARD): the driver renames
+    // changed publish rewrites every byte through Map(WRITE_DISCARD): the driver renames
     // the storage, so already-queued draws keep exactly the bytes they were
     // bound with, without allocating a new immutable buffer per commit. Every
-    // publish advances the bank generation; a commit is valid only while it
+    // An exact byte match keeps the current storage without another Map; its
+    // contents already match every new draw. Every publish advances the bank
+    // generation; a commit is valid only while it
     // holds its bank's latest generation, so a stale commit still rejects.
     enum ConstantBankId : size_t {ZPrepassBank,MonoBank,ShadowDepthBank,RigidVertexBank,RigidPixelBank,
         SkinVertexBank,SkinPixelBank,SkyVertexBank,SkyPixelBank,ConstantBankCount};
     struct ConstantBank {ComPtr<ID3D11Buffer> buffer;ComPtr<ID3D11Device> device;UINT bytes{};uint64_t generation{};
-        mutable BufferDescriptorProof proof;};
+        mutable BufferDescriptorProof proof;std::vector<uint8_t> contents;bool contentsValid=false;};
     std::array<ConstantBank,ConstantBankCount> constantBanks;
     // Fully validated caller bytes only; returns the new generation.
     uint64_t publishConstants(ConstantBankId bank,const void* bytes,UINT size,ComPtr<ID3D11Buffer>& published);
     void requireConstantBank(ConstantBankId bank,ID3D11Buffer* buffer,uint64_t generation,UINT size,const char* what) const;
+    // Immutable EDGE/AA constants: bounded exact-byte reuse on this device.
+    // Commit generations still reject stale owners even when their bytes match.
+    struct EdgeConstantEntry {UINT bytes{};std::array<uint8_t,sizeof(EdgeAAConstants)> contents{};ComPtr<ID3D11Buffer> buffer;};
+    ComPtr<ID3D11Device> edgeConstantDevice;
+    std::array<EdgeConstantEntry,8> edgeConstants;
+    size_t edgeConstantNext{};
+    uint64_t edgeCommitGeneration{};
+    ComPtr<ID3D11Buffer> edgeConstantBuffer(const void* bytes,UINT size);
     // Shared immutable all-zero Boolean bank (static Z-prepass/mono profiles).
     ComPtr<ID3D11Buffer> zeroBooleanBank;
     ComPtr<ID3D11Device> zeroBooleanDevice;
@@ -845,6 +855,17 @@ private:
     ComPtr<IDXGISwapChain1> swapChain;
     ComPtr<ID3D11RenderTargetView> backbuffer;
     std::shared_ptr<ScreenPipeline> screenPipeline;
+    // One private integer screen output per device/complete physical descriptor.
+    // The whole target is copied in before every draw; contents never identify
+    // an engine target. Commands on the owner immediate context serialize reuse,
+    // and D3D11 retains old storage through queued use when an extent changes.
+    // Holds no caller texture/target owners and exposes no bindable scratch view.
+    struct ScreenScratchTexture {
+        ComPtr<ID3D11Device> device;
+        D3D11_TEXTURE2D_DESC desc{};
+        ComPtr<ID3D11Texture2D> texture;
+        ComPtr<ID3D11RenderTargetView> view;
+    } screenScratch;
     // Retain even abandoned caller tokens and post-submission failure resources
     // until a real query completes, waitIdle succeeds, or the device is torn down.
     std::vector<std::shared_ptr<NativeCopySubmission>> pendingCopies;

@@ -390,6 +390,38 @@ int main() {
                 require(rt.closeHandle(second)==0,"ring fixture close failed");
             }
         }
+        {
+            // Frontend and streamed gameplay reload the same global English
+            // resource. Only its exact package name uses the native overlay;
+            // other text and assets retain their retail root and access rules.
+            const auto nativeRoot=tree.root/"native-assets";
+            for(const char* stage:{"frontend","loc"}) {
+                std::filesystem::create_directories(rt.gameRoot/stage/"text");
+                std::filesystem::create_directories(nativeRoot/stage/"text");
+                writeHost(rt.gameRoot/stage/"text"/"e172a05c.str","retail");
+                writeHost(nativeRoot/stage/"text"/"e172a05c.str","PC");
+                writeHost(rt.gameRoot/stage/"text"/"f588f94a.str","ids");
+                writeHost(nativeRoot/stage/"text"/"f588f94a.str","other");
+            }
+            rt.nativeFrontendRoot=std::filesystem::canonical(nativeRoot);
+            for(const char* path:{"game:/frontend/text/E172A05C.str","d:/LOC/TEXT/e172a05c.str"}) {
+                auto id=open(path);require(id<0x80000000,"PC text overlay open failed");
+                require(read(id,100)==0 && load32(ios+4)==2 && memcmp(ram.data()+buffer,"PC",2)==0,
+                        "PC text overlay read retail bytes");
+                require(rt.closeHandle(id)==0,"PC text overlay close failed");
+                require(open(path,syncFile,readAccess|2)==denied,"PC text overlay granted write access");
+            }
+            auto id=open("frontend/text/f588f94a.str");require(id<0x80000000,"StringIDs retail open failed");
+            require(read(id,100)==0 && load32(ios+4)==3 && memcmp(ram.data()+buffer,"ids",3)==0,
+                    "PC wording overlay changed an unrelated text package");
+            require(rt.closeHandle(id)==0,"StringIDs close failed");
+            require(open("unknown/text/e172a05c.str")>=0x80000000,"PC wording fabricated an unknown stage package");
+            rt.nativeFrontendRoot.clear();
+            id=open("loc/text/e172a05c.str");require(id<0x80000000,"Retail fallback text open failed");
+            require(read(id,100)==0 && load32(ios+4)==6 && memcmp(ram.data()+buffer,"retail",6)==0,
+                    "Text overlay used an unconfigured native root");
+            require(rt.closeHandle(id)==0,"Retail text close failed");
+        }
         uint32_t handle=open("GaMe:/dAtA/mIxEd.BIN",syncFile,readAccess,0xfffffffdu,true);
         require(handle<0x80000000,"create FILE_OPEN failed");
         require(query(handle,5,24)==0 && load64(infoBuffer+8)==contents.size() && !ram[infoBuffer+21],"standard size/directory mismatch");

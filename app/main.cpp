@@ -202,6 +202,10 @@ int main(int argc,char** argv) {
         runtime->videoSettingsPath=std::filesystem::absolute(options.store.empty()?
             options.image.parent_path().parent_path()/"userdata"/"local-profiles":options.store);
         runtime->videoSettingsPath+=L".video.cfg";
+        runtime->controlSettingsPath=std::filesystem::absolute(options.store.empty()?
+            options.image.parent_path().parent_path()/"userdata"/"local-profiles":options.store);
+        runtime->controlSettingsPath+=L".controls.cfg";
+        runtime->controlSettings=Simpsons::NativeControlSettings::load(runtime->controlSettingsPath);
         runtime->videoSettings=Simpsons::NativeVideoSettings::load(runtime->videoSettingsPath);
         if(options.frameRate)runtime->videoSettings.frameRate=options.frameRate;
         if(options.uncappedFrameRate)runtime->videoSettings.frameRate=0;
@@ -218,7 +222,9 @@ int main(int argc,char** argv) {
         runtime->frameTimingFramesOnly=options.frameTimingFramesOnly;
         if(!options.store.empty()) runtime->configureLocalPlayers(options.store);
         runtime->load(options.image);
-        if(!options.content.empty())runtime->contentRoot=std::filesystem::absolute(options.content).lexically_normal();
+        runtime->contentRoot=std::filesystem::absolute(options.content.empty()?
+            runtime->gameRoot.parent_path()/"saves":options.content).lexically_normal();
+        if(options.content.empty())std::filesystem::create_directories(runtime->contentRoot);
         for(uint32_t slot=0;slot<4;++slot) if(options.profiles[slot]) {
             runtime->activateLocalPlayer(slot,*options.profiles[slot]);
             fprintf(stderr,"[LOCAL PLAYER] activated native offline profile slot=%u id=%s; original player association remains unchanged\n",

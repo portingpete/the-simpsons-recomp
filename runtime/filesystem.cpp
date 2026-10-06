@@ -1,5 +1,6 @@
 #include "filesystem.h"
 #include "native_saves.h"
+#include "stall_profiler.h"
 #include <winternl.h>
 #include <algorithm>
 #include <array>
@@ -102,7 +103,10 @@ template<class F> void dispatch(PPCContext& ctx,uint8_t* base,uint32_t iosb,F ac
     IoResult io{ctx};
     try {
         if(iosb) io.block=guest(base,iosb,8,true);
+        Simpsons::StallProfiler::Scope fileLock(Simpsons::StallProfiler::Section::Wait,"filesystem.dispatch.mutex",&ctx,
+            reinterpret_cast<uintptr_t>(&fileMutex));
         std::lock_guard lock(fileMutex);
+        fileLock.finish();
         action(io);
     } catch(const Status& e) { io.finish(e.value); }
     catch(const Simpsons::Platform::NativeSaveError& e) {
@@ -350,8 +354,11 @@ Object openAsset(Simpsons::Runtime& rt,Name name,uint32_t access,uint32_t share,
     const bool videoFrontend=(name.root==0||name.root==0xfffffffdu)&&parts.size()==2&&!rt.nativeFrontendRoot.empty()&&
         ((equalPath(parts[0],L"frontend")&&equalPath(parts[1],L"frontend.str"))||
          (equalPath(parts[0],L"simpsons_chars")&&equalPath(parts[1],L"simpsons_chars_global.str")));
+    const bool pcText=(name.root==0||name.root==0xfffffffdu)&&parts.size()==3&&!rt.nativeFrontendRoot.empty()&&
+        equalPath(parts[1],L"text")&&equalPath(parts[2],L"e172a05c.str");
     if(videoFrontend)std::fprintf(stderr,"[NATIVE VIDEO ASSET] loaded native Options package for %s\n",name.path.c_str());
-    auto root=rootObject(rt,rootPath,videoFrontend?rt.nativeFrontendRoot:std::filesystem::path{});
+    if(pcText)std::fprintf(stderr,"[NATIVE PC TEXT] loaded native English wording for %s\n",name.path.c_str());
+    auto root=rootObject(rt,rootPath,(videoFrontend||pcText)?rt.nativeFrontendRoot:std::filesystem::path{});
     std::vector<Object> pins{root};
     Object current=root;
     if(name.root!=0 && name.root!=0xfffffffdu) {

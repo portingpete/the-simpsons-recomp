@@ -1,4 +1,5 @@
 #include "skin_mesh.h"
+#include "runtime/stall_profiler.h"
 #include "common/geometry_extent.h"
 #include "immutable_depth_constants.h"
 #include "mesh_upload_cache.h"
@@ -309,6 +310,8 @@ struct RecordedSkinDraw {
     ComPtr<ID3D11ShaderResourceView> shadowView,baseView,secondView;
     std::array<ComPtr<ID3D11SamplerState>,2> samplers;
     ComPtr<ID3D11Buffer> vertices,indices,vertexConstants,pixelConstants,depthConstants;
+    SkinVertexConstants uploadedVertex{};
+    SkinPixelConstants uploadedPixel{};
     ComPtr<ID3D11InputLayout> layout;
     ComPtr<ID3D11VertexShader> vertex;
     ComPtr<ID3D11PixelShader> originalPixel,drawPixel;
@@ -441,7 +444,9 @@ void NativeBackend::drawSkinMesh(const std::shared_ptr<RenderTarget>& target,con
         if(shadowed)for(UINT i=0;i<2;++i){auto* sampler=samplers[i].Get();context->PSSetSamplers(i,1,&sampler);}
         else if(material)for(UINT i=0;i<(profile.second?2u:1u);++i){auto* sampler=samplers[i].Get();context->PSSetSamplers(i,1,&sampler);}
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        StallProfiler::Scope drawProfile(StallProfiler::Section::Rendering,"D3D11.DrawIndexed.skin",nullptr,reinterpret_cast<uintptr_t>(m.indices.Get()));
         forEachOriginalR16StripChunk(d.startIndex,d.indexCount,[&](uint32_t n,uint32_t first){context->DrawIndexed(n,first,d.baseVertex);});
+        drawProfile.finish();
         ++skinMeshDraws;
     }
     bindings();requireOwner();
@@ -527,6 +532,10 @@ void NativeBackend::recordSkinMesh(const std::shared_ptr<NativeRecordingPayload>
                                  D3D11_RECT{0,0,LONG(target->width),LONG(target->height)});
     draw->vertexConstants=buffer(device.Get(),materialVS.data(),sizeof(materialVS),D3D11_BIND_CONSTANT_BUFFER,D3D11_USAGE_DEFAULT);
     draw->pixelConstants=buffer(device.Get(),materialPS.data(),sizeof(materialPS),D3D11_BIND_CONSTANT_BUFFER,D3D11_USAGE_DEFAULT);
+    // These private DEFAULT buffers already contain the captured material.
+    // Compare bytes so signed zero changes remain observable to the shader.
+    std::memcpy(draw->uploadedVertex.data(),materialVS.data(),sizeof(materialVS));
+    std::memcpy(draw->uploadedPixel.data(),materialPS.data(),sizeof(materialPS));
     const DepthConstants depthValues{uint32_t(reverse),d.depthBiasBits,d.slopeBiasBits,0};
     draw->depthConstants=buffer(device.Get(),&depthValues,sizeof(depthValues),D3D11_BIND_CONSTANT_BUFFER,D3D11_USAGE_IMMUTABLE);
     D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthEnable=d.depthEnable;dd.DepthWriteMask=d.depthWrite?D3D11_DEPTH_WRITE_MASK_ALL:D3D11_DEPTH_WRITE_MASK_ZERO;
@@ -553,8 +562,16 @@ void NativeBackend::recordSkinMesh(const std::shared_ptr<NativeRecordingPayload>
         inheritSkin(material.vertex,draw->live->state->vertex,material.inputMask,0);
         inheritSkin(material.pixel,draw->live->state->pixel,material.inputMask,8);
         finite(material.vertex);finite(material.pixel);
-        immediate->UpdateSubresource(draw->vertexConstants.Get(),0,nullptr,material.vertex.data(),0,0);
-        immediate->UpdateSubresource(draw->pixelConstants.Get(),0,nullptr,material.pixel.data(),0,0);
+        if(std::memcmp(draw->uploadedVertex.data(),material.vertex.data(),sizeof(material.vertex))) {
+            StallProfiler::Scope updateProfile(StallProfiler::Section::Rendering,"D3D11.UpdateSubresource.skinVertex",nullptr,reinterpret_cast<uintptr_t>(draw->vertexConstants.Get()));
+            immediate->UpdateSubresource(draw->vertexConstants.Get(),0,nullptr,material.vertex.data(),0,0);
+            std::memcpy(draw->uploadedVertex.data(),material.vertex.data(),sizeof(material.vertex));
+        }
+        if(std::memcmp(draw->uploadedPixel.data(),material.pixel.data(),sizeof(material.pixel))) {
+            StallProfiler::Scope updateProfile(StallProfiler::Section::Rendering,"D3D11.UpdateSubresource.skinPixel",nullptr,reinterpret_cast<uintptr_t>(draw->pixelConstants.Get()));
+            immediate->UpdateSubresource(draw->pixelConstants.Get(),0,nullptr,material.pixel.data(),0,0);
+            std::memcpy(draw->uploadedPixel.data(),material.pixel.data(),sizeof(material.pixel));
+        }
     };
     recordRecordingDraw(payload,std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&data),sizeof(data)),draw,std::move(prepare),
         [draw](ID3D11DeviceContext* deferred){draw->record(deferred);});

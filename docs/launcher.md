@@ -1,7 +1,7 @@
 # The Simpsons Game launcher
 
 Double-click **Play The Simpsons Game.cmd** in the project folder to start the
-normal game. This is the single launcher supplied by the repository. It starts
+normal game. This is the regular launcher supplied by the repository. It starts
 `build/native/SimpsonsLauncher.exe`, which dispatches the game and exits without
 a launcher window or an extra Play click. Windows may briefly show the command
 window while the `.cmd` file runs.
@@ -9,6 +9,12 @@ window while the `.cmd` file runs.
 This is a native development build. Gameplay coverage is incomplete, and
 unqualified engine paths can still stop the game. Sound is enabled and follows
 the default Windows audio device.
+
+For runtime stall diagnostics, use **Play The Simpsons Game - Stall Profiler.cmd**.
+It uses the normal save and settings, enables profiling only in the game
+process, and writes separate logs under `build/stall-profiler-logs`. See
+[runtime stall profiling](runtime-stall-profiler.md) for the output and
+compile-time control. The helper also accepts `--stall-profile` directly.
 
 ## Setup
 
@@ -18,11 +24,12 @@ configured native build and local game files:
 
 ```text
 Play The Simpsons Game.cmd
+Play The Simpsons Game - Stall Profiler.cmd
 build/native/SimpsonsLauncher.exe
 build/native/SimpsonsNative.exe
 analysis/simpsons.pe
 build/mainmenu-profile-204/575cf79a-3815-45f7-a6f7-e8d709d16298.profile
-build/mainmenu-content-204/save-index/575cf79a-3815-45f7-a6f7-e8d709d16298/45410809/SIMPSONS_SLOT1.save
+saves/save-index/575cf79a-3815-45f7-a6f7-e8d709d16298/45410809/SIMPSONS_SLOT1.save
 ```
 
 The native executable also needs its runtime dependencies beside it. Game data,
@@ -42,13 +49,16 @@ The `.cmd` file locates the helper relative to its own folder.
 
 See [native input prompts](native-input-prompts.md) and
 [controller setup](native-controllers.md) for input bindings and device behavior.
+Use **Options → Controls** for [keyboard/mouse bindings and mouse options](native-control-settings.md).
 The game loads saved [Video preferences](native-video-settings.md).
+Choose **Exit Game** from the main menu to close the game.
 [Steam Input](steam-input.md) describes the supported Steam configuration.
 
 ## Logs and errors
 
 Each launch writes a unique combined game output log under
-`build/launcher-logs`. Existing logs are preserved. File validation or process
+`build/launcher-logs`, or `build/stall-profiler-logs` for a profiling launch.
+Existing logs are preserved. File validation or process
 creation failures show a Windows error message with the log path when available.
 
 The helper exits after creating the game process. If the game stops after
@@ -66,7 +76,8 @@ ctest --test-dir build/native -R "^NativeGameLauncher$" --output-on-failure
 
 This runs `SimpsonsLauncher --self-test` without starting the game. It checks
 file discovery, command quoting, required-file validation, unique log creation
-and developer diagnostic modes. Exit zero means the self-test passed; this
+and developer diagnostic modes, including the profiling command and child-only
+Unicode environment override. Exit zero means the self-test passed; this
 does not establish gameplay coverage.
 
 The helper is a C++20 Windows GUI subsystem executable built from

@@ -1,5 +1,6 @@
 [
   "runtime/runtime.cpp",
+  "runtime/stall_profiler.cpp",
   "runtime/guest_write_watch.cpp",
   "runtime/guest_runner.cpp",
   "runtime/nonlocal_jump.cpp",
@@ -11,7 +12,10 @@
   "runtime/native_menu_navigation.cpp",
   "runtime/native_menu_mouse.cpp",
   "runtime/native_video_settings.cpp",
+  "runtime/native_control_settings.cpp",
+  "runtime/native_control_menu.cpp",
   "runtime/native_ultrawide_camera.cpp",
+  "runtime/native_mouse_camera.cpp",
   "runtime/threads.cpp",
   "runtime/thread_objects.cpp",
   "runtime/thread_exit_status.cpp",

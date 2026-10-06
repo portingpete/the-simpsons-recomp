@@ -18,11 +18,11 @@ Accept and Cancel footer buttons use their visible hit bounds. Blank space and
 hidden rows cannot activate the previous selection. Keyboard and controller
 navigation remain available alongside the pointer.
 
-Keyboard controls:
+Default keyboard controls:
 
 - **WASD:** move / navigate menus; **arrow keys:** directional pad.
 - **Enter / Space:** select / jump; **E:** interact; **K:** special attack / back.
-- **Escape:** Start / pause; **Enter** also skips movies; **Tab:** Back button.
+- **Escape:** Start / pause during gameplay, Back / Cancel in menus; **Enter** also skips movies; **Tab:** Back button.
 - **Q / R:** left / right shoulder; **Ctrl:** left trigger.
 - **F / G:** left / right stick press.
 - Existing **J** attack, **Left Shift** Homer Ball and **Backspace** Back aliases work.
@@ -31,6 +31,20 @@ WASD menu navigation uses the game's directional-pad repeat delay: a tap moves
 one item, and holding starts repeating after 400 ms. Gameplay movement stays
 continuous. Enter never sends pause outside movie playback; a held movie skip
 must release before it can select the next menu item.
+
+## Rebinding
+
+Open **Options → Controls** to rebind gameplay actions and adjust mouse options
+in the original native menu. Gameplay prompt icons follow the selected bindings,
+including the movement keys. Menus retain their fixed navigation controls and
+default prompt artwork. See [native control settings](native-control-settings.md)
+for assigning either binding slot, accepting changes and restoring defaults.
+
+Mouse side buttons and extended keys without matching artwork use the yellow
+question-mark icon. This includes Mouse 4/5, F13–F24, non-ANSI OEM keys and the
+virtual-key separator; the separator is not the numpad Enter key. The Controls
+menu still identifies each binding by its text label. The Menu key uses its
+existing dedicated artwork.
 
 ## Rendering
 
@@ -51,8 +65,8 @@ mouse movement, G and a question mark with revised hand-drawn strokes. Four
 additional sheets complete the standard 104-key US ANSI keyboard, including
 distinct left/right modifiers and numpad labels. The embedded library has 113
 icons; all existing enum values remain stable. Generation requests are saved
-with the assets. This prepares the artwork for rebinding; current bindings stay
-fixed. The executable needs no external PNG loader.
+with the assets. Rebinding selects from this embedded artwork. The executable
+needs no external PNG loader.
 See [asset details and regeneration](../assets/native-input-prompts/README.md).
 The earlier Xelu artwork and its original license remain in `assets/xelu-light`.
 
@@ -144,4 +158,6 @@ nonzero relative mouse motion and clicks reaching the native input source. Its
 cursor-restoration check was inconclusive because capture was already active
 when the harness saved its baseline. The isolated camera check uses synthetic
 stick input, so it does not establish physical mouse sensitivity or full mission
-traversal.
+traversal. The October 5 [native mouse repair](native-mouse-feel.md) replaces the
+stick conversion with direct raw-count rotation and restores prior capture after
+menus. Its tests and bounded live verification are recorded separately.

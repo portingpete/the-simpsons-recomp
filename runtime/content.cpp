@@ -26,7 +26,7 @@ PPC_FUNC(__imp__XamContentGetDeviceState){
     // real pinned directory/volume on every request; no dummy device state.
     if(id!=1){ctx.r3.u64=ERROR_DEVICE_NOT_CONNECTED;return;}
     need(rt.gameRoot.is_absolute(),"original image data root is absent");
-    const auto root=rt.contentRoot.empty()?rt.gameRoot.parent_path()/"userdata"/"content":rt.contentRoot;
+    const auto root=rt.contentRoot.empty()?rt.gameRoot.parent_path()/"saves":rt.contentRoot;
     const bool available=Platform::nativeStorageAvailable(root);
     ctx.r3.u64=available?ERROR_SUCCESS:ERROR_DEVICE_NOT_CONNECTED;
     std::fprintf(stderr,"[NATIVE CONTENT] device=1 state=%u folder=%ls; fresh native storage availability\n",ctx.r3.u32,root.c_str());
@@ -35,7 +35,7 @@ PPC_FUNC(__imp__XamContentGetDeviceData){
     HostState host;auto& rt=runtime(base);const auto id=ctx.r3.u32,out=ctx.r4.u32;
     need(id==1,"storage details for an unqualified native device");output(rt,out,0x50);
     need(rt.gameRoot.is_absolute(),"original image data root is absent");
-    const auto root=rt.contentRoot.empty()?rt.gameRoot.parent_path()/"userdata"/"content":rt.contentRoot;
+    const auto root=rt.contentRoot.empty()?rt.gameRoot.parent_path()/"saves":rt.contentRoot;
     const auto storage=Platform::queryNativeStorage(root);
     std::array<uint8_t,0x50> record{};
     const auto put=[&](size_t offset,uint64_t value,size_t length){for(size_t i=0;i<length;++i)record[offset+i]=uint8_t(value>>(8*(length-i-1)));};
@@ -55,7 +55,7 @@ PPC_FUNC(__imp__XamContentGetDeviceName){
     need(id==1,"storage name for an unqualified native device");
     need(out&&!(out&1)&&capacity<=32768,"invalid native storage name buffer");
     need(rt.gameRoot.is_absolute(),"original image data root is absent");
-    const auto root=rt.contentRoot.empty()?rt.gameRoot.parent_path()/"userdata"/"content":rt.contentRoot;
+    const auto root=rt.contentRoot.empty()?rt.gameRoot.parent_path()/"saves":rt.contentRoot;
     const auto storage=Platform::queryNativeStorage(root);
     const auto name=storage.volumeName.empty()?storage.path.root_path().native():storage.volumeName;
     if(capacity<name.size()+1){ctx.r3.u64=ERROR_INSUFFICIENT_BUFFER;return;}
@@ -76,7 +76,7 @@ PPC_FUNC(__imp__XamContentCreateEnumerator){
     need(perPage&&perPage<=4096,"unsupported page size");output(rt,handleOut,4);if(sizeOut){output(rt,sizeOut,4);need(sizeOut!=handleOut,"aliased factory outputs");}
     if(uint64_t(perPage)*recordSize>UINT32_MAX)throw Failure("Content page exceeds 32-bit size");
     need(rt.gameRoot.is_absolute(),"original image data root is absent");
-    const auto installed=rt.contentRoot.empty()?rt.gameRoot.parent_path()/"userdata"/"content":rt.contentRoot;
+    const auto installed=rt.contentRoot.empty()?rt.gameRoot.parent_path()/"saves":rt.contentRoot;
     auto enumeration=std::make_shared<Platform::ContentEnumeration>();
     // The loaded original XEX's execution ID is45410809. Snapshot the actual
     // selected native profile; a later sign-out cannot change this ownership.

@@ -1,5 +1,6 @@
 #include "engine_audio_reader.h"
 #include "engine_audio.h"
+#include "stall_profiler.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -93,9 +94,10 @@ struct EngineAudioReader::State {
         if(it!=m->busy.end() && !--it->second) m->busy.erase(it);
         changed.notify_all();
     }
-    void drain(std::unique_lock<std::mutex>& lock,const std::shared_ptr<Manager>& m) {
+    void drain(std::unique_lock<std::mutex>& lock,const std::shared_ptr<Manager>& m,const PPCContext& ctx) {
         require(!m->busy.contains(GetCurrentThreadId()),"Reentrant audio reader teardown would wait on its own operation");
         const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+        StallProfiler::Scope drainProfile(StallProfiler::Section::Wait,"EngineAudioReader::drain",&ctx,m->address);
         while(m->operations || m->copies) {
             rt.checkRunning();
             require(m->phase!=Phase::Failed,"Audio reader operation was quarantined after failure");
@@ -506,6 +508,7 @@ void EngineAudioReader::observe(uint32_t pc,PPCContext& ctx,uint8_t* base) {
         s.begin(s.releasing,ctx,State::Operation{ctx.r1.u32,ctx.r3.u32,thread,m,p});
         p->releasing=true;
         const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+        StallProfiler::Scope releaseProfile(StallProfiler::Section::Wait,"EngineAudioReader::release.copyDrain",&ctx,p->identity.node);
         while(p->copies) {
             s.rt.checkRunning();
             require(std::chrono::steady_clock::now()<deadline,"Reader release timed out draining an owned copy");
@@ -523,7 +526,7 @@ void EngineAudioReader::observe(uint32_t pc,PPCContext& ctx,uint8_t* base) {
         auto m=s.byHandle(ctx.r3.u32);if(!m) break;
         require(!s.resetting.contains(&ctx) && (m->phase==Phase::Live || m->phase==Phase::Closing),"Reentrant/stale reader reset");
         if(m->phase==Phase::Live) m->phase=Phase::Resetting;
-        s.drain(lock,m);s.resetting.emplace(&ctx,State::Operation{ctx.r1.u32,ctx.r3.u32,thread,m,{}});break;
+        s.drain(lock,m,ctx);s.resetting.emplace(&ctx,State::Operation{ctx.r1.u32,ctx.r3.u32,thread,m,{}});break;
     }
     case 0x8238D54C: {
         auto it=s.resetting.find(&ctx);if(it==s.resetting.end()) break;const auto op=it->second;
@@ -536,12 +539,12 @@ void EngineAudioReader::observe(uint32_t pc,PPCContext& ctx,uint8_t* base) {
     case 0x8233D980: {
         const auto gaddr=s.word(ctx.r3.u32+4);auto it=s.groups.find(gaddr);if(it==s.groups.end()) break;
         auto g=it->second;require(g->phase==Phase::Live,"Duplicate/stale original reader group retirement");g->phase=Phase::Closing;
-        for(const auto& m:g->managers) s.drain(lock,m);break;
+        for(const auto& m:g->managers) s.drain(lock,m,ctx);break;
     }
     case 0x8238CE90: {
         auto m=s.byHandle(ctx.r3.u32);if(!m) break;
         require(!s.closing.contains(&ctx) && m->phase==Phase::Live,"Reader manager close is stale or reentrant");
-        m->phase=Phase::Closing;s.drain(lock,m);
+        m->phase=Phase::Closing;s.drain(lock,m,ctx);
         s.closing.emplace(&ctx,State::Operation{ctx.r1.u32,ctx.r3.u32,thread,m,{}});break;
     }
     case 0x8238CF20: case 0x8238CA18: {

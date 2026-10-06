@@ -477,6 +477,14 @@ void run(const std::vector<uint8_t>& image,bool hardware) {
     ComPtr<ID3D11Buffer> oldBoolean;f.context->VSGetConstantBuffers(1,1,&oldBoolean);
     const auto oldCommit=f.commit;f.commit=f.backend.commitZPrepass(*f.vertex,f.constants,{});
     f.rejected([&]{f.backend.drawZPrepassMesh(f.color,f.depth,mesh,*f.vertex,oldCommit,f.draw);},"constants differ");
+    const auto unchanged=f.backend.readbackZPrepassConstants(f.commit);
+    need(!std::memcmp(unchanged.data(),f.constants.data(),sizeof(f.constants)),"Unchanged constant-bank bytes differ after a new commit");
+    const auto savedConstants=f.constants;
+    f.constants[12]={-0.0f,0,0,0};
+    f.commit=f.backend.commitZPrepass(*f.vertex,f.constants,{});
+    const auto signedZero=f.backend.readbackZPrepassConstants(f.commit);
+    need(!std::memcmp(signedZero.data(),f.constants.data(),sizeof(f.constants)),"Constant-bank byte comparison lost signed zero");
+    f.constants=savedConstants;f.commit=f.backend.commitZPrepass(*f.vertex,f.constants,{});
     // Commits share the backend's immutable zero Boolean bank; any other CB1
     // buffer, even an all-zero one, still rejects.
     ComPtr<ID3D11Buffer> currentBoolean;f.context->VSGetConstantBuffers(1,1,&currentBoolean);

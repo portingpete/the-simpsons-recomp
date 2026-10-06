@@ -7,6 +7,7 @@
 #include "engine_audio.h"
 #include "engine_audio_output.h"
 #include "ppc_image_metadata.h"
+#include "stall_profiler.h"
 #include <bcrypt.h>
 #include <algorithm>
 #include <cstring>
@@ -35,6 +36,7 @@ thread_local PPCContext* currentContext{};
 static constexpr uint32_t xboxKernelVersionAddress=0x0102F000;
 static constexpr uint16_t xboxKernelMajor=2,xboxKernelMinor=0,xboxKernelBuild=5766,xboxKernelQfe=0;
 std::vector<uint8_t> readFile(const std::filesystem::path& path) {
+    StallProfiler::Scope profiling(StallProfiler::Section::FileIO,"readFile",currentContext);
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) throw Failure("Cannot read file: " + path.string());
     auto size = f.tellg();
@@ -139,7 +141,9 @@ Runtime::Runtime() {
 Runtime::~Runtime() {
     guestWatchArmedTable=nullptr;guestWatchVersionTable=nullptr;
     if(vectoredHandler) {RemoveVectoredExceptionHandler(vectoredHandler);vectoredHandler=nullptr;}
-    stopThreads(); engineAudioOutput.reset(); engineAudio.reset(); engineDriver.reset(); window.reset(); objectReferences.clear(); handles.clear(); threads.clear();mainThreadHandle.reset();
+    stopThreads(); engineAudioOutput.reset(); engineAudio.reset();
+    {std::lock_guard lifetime(engineDriverMutex);engineDriver.reset();}
+    window.reset(); objectReferences.clear(); handles.clear(); threads.clear();mainThreadHandle.reset();
     currentContext=nullptr; active=nullptr;
     if(stopEvent) CloseHandle(stopEvent);
     if(base) VirtualFree(base,0,MEM_RELEASE);
@@ -561,6 +565,13 @@ void PPCStopNow(PPCContext&) {
 }
 
 [[noreturn]] void PPCRecompFailure(const PPCContext& ctx,uint32_t address,const char* reason) {
+    // A close accepted on the UI thread can race an indirect-call guard before
+    // the next original function entry polls cancellation. Keep that explicit
+    // close reason; live faults and earlier worker/runtime failures stay loud.
+    if(auto* runtime=Simpsons::active;runtime&&runtime->stopping.load(std::memory_order_acquire)) {
+        std::lock_guard lock(runtime->stopMutex);
+        if(runtime->stopReason=="Native window closed")throw Simpsons::Failure(runtime->stopReason);
+    }
     fprintf(stderr,"[AOT FAILURE] pc=0x%08X function=0x%08X lr=0x%08X r3=0x%08X r4=0x%08X: %s\n",
         address,ctx.lastFunction,uint32_t(ctx.lr),ctx.r3.u32,ctx.r4.u32,reason);
     fprintf(stderr,"[ARGUMENTS] r5=0x%08X r6=0x%08X r7=0x%08X r8=0x%08X r9=0x%08X r10=0x%08X\n",

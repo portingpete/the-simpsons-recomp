@@ -2,6 +2,7 @@
 #include "device_availability.h"
 #include "presentation_window.h"
 #include "d3d_call_stats.h"
+#include "runtime/stall_profiler.h"
 #include <dxgi1_5.h>
 #include <cstdio>
 #include <cstring>
@@ -250,7 +251,10 @@ std::vector<uint8_t> NativeBackend::readbackMip(const std::shared_ptr<Texture>& 
     ComPtr<ID3D11Texture2D> staging;check(device->CreateTexture2D(&desc,nullptr,&staging),"readback allocation");
     context->CopySubresourceRegion(staging.Get(),level,0,0,0,texture->texture.Get(),level,nullptr);
     std::vector<uint8_t> result(size_t(storage.rowBytes)*storage.rows);
-    D3D11_MAPPED_SUBRESOURCE mapped{};check(context->Map(staging.Get(),level,D3D11_MAP_READ,0,&mapped),"readback map");
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    StallProfiler::Scope mapProfile(StallProfiler::Section::Wait,"D3D11.Map.textureReadback",nullptr,reinterpret_cast<uintptr_t>(staging.Get()));
+    const HRESULT mapResult=context->Map(staging.Get(),level,D3D11_MAP_READ,0,&mapped);
+    mapProfile.finish();check(mapResult,"readback map");
     if(!mapped.pData) {context->Unmap(staging.Get(),level);throw Error("Native mip readback mapped null data");}
     if(mapped.RowPitch<storage.rowBytes) {context->Unmap(staging.Get(),level);throw Error("Native mip readback pitch is shorter than a logical row");}
     for(uint32_t row=0;row<storage.rows;++row)
@@ -325,7 +329,9 @@ void NativeBackend::uploadBuffer(ID3D11Buffer* buffer,uint32_t offset,std::span<
     UINT start=(uploadCursor+15u)&~15u;
     if(uint64_t(start)+bytes.size()>capacity)start=0;
     D3D11_MAPPED_SUBRESOURCE mapped{};
-    check(context->Map(uploadRing.Get(),0,start?D3D11_MAP_WRITE_NO_OVERWRITE:D3D11_MAP_WRITE_DISCARD,0,&mapped),"native buffer upload ring map");
+    StallProfiler::Scope mapProfile(StallProfiler::Section::Wait,"D3D11.Map.uploadRing",nullptr,reinterpret_cast<uintptr_t>(uploadRing.Get()));
+    const HRESULT mapResult=context->Map(uploadRing.Get(),0,start?D3D11_MAP_WRITE_NO_OVERWRITE:D3D11_MAP_WRITE_DISCARD,0,&mapped);
+    mapProfile.finish();check(mapResult,"native buffer upload ring map");
     if(!mapped.pData) throw Error("Native buffer upload mapping is empty");
     if(bytes.empty()) throw Error("Native buffer upload is empty");
     memcpy(static_cast<uint8_t*>(mapped.pData)+start,bytes.data(),bytes.size());
@@ -349,7 +355,10 @@ std::vector<uint8_t> NativeBackend::readbackBuffer(const std::shared_ptr<Buffer>
     ComPtr<ID3D11Buffer> staging;check(device->CreateBuffer(&desc,nullptr,&staging),"buffer readback allocation");
     context->CopyResource(staging.Get(),buffer->buffer.Get());
     std::vector<uint8_t> result(buffer->size);
-    D3D11_MAPPED_SUBRESOURCE mapped{};check(context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped),"buffer readback map");
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    StallProfiler::Scope mapProfile(StallProfiler::Section::Wait,"D3D11.Map.bufferReadback",nullptr,reinterpret_cast<uintptr_t>(staging.Get()));
+    const HRESULT mapResult=context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped);
+    mapProfile.finish();check(mapResult,"buffer readback map");
     if(!mapped.pData) {context->Unmap(staging.Get(),0);throw Error("Buffer readback mapping is empty");}
     if(result.empty()) {context->Unmap(staging.Get(),0);throw Error("Buffer readback size is empty");}
     memcpy(result.data(),mapped.pData,result.size());context->Unmap(staging.Get(),0);
@@ -368,7 +377,9 @@ bool NativeBackend::present() {
     if(!swapChain) throw Error("Native present lacks a presentation target");
     const UINT interval=vsyncEnabled?1u:0u;
     const UINT flags=tearingEnabled&&!vsyncEnabled?DXGI_PRESENT_ALLOW_TEARING:0u;
+    StallProfiler::Scope presentProfile(StallProfiler::Section::Present,"IDXGISwapChain::Present",nullptr,reinterpret_cast<uintptr_t>(swapChain.Get()));
     HRESULT result=swapChain->Present(interval,flags);
+    presentProfile.finish();
     check(result,"presentation");
     requireOwner();
     if(result==DXGI_STATUS_OCCLUDED) return false;
@@ -444,7 +455,9 @@ ComPtr<ID3D11SamplerState> NativeBackend::sceneSamplerState(const D3D11_SAMPLER_
         if(entry.used && std::memcmp(&entry.desc,&desc,sizeof(desc))==0) return entry.state;
     }
     ComPtr<ID3D11SamplerState> created;
+    StallProfiler::Scope samplerProfile(StallProfiler::Section::Rendering,"D3D11.CreateSamplerState.scene",nullptr,reinterpret_cast<uintptr_t>(device.Get()));
     check(device->CreateSamplerState(&desc,&created),"scene sampler creation");
+    samplerProfile.finish();
     auto& slot=sceneSamplers[sceneSamplerNext]; sceneSamplerNext=(sceneSamplerNext+1)%sceneSamplers.size();
     slot.used=true; slot.desc=desc; slot.state=created;
     return created;

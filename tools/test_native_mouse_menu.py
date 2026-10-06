@@ -61,6 +61,8 @@ class MouseProgram:
             elif op==0x4f:
                 value,name,obj=stack.pop(),stack.pop(),stack.pop();obj[name]=value
             elif op==0x12:stack.append(not bool(stack.pop()))
+            elif op==0x11:
+                right,left=stack.pop(),stack.pop();stack.append(bool(left) or bool(right))
             elif op==0x4a:stack.append(self.number(stack.pop()))
             elif op==0x50:stack.append(self.number(stack.pop())+1)
             elif op in (0x48,0x49,0x0b,0x47):
@@ -157,6 +159,26 @@ class NativeMouseActionsTests(unittest.TestCase):
             self.assertEqual(self.query(root,200,140),102)
             self.assertEqual(self.query(root,300,140),103)
             self.assertEqual(menu['currentSelection'],1)
+    def test_controls_placeholder_gizmos_leave_reset_and_accept_selectable(self):
+        root,menu,changes=self.ordinary(gizmos=2)
+        root['ControlsMenu']=menu;menu['nativeMousePageActive']=1
+        menu['GizmoTypes']=['',''];menu['MenuItemButtons']=['row0','row1']
+        self.assertEqual(self.query(root,200,140),102)
+        self.assertEqual(self.query(root,300,140),103)
+        menu['nativeMousePageActive']=0
+        self.assertEqual(self.query(root,200,140),106)
+        menu['nativeMousePageActive']=1
+        menu['MenuItemButtons']=['row0','absent1','absent2','absent3','row1']
+        menu['GizmoTypes']=['']*5
+        self.assertEqual(self.query(root,200,140),106)
+    def test_controls_accept_footer_requires_a_press_and_never_latches_on_hover(self):
+        root,menu,changes=self.ordinary();root['ControlsMenu']=menu;marked=[]
+        menu['nativeFooterAccept']=lambda:marked.append(True)
+        root['AcceptButton']=clip((400,400,470,420))
+        root['AcceptButton']['rollOver']=lambda:None
+        self.assertEqual(self.query(root,435,410,1),106);self.assertEqual(marked,[])
+        self.assertEqual(self.query(root,435,410,3),106);self.assertEqual(marked,[True])
+        self.assertEqual(self.query(root,435,410,1),106);self.assertEqual(marked,[True])
     def test_wheel_only_keeps_list_navigation_but_targets_setting_row(self):
         root,menu,changes=self.ordinary()
         # Simulate consecutive original DOWN events advancing selection while

@@ -27,9 +27,34 @@ uint32_t open(Runtime& rt,const PPCContext& entry,bool writable){auto* base=rt.b
     __imp__NtCreateFile(c,base);need(c.r3.u32==0&&PPC_LOAD_U32(ios)==0&&PPC_LOAD_U32(ios+4)==(writable?2u:1u),"Native save file open/disposition failed");return PPC_LOAD_U32(handleOut);
 }
 void close(Runtime& rt,const PPCContext& entry,uint32_t handle){auto c=context(entry);c.r3.u64=handle;__imp__NtClose(c,rt.base);need(c.r3.u32==0,"Original save file close failed");}
+void defaultSaveRoot(const char* image){
+    Temp temp;Runtime rt;rt.load(image);
+    rt.gameRoot=temp.path/"private-game-root"/"Simpsons Game, The (USA)";
+    const auto destination=rt.gameRoot.parent_path()/"saves";
+    std::filesystem::create_directories(destination);
+    const Platform::NativeSaveInfo info{"11111111-2222-4333-8444-555555555555",0x45410809,"RootTest",L"Default directory fixture"};
+    need(rt.contentRoot.empty()&&!rt.nativeSaveSource(false),"Default save-root fixture already has an override or store");
+    auto store=rt.nativeSaveSource();need(store->open("rmcsave",info,CREATE_NEW)==1,"Default save root did not open a new native session");
+    auto session=store->find("rmcsave");auto file=session->openFile("payload.bin",GENERIC_READ|GENERIC_WRITE|SYNCHRONIZE,0,3,0x60);
+    constexpr char payload[]="private default root fixture";DWORD written{};
+    need(WriteFile(file->handle(),payload,DWORD(sizeof(payload)-1),&written,nullptr)&&written==sizeof(payload)-1,
+        "Default save-root fixture payload write failed");
+    file->flush();file.reset();store->close("rmcsave");session.reset();
+    const auto index=destination/"save-index"/info.profile/"45410809"/"RootTest.save";
+    need(std::filesystem::is_regular_file(index)&&Platform::scanNativeSaves(destination,info.profile,info.title).records.size()==1&&
+        !std::filesystem::exists(rt.gameRoot.parent_path()/"userdata"),
+        "Native save source published outside the default sibling saves directory");
+    need(store->open("rmcsave",info,OPEN_EXISTING)==2,"Default save-root fixture did not reopen its published data");
+    session=store->find("rmcsave");file=session->openFile("payload.bin",GENERIC_READ|SYNCHRONIZE,1,1,0x60);
+    std::array<char,sizeof(payload)> actual{};DWORD read{};
+    need(ReadFile(file->handle(),actual.data(),DWORD(actual.size()),&read,nullptr)&&read==sizeof(payload)-1&&
+        !std::memcmp(actual.data(),payload,sizeof(payload)-1),"Default save-root fixture reopened different payload bytes");
+    file.reset();store->close("rmcsave");session.reset();
+    std::printf("Native save default: committed and reopened actual bytes under sibling saves; old userdata default unused\n");
+}
 }
 int main(int argc,char** argv){try{
-    need(argc==2,"Original image required");Temp temp;Runtime rt;rt.configureLocalPlayers(temp.path/"profiles");rt.contentRoot=temp.path/"content";std::filesystem::create_directory(rt.contentRoot);rt.load(argv[1]);
+    need(argc==2,"Original image required");defaultSaveRoot(argv[1]);Temp temp;Runtime rt;rt.configureLocalPlayers(temp.path/"profiles");rt.contentRoot=temp.path/"content";std::filesystem::create_directory(rt.contentRoot);rt.load(argv[1]);
     PPCContext entry{};rt.initialize(entry);auto* base=rt.base;rt.map(0x50000,0x2000,true,"Native save bridge fixture");
     const auto players=rt.localPlayerSource();const auto player=players->create("Save bridge");rt.activateLocalPlayer(0,player.id);
     const auto profilePath=temp.path/"profiles"/(player.id+".profile");const auto profileBefore=readFile(profilePath);const auto handles=rt.handles.size();

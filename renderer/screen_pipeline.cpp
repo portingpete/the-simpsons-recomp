@@ -1,5 +1,6 @@
 #include "native_backend.h"
 #include "material_resources.h"
+#include "runtime/stall_profiler.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -123,6 +124,11 @@ void sameDevice(ID3D11Resource* resource,ID3D11Device* device) {
 }
 void finiteColor(const std::array<float,4>& color) {
     for(float value:color) if(!std::isfinite(value)) throw Error("Nonfinite native screen color is unverified");
+}
+bool sameTextureDescriptor(const D3D11_TEXTURE2D_DESC& a,const D3D11_TEXTURE2D_DESC& b) {
+    return a.Width==b.Width && a.Height==b.Height && a.MipLevels==b.MipLevels && a.ArraySize==b.ArraySize &&
+        a.Format==b.Format && a.SampleDesc.Count==b.SampleDesc.Count && a.SampleDesc.Quality==b.SampleDesc.Quality &&
+        a.Usage==b.Usage && a.BindFlags==b.BindFlags && a.CPUAccessFlags==b.CPUAccessFlags && a.MiscFlags==b.MiscFlags;
 }
 struct Constants {std::array<float,4> color;float alphaReference;uint32_t alphaTest;uint32_t blendSelector;float padding{};};
 static_assert(sizeof(Constants)==32 && sizeof(ScreenVertex)==16);
@@ -425,18 +431,35 @@ uint64_t NativeBackend::publishConstants(ConstantBankId id,const void* bytes,UIN
     requireOwner();
     if(id>=ConstantBankCount || !bytes || !size || (size&15)) throw Error("Native constant bank publish is malformed");
     auto& bank=constantBanks[id];
+    if(bank.buffer && bank.device.Get()==device.Get() && bank.bytes==size && bank.contentsValid &&
+       bank.contents.size()==size && !std::memcmp(bank.contents.data(),bytes,size)) {
+        published=bank.buffer;
+        return ++bank.generation; // Identical data still invalidates every older commit.
+    }
     if(!bank.buffer || bank.device.Get()!=device.Get() || bank.bytes!=size) {
         D3D11_BUFFER_DESC desc{};desc.ByteWidth=size;desc.Usage=D3D11_USAGE_DYNAMIC;
         desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;desc.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
-        ComPtr<ID3D11Buffer> created;check(device->CreateBuffer(&desc,nullptr,&created),"constant bank allocation");
+        ComPtr<ID3D11Buffer> created;
+        StallProfiler::Scope allocationProfile(StallProfiler::Section::Rendering,"D3D11.CreateBuffer.constantBank",nullptr,reinterpret_cast<uintptr_t>(device.Get()));
+        check(device->CreateBuffer(&desc,nullptr,&created),"constant bank allocation");
+        allocationProfile.finish();
         bank.buffer=std::move(created);bank.device=device;bank.bytes=size;
     }
+    bank.contentsValid=false; // Failed uploads must never become a later exact-byte hit.
+    bank.contents.resize(size); // Any allocation happens before Map exposes driver memory.
     // WRITE_DISCARD renames the storage: queued draws keep their bound bytes.
     // https://learn.microsoft.com/en-us/windows/win32/api/d3d11/ne-d3d11-d3d11_map
     D3D11_MAPPED_SUBRESOURCE mapped{};
+    static constexpr const char* mapNames[]={"D3D11.Map.constants.ZPrepass","D3D11.Map.constants.Mono",
+        "D3D11.Map.constants.ShadowDepth","D3D11.Map.constants.RigidVertex","D3D11.Map.constants.RigidPixel",
+        "D3D11.Map.constants.SkinVertex","D3D11.Map.constants.SkinPixel","D3D11.Map.constants.SkyVertex","D3D11.Map.constants.SkyPixel"};
+    static_assert(std::size(mapNames)==ConstantBankCount);
+    StallProfiler::Scope mapProfile(StallProfiler::Section::Wait,mapNames[id],nullptr,reinterpret_cast<uintptr_t>(bank.buffer.Get()));
     check(context->Map(bank.buffer.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped),"constant bank map");
+    mapProfile.finish();
     if(!mapped.pData) {context->Unmap(bank.buffer.Get(),0);throw Error("Native constant bank mapped no storage");}
     std::memcpy(mapped.pData,bytes,size);context->Unmap(bank.buffer.Get(),0);
+    std::memcpy(bank.contents.data(),bytes,size);bank.contentsValid=true;
     published=bank.buffer;
     return ++bank.generation;
 }
@@ -956,9 +979,37 @@ class NativeEdgeCommit {
     uint32_t pixelAddress{};
     EdgeAAInputs edgeAA;
     std::array<ComPtr<ID3D11SamplerState>,4> additionalSamplers;
+    const NativeBackend* owner{};
+    uint64_t generation{};
 };
+ComPtr<ID3D11Buffer> NativeBackend::edgeConstantBuffer(const void* bytes,UINT size) {
+    requireOwner();
+    if(!device || !context || !bytes || (size!=sizeof(EdgeConstants) && size!=sizeof(EdgeAAConstants)))
+        throw Error("Invalid native edge constant cache input");
+    if(edgeConstantDevice.Get()!=device.Get()) {
+        edgeConstantDevice=device;
+        for(auto& entry:edgeConstants) {entry.buffer.Reset();entry.bytes=0;}
+        edgeConstantNext=0;
+    }
+    for(const auto& entry:edgeConstants)
+        if(entry.buffer && entry.bytes==size && !std::memcmp(entry.contents.data(),bytes,size))return entry.buffer;
+    D3D11_BUFFER_DESC desc{};desc.ByteWidth=size;desc.Usage=D3D11_USAGE_IMMUTABLE;desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+    const D3D11_SUBRESOURCE_DATA data{bytes,0,0};
+    ComPtr<ID3D11Buffer> created;
+    StallProfiler::Scope allocationProfile(StallProfiler::Section::Rendering,"D3D11.CreateBuffer.edgeConstants",nullptr,reinterpret_cast<uintptr_t>(device.Get()));
+    check(device->CreateBuffer(&desc,&data,&created),"edge constant upload");
+    allocationProfile.finish();
+    // Cached storage is immutable. Eviction drops this reference only; commits
+    // and queued D3D commands retain their exact data until they finish.
+    auto& slot=edgeConstants[edgeConstantNext];edgeConstantNext=(edgeConstantNext+1)%edgeConstants.size();
+    slot.bytes=size;std::memcpy(slot.contents.data(),bytes,size);slot.buffer=created;
+    return created;
+}
 struct EdgePipeline {
+    static constexpr std::array<ScreenVertex,4> canonicalVertices={ScreenVertex{-1,1,0,0},ScreenVertex{1,1,1,0},
+        ScreenVertex{-1,-1,0,1},ScreenVertex{1,-1,1,1}};
     ComPtr<ID3D11InputLayout> layout;
+    ComPtr<ID3D11Buffer> vertices;
     ComPtr<ID3D11BlendState> blend;
     ComPtr<ID3D11DepthStencilState> depth;
     ComPtr<ID3D11RasterizerState> raster;
@@ -967,6 +1018,10 @@ struct EdgePipeline {
             {"POSITION",0,DXGI_FORMAT_R32G32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0},
             {"TEXCOORD",0,DXGI_FORMAT_R32G32_FLOAT,0,8,D3D11_INPUT_PER_VERTEX_DATA,0}};
         check(device->CreateInputLayout(elements,2,kVSEdge,sizeof(kVSEdge),&layout),"edge input layout creation");
+        D3D11_BUFFER_DESC verticesDesc{};verticesDesc.ByteWidth=sizeof(canonicalVertices);verticesDesc.Usage=D3D11_USAGE_IMMUTABLE;
+        verticesDesc.BindFlags=D3D11_BIND_VERTEX_BUFFER;
+        const D3D11_SUBRESOURCE_DATA verticesData{canonicalVertices.data(),0,0};
+        check(device->CreateBuffer(&verticesDesc,&verticesData,&vertices),"edge original vertex upload");
         D3D11_BLEND_DESC b{};auto& color=b.RenderTarget[0];
         color.SrcBlend=D3D11_BLEND_ONE;color.DestBlend=D3D11_BLEND_ZERO;color.BlendOp=D3D11_BLEND_OP_ADD;
         color.SrcBlendAlpha=D3D11_BLEND_ONE;color.DestBlendAlpha=D3D11_BLEND_ZERO;color.BlendOpAlpha=D3D11_BLEND_OP_ADD;
@@ -1002,7 +1057,6 @@ std::shared_ptr<NativeEdgeCommit> NativeBackend::commitEdge(const std::shared_pt
     auto result=std::make_shared<NativeEdgeCommit>();result->source=source;
     result->pixelAddress=antiAlias?0x820302EC:0x8202E840;
     static_assert(sizeof(EdgeConstants)==144);
-    D3D11_BUFFER_DESC desc{};desc.ByteWidth=sizeof(EdgeConstants);desc.Usage=D3D11_USAGE_IMMUTABLE;desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
     auto effective=values;
     // Sub-resolution scene copies cannot resolve a half-texel ink kernel if
     // its offsets are still divided by the larger logical camera extent:
@@ -1014,9 +1068,9 @@ std::shared_ptr<NativeEdgeCommit> NativeBackend::commitEdge(const std::shared_pt
     // Keep the original export/compositor while replacing neighbor smoothing.
     if(antiAlias && antialiasingMode==Antialiasing::FXAA)
         for(auto& tap:effective.kernel)tap[0]=tap[1]=0;
-    D3D11_SUBRESOURCE_DATA data{};data.pSysMem=&effective;
-    check(device->CreateBuffer(&desc,&data,&result->constants),"edge constant upload");
-    check(device->CreateSamplerState(&sampler,&result->sampler),"edge sampler creation");
+    result->constants=edgeConstantBuffer(&effective,sizeof(effective));
+    result->sampler=sceneSamplerState(sampler);
+    result->owner=this;result->generation=++edgeCommitGeneration;
     context->PSSetConstantBuffers(0,1,result->constants.GetAddressOf());
     context->PSSetSamplers(0,1,result->sampler.GetAddressOf());
     context->PSSetShaderResources(0,1,source->sampledView.GetAddressOf());
@@ -1056,7 +1110,6 @@ std::shared_ptr<NativeEdgeCommit> NativeBackend::commitEdgeAA(const EdgeAAInputs
         throw Error("Native edgeAA requires five original point/wrap samplers");
     auto result=std::make_shared<NativeEdgeCommit>();result->pixelAddress=0x82034900;result->source=inputs.color;result->edgeAA=inputs;
     static_assert(sizeof(EdgeAAConstants)==176);
-    D3D11_BUFFER_DESC desc{};desc.ByteWidth=sizeof(EdgeAAConstants);desc.Usage=D3D11_USAGE_IMMUTABLE;desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
     auto effective=values;
     // Match the ink detector/AA sampling span when the scene is downscaled.
     // Palette, cel-shading, depth-fade and all guest-owned values stay intact.
@@ -1065,10 +1118,11 @@ std::shared_ptr<NativeEdgeCommit> NativeBackend::commitEdgeAA(const EdgeAAInputs
     // This shader also decodes cel shading/shadows and composites ink outlines.
     // Zero radius samples the center in its ten-tap loops, preserving that work.
     if(antialiasingMode==Antialiasing::FXAA)effective.c48_50[1][0]=0;
-    const D3D11_SUBRESOURCE_DATA data{&effective,0,0};check(device->CreateBuffer(&desc,&data,&result->constants),"edgeAA constants");
+    result->constants=edgeConstantBuffer(&effective,sizeof(effective));
     std::array<ID3D11SamplerState*,5> nativeSamplers{};
     for(size_t i=0;i<5;++i){auto& owner=i?result->additionalSamplers[i-1]:result->sampler;
-        check(device->CreateSamplerState(&samplers[i],&owner),"edgeAA sampler");nativeSamplers[i]=owner.Get();}
+        owner=sceneSamplerState(samplers[i]);nativeSamplers[i]=owner.Get();}
+    result->owner=this;result->generation=++edgeCommitGeneration;
     const std::array<ID3D11ShaderResourceView*,5> views={inputs.color->sampledView.Get(),inputs.depth->depthView.Get(),
         inputs.palette->view.Get(),inputs.base->sampledView.Get(),inputs.line->sampledView.Get()};
     context->PSSetConstantBuffers(0,1,result->constants.GetAddressOf());context->PSSetSamplers(0,5,nativeSamplers.data());
@@ -1077,6 +1131,8 @@ std::shared_ptr<NativeEdgeCommit> NativeBackend::commitEdgeAA(const EdgeAAInputs
 void NativeBackend::requireEdgeCommit(const std::shared_ptr<NativeEdgeCommit>& commit) const {
     validateSubmissionContext();
     if(!commit || !commit->constants || !commit->sampler)throw Error("Native edge has no committed parameters");
+    if(commit->owner!=this || commit->generation!=edgeCommitGeneration)
+        throw Error("Native edge commit is stale or belongs to another backend");
     validateFrontTarget(commit->source);sameDevice(commit->constants.Get(),device.Get());
     ComPtr<ID3D11Buffer> constants;ComPtr<ID3D11SamplerState> sampler;ComPtr<ID3D11ShaderResourceView> source;
     context->PSGetConstantBuffers(0,1,&constants);context->PSGetSamplers(0,1,&sampler);context->PSGetShaderResources(0,1,&source);
@@ -1124,9 +1180,15 @@ void NativeBackend::drawEdge(const std::shared_ptr<RenderTarget>& target,const s
     for(size_t i=0;i<input.size();++i)if(input[i].x!=expected[i].x || input[i].y!=expected[i].y || input[i].u!=expected[i].u || input[i].v!=expected[i].v)
         throw Error("Native edge original rectangle differs from the qualified geometry");
     const std::array<ScreenVertex,4> vertices={input[0],input[1],input[2],ScreenVertex{input[1].x,input[2].y,input[1].u,input[2].v}};
-    D3D11_BUFFER_DESC desc{};desc.ByteWidth=sizeof(vertices);desc.Usage=D3D11_USAGE_IMMUTABLE;desc.BindFlags=D3D11_BIND_VERTEX_BUFFER;
-    D3D11_SUBRESOURCE_DATA data{};data.pSysMem=vertices.data();ComPtr<ID3D11Buffer> buffer;
-    check(device->CreateBuffer(&desc,&data,&buffer),"edge original vertex upload");
+    auto buffer=edgePipeline->vertices;
+    if(std::memcmp(vertices.data(),EdgePipeline::canonicalVertices.data(),sizeof(vertices))) {
+        // The qualified float comparisons accept signed-zero UVs. Preserve
+        // those bytes too, falling back to the original immutable upload.
+        D3D11_BUFFER_DESC desc{};desc.ByteWidth=sizeof(vertices);desc.Usage=D3D11_USAGE_IMMUTABLE;desc.BindFlags=D3D11_BIND_VERTEX_BUFFER;
+        const D3D11_SUBRESOURCE_DATA data{vertices.data(),0,0};
+        StallProfiler::Scope allocationProfile(StallProfiler::Section::Rendering,"D3D11.CreateBuffer.edgeVertices",nullptr,reinterpret_cast<uintptr_t>(device.Get()));
+        check(device->CreateBuffer(&desc,&data,buffer.ReleaseAndGetAddressOf()),"edge original vertex upload");
+    }
     const UINT stride=sizeof(ScreenVertex),offset=0;
     context->IASetVertexBuffers(0,1,buffer.GetAddressOf(),&stride,&offset);
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
@@ -1137,7 +1199,10 @@ void NativeBackend::drawEdge(const std::shared_ptr<RenderTarget>& target,const s
     // blending disabled. AA rounding is covered by independent packed tests;
     // console precision parity is not implied by that native policy.
     // D3D11 owns the immutable vertices and bound resources through submission.
-    context->Draw(4,0);check(device->GetDeviceRemovedReason(),"edge draw submission");
+    StallProfiler::Scope drawProfile(StallProfiler::Section::Rendering,"D3D11.Draw.edge",nullptr,reinterpret_cast<uintptr_t>(context.Get()));
+    context->Draw(4,0);
+    drawProfile.finish();
+    check(device->GetDeviceRemovedReason(),"edge draw submission");
     if(commit->pixelAddress==0x82034900)++edgeAADraws;
     else if(commit->pixelAddress==0x820302EC)++aaDraws;else ++edgeDraws;
 }
@@ -1374,6 +1439,7 @@ void NativeBackend::drawScreenImpl(const std::shared_ptr<RenderTarget>& target,c
     if(!target) throw Error("Missing native screen target");
     sameDevice(target->texture.Get(),device.Get());
     if(original) {
+        validateFrontTarget(target);
         const bool alphaClear=draw.colorWriteMask==8 && !draw.texture && !draw.coronaQuery &&
             draw.blendSelector==3 && !draw.alphaTest && draw.color==std::array<float,4>{};
         if(target->format!=TargetFormat::RGB10A2 || !depth || depthCompare>7 || (draw.colorWriteMask!=15 && !alphaClear))
@@ -1433,10 +1499,30 @@ void NativeBackend::drawScreenImpl(const std::shared_ptr<RenderTarget>& target,c
         // Integer output prevents adapter-dependent UNORM conversion from
         // rounding the recovered blend result a second time. Same packed family;
         // CopyResource transfers the bits without changing the engine target.
-        D3D11_TEXTURE2D_DESC packed{};target->texture->GetDesc(&packed);
+        // Use actual storage dimensions (including SSAA/internal scale), never
+        // logical guest/front dimensions. The exact device and full normalized
+        // descriptor are the cache key; allocation/view failures publish nothing.
+        D3D11_TEXTURE2D_DESC packed=*attachmentDescriptor(*target);
         packed.Format=DXGI_FORMAT_R10G10B10A2_UINT;packed.BindFlags=D3D11_BIND_RENDER_TARGET;
-        check(device->CreateTexture2D(&packed,nullptr,&packedOutput),"packed integer screen allocation");
-        check(device->CreateRenderTargetView(packedOutput.Get(),nullptr,&packedView),"packed integer screen view creation");
+        if(screenScratch.device.Get()!=device.Get() || !screenScratch.texture || !screenScratch.view ||
+           !sameTextureDescriptor(screenScratch.desc,packed)) {
+            ScreenScratchTexture next;next.device=device;next.desc=packed;
+            {
+                StallProfiler::Scope profile(StallProfiler::Section::Rendering,"D3D11.CreateTexture2D.screenScratch",nullptr,reinterpret_cast<uintptr_t>(device.Get()));
+                check(device->CreateTexture2D(&packed,nullptr,&next.texture),"packed integer screen allocation");
+            }
+            {
+                StallProfiler::Scope profile(StallProfiler::Section::Rendering,"D3D11.CreateRenderTargetView.screenScratch",nullptr,reinterpret_cast<uintptr_t>(next.texture.Get()));
+                check(device->CreateRenderTargetView(next.texture.Get(),nullptr,&next.view),"packed integer screen view creation");
+            }
+            screenScratch=std::move(next);
+        }
+        packedOutput=screenScratch.texture;packedView=screenScratch.view;
+        // Scratch has only RT binding capability, remains private, and exact
+        // selected-target validation above rules out a retained OM scratch view.
+        if(packedOutput.Get()==target->texture.Get() || (draw.texture&&packedOutput.Get()==draw.texture->texture.Get()) ||
+           (draw.coronaQuery&&packedOutput.Get()==draw.coronaQuery->texture.Get()))
+            throw Error("Native screen scratch aliases an engine resource");
         context->RSGetViewports(&savedViewportCount,savedViewports.data());
         context->PSGetShaderResources(1,1,&savedTexture1);
     }
@@ -1460,7 +1546,11 @@ void NativeBackend::drawScreenImpl(const std::shared_ptr<RenderTarget>& target,c
     // All fallible preparation precedes submission or effective pipeline changes.
     invalidateScreenReplacement();
     if(original) {
-        context->CopyResource(packedOutput.Get(),target->texture.Get());
+        context->OMSetRenderTargetsAndUnorderedAccessViews(0,nullptr,nullptr,0,D3D11_KEEP_UNORDERED_ACCESS_VIEWS,nullptr,nullptr);
+        {
+            StallProfiler::Scope profile(StallProfiler::Section::Rendering,"D3D11.CopyResource.screenSnapshot",nullptr,reinterpret_cast<uintptr_t>(packedOutput.Get()));
+            context->CopyResource(packedOutput.Get(),target->texture.Get());
+        }
         auto* packed=packedView.Get();
         context->OMSetRenderTargetsAndUnorderedAccessViews(1,&packed,depth->view.Get(),0,D3D11_KEEP_UNORDERED_ACCESS_VIEWS,nullptr,nullptr);
     }
@@ -1494,8 +1584,12 @@ void NativeBackend::drawScreenImpl(const std::shared_ptr<RenderTarget>& target,c
         auto* restored=draw.coronaQuery?savedTexture2.Get():savedTexture1.Get();context->PSSetShaderResources(draw.coronaQuery?2:1,1,&restored);
         // Snapshot already contains all untouched pixels. Copy back exact packed
         // codes, then retain the original attachments for following engine work.
+        context->OMSetRenderTargetsAndUnorderedAccessViews(0,nullptr,nullptr,0,D3D11_KEEP_UNORDERED_ACCESS_VIEWS,nullptr,nullptr);
+        {
+            StallProfiler::Scope profile(StallProfiler::Section::Rendering,"D3D11.CopyResource.screenCommit",nullptr,reinterpret_cast<uintptr_t>(packedOutput.Get()));
+            context->CopyResource(target->texture.Get(),packedOutput.Get());
+        }
         context->OMSetRenderTargetsAndUnorderedAccessViews(1,&output,depth->view.Get(),0,D3D11_KEEP_UNORDERED_ACCESS_VIEWS,nullptr,nullptr);
-        context->CopyResource(target->texture.Get(),packedOutput.Get());
         context->RSSetViewports(savedViewportCount,savedViewports.data());
         context->OMSetDepthStencilState(postDepth.Get(),0);
         ID3D11Buffer* unbound=nullptr;UINT zero=0;context->IASetVertexBuffers(0,1,&unbound,&zero,&zero);

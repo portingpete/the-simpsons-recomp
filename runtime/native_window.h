@@ -12,6 +12,7 @@
 namespace Simpsons {
 namespace Platform {class NativeKeyboard;class NativeInputRecording;}
 class NativeWindow {
+    friend struct NativeMouseCaptureTestAccess;
 public:
     explicit NativeWindow(std::shared_ptr<Platform::NativeInputRecording> recording={});
     ~NativeWindow();
@@ -44,6 +45,9 @@ private:
     bool initialized=false;
     // Accessed only by the window thread. Restored on focus/capture loss/close.
     bool mouseCaptured=false,restoreCursor=false,restoreClip=false;
+    // The player's last successful gameplay capture survives Escape/menu
+    // release. Explicit release, focus loss and actual video changes cancel it.
+    bool resumeMouseAfterMenu=false;
     POINT savedCursor{};
     RECT savedClip{};
     int cursorHideCalls=0;

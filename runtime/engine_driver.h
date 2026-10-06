@@ -93,6 +93,9 @@ public:
     uint64_t presentationCount() const;
     uint64_t presentationAttemptCount() const;
     uint64_t frontCopyCount() const;
+    // Value-owned RGBA snapshot for a modal native menu. A platform worker
+    // requests the next frame; only the submission thread reads GPU resources.
+    std::vector<uint8_t> readbackMenuFrame(uint32_t& width,uint32_t& height);
     // Actual completion state; never waits. The latest presentation may still be
     // queued on the GPU when present() returns.
     bool submissionCompleted(uint32_t receipt) const;

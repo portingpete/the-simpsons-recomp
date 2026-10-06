@@ -250,7 +250,29 @@ void runRecording(const std::vector<uint8_t>& image,bool hardware) {
         return f.backend.readbackTarget(f.color);
     };
     const auto first=execute();colors(f,true);f.pixels([](UINT x,UINT y){return interior(x,y)?0.5f:0.0f;});
-    effective[0][0]=0.5f;f.backend.updateMonoReplayConstants(live,effective);const auto narrower=execute();
+    // Queue repeated identical replays and preserve their GPU results before
+    // changing the inherited matrix. No readback/wait separates these draws.
+    std::array<std::shared_ptr<RenderTarget>,2> queued;
+    std::array<std::shared_ptr<DepthTarget>,2> queuedDepth;
+    for(size_t i=0;i<queued.size();++i) {
+        queued[i]=f.backend.createTarget(Fixture::extent,Fixture::extent,TargetFormat::RGB10A2);
+        queuedDepth[i]=f.backend.createDepthTarget(Fixture::extent,Fixture::extent);
+    }
+    const auto firstDepth=f.backend.readbackDepthTarget(f.depth);
+    const auto queueBefore=snapshot(f.context);
+    const auto queueExecutions=f.backend.recordingPayloadReceipt(payload).executions;
+    for(size_t i=0;i<queued.size();++i) {
+        f.clear();f.backend.executeRecordingPayload(payload);
+        (void)f.backend.copyFront(f.color,queued[i]);(void)f.backend.copyDepth(f.depth,queuedDepth[i]);
+    }
+    effective[0][0]=0.5f;f.backend.updateMonoReplayConstants(live,effective);
+    f.clear();f.backend.executeRecordingPayload(payload);f.backend.waitIdle();
+    need(snapshot(f.context)==queueBefore&&f.backend.recordingPayloadReceipt(payload).executions==queueExecutions+3,
+         "Queued mono replays changed bindings or execution accounting");
+    const auto narrower=f.backend.readbackTarget(f.color);
+    for(size_t i=0;i<queued.size();++i)
+        need(f.backend.readbackTarget(queued[i])==first&&sameDepthStencil(f.backend.readbackDepthTarget(queuedDepth[i]),firstDepth),
+             "Changed mono constants overwrote an earlier queued replay result");
     need(narrower!=first,"Mono replay retained the old inherited matrix");
     for(UINT y=0;y<16;++y)for(UINT x=0;x<16;++x) {
         uint32_t value{};std::memcpy(&value,narrower.data()+4*(y*16+x),4);

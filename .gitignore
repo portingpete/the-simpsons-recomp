@@ -3,6 +3,7 @@
 /build/
 /checkpoints/
 /userdata/
+/saves/
 /saved-replays/*
 /handoff-gpt6.zip
 /.pytest_cache/
@@ -78,9 +79,10 @@ __pycache__/
 *.pem
 *.key
 
-# Workstation launch shortcuts: the repository ships only the regular launcher.
+# Workstation launch shortcuts: ship the regular and optional profiling launchers.
 /Play*.cmd
 !/Play The Simpsons Game.cmd
+!/Play The Simpsons Game - Stall Profiler.cmd
 /Render Test*.cmd
 
 # Local development journals, AI handoffs and session checkpoints.
