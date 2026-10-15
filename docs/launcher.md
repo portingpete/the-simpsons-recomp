@@ -61,8 +61,11 @@ Choose **Exit Game** from the main menu, then **Yes** to close the game.
 Before each normal or stall-profiling launch, the launcher copies the profile
 store, the saves folder and the native `.video.cfg`, `.controls.cfg` and
 `.audio.cfg` settings to `save-backups\Saves-<UTC time>` in the project folder,
-and keeps the newest 20 of those folders (other folders there are never
-removed). The game log names the backup. If the copy fails, the log says why
+and keeps the newest 10 of those folders (other folders there are never
+removed). The save store keeps every save generation (about 30 MB after a
+few hours of play), so a launch makes no new copy when no file changed since
+the newest backup; each backup's `manifest.txt` lists the files, sizes and
+times it was compared by. The game log names the backup. If the copy fails, the log says why
 and the game still starts. Mission test launches use private copies and make
 no backup. To restore, close the game and copy a backup's `profile` and
 `content` folders back over `build\mainmenu-profile-204` and `saves`.

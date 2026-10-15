@@ -388,34 +388,55 @@ void copyPrivateStores(const GamePaths& source, const PrivateRun& run) {
     }
 }
 
-// Normal launches first copy the real profile, saves and native settings to
-// save-backups\Saves-<UTC time>, keeping the newest `keep` copies. Only
-// folders this launcher names Saves-* are ever rotated out.
-constexpr size_t kSaveBackups = 20;
-fs::path backupSaves(const GamePaths& source, const SYSTEMTIME& time, size_t keep = kSaveBackups) {
-    rejectReparseAncestors(source.profileStore);
-    rejectReparseAncestors(source.contentStore);
-    const auto parent = source.root / L"save-backups";
-    ensureDirectory(parent);
-    rejectReparseAncestors(parent);
-    fs::path directory;
-    for (unsigned int sequence = 0; sequence < 10000 && directory.empty(); ++sequence) {
-        const auto candidate = parent / (L"Saves-" + logStem(time).substr(9) + L"-" + padded(sequence, 4));
-        if (CreateDirectoryW(win32Path(candidate).c_str(), nullptr)) directory = candidate;
-        else if (const DWORD error = GetLastError(); error != ERROR_ALREADY_EXISTS) failWindows(L"Could not create a save backup folder", error);
-    }
-    if (directory.empty()) throw Failure{L"Could not choose a new save backup folder."};
-    copySourceTree(source.profileStore, directory / L"profile");
-    copySourceTree(source.contentStore, directory / L"content");
-    for (const wchar_t* suffix : {L".video.cfg", L".controls.cfg", L".audio.cfg"}) {
+constexpr const wchar_t* kBackedUpSettings[] = {L".video.cfg", L".controls.cfg", L".audio.cfg"};
+
+// One sorted line per backed-up file: store, relative path, size and last
+// write time. Equal manifests mean nothing changed since that backup.
+std::string storeManifest(const GamePaths& source) {
+    std::vector<std::wstring> lines;
+    const auto add = [&](const wchar_t* store, const fs::path& root) {
+        const fs::path base(win32Path(root));
+        std::error_code error;
+        fs::recursive_directory_iterator entries(base, error), end;
+        while (!error && entries != end) {
+            if (entries->is_regular_file(error) && !error) {
+                const auto size = entries->file_size(error);
+                const auto written = entries->last_write_time(error).time_since_epoch().count();
+                lines.push_back(std::wstring(store) + L"|" + entries->path().lexically_relative(base).native() + L"|" +
+                    std::to_wstring(size) + L"|" + std::to_wstring(written));
+            }
+            if (!error) entries.increment(error);
+        }
+        if (error) throw Failure{L"Could not list the files to back up:\n" + root.native() +
+            L"\nError " + std::to_wstring(error.value()) + L"."};
+    };
+    add(L"profile", source.profileStore);
+    add(L"content", source.contentStore);
+    for (const wchar_t* suffix : kBackedUpSettings) {
         auto setting = source.profileStore;
         setting += suffix;
-        if (GetFileAttributesW(win32Path(setting).c_str()) == INVALID_FILE_ATTRIBUTES) continue;
-        sourceAttributes(setting);
-        auto copied = directory / L"profile";
-        copied += suffix;
-        copySourceFile(setting, copied);
+        WIN32_FILE_ATTRIBUTE_DATA data{};
+        if (!GetFileAttributesExW(win32Path(setting).c_str(), GetFileExInfoStandard, &data)) continue;
+        lines.push_back(std::wstring(L"setting|") + suffix + L"|" +
+            std::to_wstring((uint64_t(data.nFileSizeHigh) << 32) | data.nFileSizeLow) + L"|" +
+            std::to_wstring((uint64_t(data.ftLastWriteTime.dwHighDateTime) << 32) | data.ftLastWriteTime.dwLowDateTime));
     }
+    std::sort(lines.begin(), lines.end());
+    std::wstring text;
+    for (const auto& line : lines) text += line + L"\n";
+    const int size = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+    std::string bytes(static_cast<size_t>(size), '\0');
+    if (size) WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), bytes.data(), size, nullptr, nullptr);
+    return bytes;
+}
+
+// Normal launches first copy the real profile, saves and native settings to
+// save-backups\Saves-<UTC time>, keeping the newest `keep` copies. Nothing is
+// copied when no file changed since the newest complete backup (its
+// manifest.txt, written last). Only folders named Saves-* are rotated out.
+constexpr size_t kSaveBackups = 10;
+struct SaveBackup { fs::path directory; bool created = false; };
+std::vector<fs::path> saveBackupFolders(const fs::path& parent) {
     std::vector<fs::path> backups;
     std::error_code error;
     fs::directory_iterator entries(fs::path(win32Path(parent)), error), end;
@@ -425,8 +446,52 @@ fs::path backupSaves(const GamePaths& source, const SYSTEMTIME& time, size_t kee
         entries.increment(error);
     }
     std::sort(backups.begin(), backups.end());
+    return backups;
+}
+SaveBackup backupSaves(const GamePaths& source, const SYSTEMTIME& time, size_t keep = kSaveBackups) {
+    rejectReparseAncestors(source.profileStore);
+    rejectReparseAncestors(source.contentStore);
+    const auto parent = source.root / L"save-backups";
+    ensureDirectory(parent);
+    rejectReparseAncestors(parent);
+    const auto manifest = storeManifest(source);
+    const auto existing = saveBackupFolders(parent);
+    for (auto newest = existing.rbegin(); newest != existing.rend(); ++newest) {
+        std::ifstream in(fs::path(win32Path(*newest / L"manifest.txt")), std::ios::binary);
+        if (!in) continue; // Incomplete backup.
+        const std::string previous{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+        if (previous == manifest) return {*newest, false};
+        break;
+    }
+    fs::path directory;
+    for (unsigned int sequence = 0; sequence < 10000 && directory.empty(); ++sequence) {
+        const auto candidate = parent / (L"Saves-" + logStem(time).substr(9) + L"-" + padded(sequence, 4));
+        // Names order backups for rotation, so never reuse one a rotation freed.
+        if (!existing.empty() && candidate.filename().native() <= existing.back().filename().native()) continue;
+        if (CreateDirectoryW(win32Path(candidate).c_str(), nullptr)) directory = candidate;
+        else if (const DWORD error = GetLastError(); error != ERROR_ALREADY_EXISTS) failWindows(L"Could not create a save backup folder", error);
+    }
+    if (directory.empty()) throw Failure{L"Could not choose a new save backup folder."};
+    copySourceTree(source.profileStore, directory / L"profile");
+    copySourceTree(source.contentStore, directory / L"content");
+    for (const wchar_t* suffix : kBackedUpSettings) {
+        auto setting = source.profileStore;
+        setting += suffix;
+        if (GetFileAttributesW(win32Path(setting).c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+        sourceAttributes(setting);
+        auto copied = directory / L"profile";
+        copied += suffix;
+        copySourceFile(setting, copied);
+    }
+    {
+        std::ofstream out(fs::path(win32Path(directory / L"manifest.txt")), std::ios::binary | std::ios::trunc);
+        out.write(manifest.data(), static_cast<std::streamsize>(manifest.size()));
+        if (!out) throw Failure{L"Could not complete the save backup manifest:\n" + directory.native()};
+    }
+    const auto backups = saveBackupFolders(parent);
+    std::error_code error;
     for (size_t i = 0; i + keep < backups.size(); ++i) fs::remove_all(fs::path(win32Path(backups[i])), error);
-    return directory;
+    return {directory, true};
 }
 
 fs::path latestLog(const fs::path& directory) {
@@ -560,7 +625,9 @@ PreparedLaunch prepareLaunch(const GamePaths& source, LaunchMode mode, const SYS
     if (!privateRun) {
         // A failed backup is reported but never blocks playing.
         try {
-            writeText(log.handle.get(), L"Save backup: " + backupSaves(source, time).native() + L"\r\n");
+            const auto backup = backupSaves(source, time);
+            writeText(log.handle.get(), (backup.created ? L"Save backup: " : L"Save backup unchanged since: ") +
+                backup.directory.native() + L"\r\n");
         } catch (const Failure& failure) {
             writeText(log.handle.get(), L"Save backup failed (the game still starts):\r\n" + failure.message + L"\r\n");
         } catch (...) {
@@ -856,19 +923,30 @@ int selfTest() {
             std::sort(found.begin(), found.end());
             return found;
         };
+        // The profiling launch found nothing changed since the normal launch's backup.
         const auto backups = listBackups();
-        require(backups.size() == 2, L"normal and profiling launches did not each back up the saves");
-        for (const auto& backup : backups) {
-            auto backupVideo = backup / L"profile";
-            backupVideo += L".video.cfg";
-            require(fixtureContents(backup / L"profile" / sourceProfile.filename()) == "profile source bytes" &&
-                fixtureContents(backup / L"content" / sourceSave.lexically_relative(paths.contentStore)) == "save source bytes" &&
-                fixtureContents(backup / L"content" / longRelative) == "long source save bytes" &&
-                fixtureContents(backupVideo) == "video source bytes", L"save backup bytes differ");
-        }
-        require(fixtureContents(normalLaunch.log.path).find("Save backup:") != std::string::npos, L"normal launch log lacks its save backup");
+        require(backups.size() == 1, L"normal launch did not back up the saves, or an unchanged store was copied again");
+        auto backupVideo = backups[0] / L"profile";
+        backupVideo += L".video.cfg";
+        require(fixtureContents(backups[0] / L"profile" / sourceProfile.filename()) == "profile source bytes" &&
+            fixtureContents(backups[0] / L"content" / sourceSave.lexically_relative(paths.contentStore)) == "save source bytes" &&
+            fixtureContents(backups[0] / L"content" / longRelative) == "long source save bytes" &&
+            fixtureContents(backupVideo) == "video source bytes" && regularFile(backups[0] / L"manifest.txt"), L"save backup bytes differ");
+        require(fixtureContents(normalLaunch.log.path).find("Save backup: ") != std::string::npos &&
+            fixtureContents(profilingLaunch.log.path).find("Save backup unchanged since: ") != std::string::npos,
+            L"launch logs do not report the save backup");
+        // Each changed store makes a new backup; rotation keeps the newest and
+        // never touches other folders.
         ensureDirectory(backupParent / L"user-kept");
-        for (int i = 0; i < 3; ++i) backupSaves(paths, time, 2);
+        for (int i = 0; i < 3; ++i) {
+            const auto changed = paths.contentStore / L"backup-rotation.bin";
+            Handle file(CreateFileW(win32Path(changed).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
+            require(bool(file), L"backup rotation fixture could not be written");
+            writeText(file.get(), std::wstring(size_t(i) + 1, L'x'));
+            file.reset();
+            require(backupSaves(paths, time, 2).created, L"changed saves were not backed up");
+        }
+        require(!backupSaves(paths, time, 2).created, L"unchanged saves were backed up again");
         require(listBackups().size() == 2 && fs::exists(fs::path(win32Path(backupParent / L"user-kept"))),
             L"save backup rotation kept the wrong folders");
         require(fixtureContents(completionLaunch.paths.profileStore / sourceProfile.filename()) == "profile source bytes" &&

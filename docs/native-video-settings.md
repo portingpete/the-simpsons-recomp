@@ -133,7 +133,9 @@ deltas are interpolated, so animation and expressions are unchanged.
 Each draw range is smoothed once, on a low-priority worker thread, the first
 time it is drawn; until the result is ready (usually a few frames) the original
 mesh draws. Uploading a finished range costs the render thread about 1–2 ms,
-at most one per frame. Results stay with the cached mesh. On the first-mission
+at most one per frame. Recorded (replayed) draws keep what they record, so
+they smooth their range when recorded, on the render thread. Results stay with
+the cached mesh. On the first-mission
 start view High measured 147.3 and 146.6 FPS against 146.6 and 143.1 FPS with
 detail Off (D3D11, 720p, uncapped). Shadow maps and the depth-only passes use
 the original meshes; eyeballs become rounder too, which can make them show a

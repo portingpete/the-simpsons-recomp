@@ -169,9 +169,10 @@ struct NativeSkinMesh::State {
     ComPtr<ID3D11VertexShader> drawVertex;
     uint32_t vertexCount{},vertexAddress{};R16Indices indexValues;
     DepthConstantsCache depthConstants;
-    // Character detail (restart-only): each draw range's smoothed list is
-    // built on the backend's worker after its first draw and uploaded once
-    // done; until then the original range draws. Kept with the cached mesh.
+    // Character detail (restart-only): each immediate draw range's smoothed
+    // list is built on the backend's worker after its first draw and uploaded
+    // once done; until then the original range draws. Recorded draws build
+    // theirs at record time. Kept with the cached mesh.
     struct Detail {
         ComPtr<ID3D11Buffer> vertices,indices;uint32_t indexCount{};
         std::shared_ptr<SkinDetailJob> job;bool failed{};
@@ -179,23 +180,36 @@ struct NativeSkinMesh::State {
     uint32_t detailSegments=1;
     std::shared_ptr<SkinDetailSource> detailSource;
     std::map<std::tuple<uint32_t,uint32_t,int32_t>,Detail> details;
-    // wait: block until built (recorded draws keep what they record).
-    // uploads: smoothed ranges uploaded this frame; one per frame unless waiting.
-    const Detail* detail(SkinDetailWorker* worker,uint32_t& uploads,uint32_t start,uint32_t count,int32_t base,bool wait) {
+    // now: needed at once (recorded draws keep what they record), so a range
+    // the worker has not finished is built here instead of waiting behind the
+    // worker's queue. uploads: ranges uploaded this frame; one per frame
+    // unless needed now.
+    const Detail* detail(SkinDetailWorker* worker,uint32_t& uploads,uint32_t start,uint32_t count,int32_t base,bool now) {
         if(detailSegments<2||!detailSource||!worker)return nullptr;
         auto& entry=details[std::make_tuple(start,count,base)];
         if(entry.indexCount)return &entry;
         if(entry.failed)return nullptr;
-        if(!entry.job) {
+        if(!entry.job&&!now) {
             entry.job=std::make_shared<SkinDetailJob>();
             entry.job->source=detailSource;entry.job->startIndex=start;entry.job->indexCount=count;
             entry.job->baseVertex=base;entry.job->segments=detailSegments;
             worker->submit(entry.job);
+            return nullptr;
         }
-        if(wait)SkinDetailWorker::wait(*entry.job);
-        if(!entry.job->done.load(std::memory_order_acquire)||(!wait&&uploads))return nullptr;
-        const auto& geometry=entry.job->geometry;
-        if(!entry.job->error.empty())std::fprintf(stderr,"[NATIVE CHARACTER DETAIL] range %u+%u kept original: %s\n",start,count,entry.job->error.c_str());
+        const bool ready=entry.job&&entry.job->done.load(std::memory_order_acquire);
+        if(!now&&(!ready||uploads))return nullptr;
+        SkinDetailGeometry local;std::string error;
+        if(ready)error=entry.job->error;
+        else {
+            // The worker owns the mesh's shared smoothing normals; use a private
+            // copy. A queued job for this range finishes unused.
+            StallProfiler::Scope build(StallProfiler::Section::Rendering,"Mesh.skin.detail.build",nullptr,reinterpret_cast<uintptr_t>(indices.Get()));
+            const auto& source=*detailSource;
+            try {local=buildSkinDetail(source.vertices,skinSmoothingNormals(source.vertices),source.indices,start,count,base,detailSegments);}
+            catch(const std::exception& failure) {error=failure.what();}
+        }
+        const auto& geometry=ready?entry.job->geometry:local;
+        if(!error.empty())std::fprintf(stderr,"[NATIVE CHARACTER DETAIL] range %u+%u kept original: %s\n",start,count,error.c_str());
         if(geometry.indices.empty()||!validNativeMeshBufferExtent(geometry.vertices.size(),sizeof(SkinVertex))||
            !validNativeMeshBufferExtent(geometry.indices.size(),sizeof(uint32_t))) {
             entry.failed=true;entry.job.reset();return nullptr;
