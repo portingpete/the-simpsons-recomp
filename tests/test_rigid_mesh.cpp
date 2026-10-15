@@ -728,10 +728,11 @@ void multitone(const std::vector<uint8_t>& image,bool hardware) {
     f.backend.releaseRigidReplayConstants(f.live);checkDebug(NativeRecordingProbe::device(f.backend));
     std::puts("PASS multitone: real VS/PS/depth adapter, owned noise A/B/A, RGB10A2/depth/stencil and immediate state");
 }
-// Palette coordinates (Eighty Bites floor strip and its family). The opaque
+/// Palette coordinates (Eighty Bites floor strip and its family). The opaque
 // rigid PSs pack a palette coordinate as 32*floor(32*frac(2v))+floor(64*frac(u)),
-// which jumps at every multiple of 1/64: plain rigid packs uv0 into green, the
-// dual-textured, gloss and multitone PSs pack uv1 (plus the object id) into red.
+// which jumps at every multiple of 1/64: plain rigid packs uv0 into green; the
+// dual-textured, gloss, multitone, normalmap, dual-textured UV and chocolate
+// PSs pack uv1 (plus the object id) into red.
 // Live meshes give every vertex of a triangle the same grid value (the
 // brewery pipe's (0.7,0.5); a Day of the Dolphins dual-textured mesh has v=1
 // on most triangles). Xenos interpolates P0+i*(P1-P0)+j*(P2-P0), so a shared
@@ -740,12 +741,16 @@ void multitone(const std::vector<uint8_t>& image,bool hardware) {
 // edge pass inks. Every pixel of a steep perspective quad must keep one exact
 // word on the recorded and the immediate draw.
 void paletteInterpolation(const std::vector<uint8_t>& image,bool hardware) {
-    struct Family {const char* name;bool textured,gloss,multitone;uint32_t vertex,pixel;bool uv1,red;};
-    const std::array<Family,4> families={{
-        {"rigid",false,false,false,0x8200D3AC,0x8200D9E8,false,false},
-        {"dualtextured",true,false,false,0x8202B4CC,0x8202BB44,true,true},
-        {"gloss",true,true,false,0x8201A07C,0x8201A6EC,true,true},
-        {"multitone",true,false,true,0x82054F2C,0x82055710,true,true}}};
+    enum class Kind {plain,dual,gloss,multitone,normalmap,dualUv,chocolate};
+    struct Family {const char* name;Kind kind;uint32_t vertex,pixel;};
+    const std::array<Family,7> families={{
+        {"rigid",Kind::plain,0x8200D3AC,0x8200D9E8},
+        {"dualtextured",Kind::dual,0x8202B4CC,0x8202BB44},
+        {"gloss",Kind::gloss,0x8201A07C,0x8201A6EC},
+        {"multitone",Kind::multitone,0x82054F2C,0x82055710},
+        {"normalmap",Kind::normalmap,0x8205855C,0x82058CBC},
+        {"dualtextured-uv",Kind::dualUv,0x82046D9C,0x820477A8},
+        {"chocolate",Kind::chocolate,0x8205DABC,0x8205E5E0}}};
     constexpr UINT width=256,height=144;
     constexpr uint32_t id=714;
     const auto code=[](double u,double v){return 32*uint32_t(std::floor(32*(2*v-std::floor(2*v))))+uint32_t(std::floor(64*(u-std::floor(u))));};
@@ -753,11 +758,15 @@ void paletteInterpolation(const std::vector<uint8_t>& image,bool hardware) {
     // centre that never depended on exact interpolation.
     const std::array<std::array<float,2>,7> cases={{{.7f,.5f},{0,1},{1,1},{.5f,0},{0,.5f},{-.5f,3},{.320299983f,.789099991f}}};
     const std::array<std::array<float,3>,4> corners={{{-1,1,1},{-1,-1,4},{1,1,6},{1,-1,9}}};
+    const auto texel=[&](NativeBackend& backend,std::array<uint8_t,4> rgba){return backend.createTexture(1,1,TextureFormat::RGBA8,rgba);};
     size_t draws=0;
     for(const auto& family:families) {
-        Fixture f(image,hardware,family.textured,family.gloss,family.multitone);
-        if(family.textured&&!family.gloss&&!family.multitone) {
-            // The fixture has no dual-textured option: bind the exact original pair.
+        const Kind kind=family.kind;
+        const bool red=kind!=Kind::plain,base=kind==Kind::dual||kind==Kind::gloss||kind==Kind::multitone||kind==Kind::normalmap;
+        const bool noise=kind==Kind::multitone||kind==Kind::normalmap;
+        Fixture f(image,hardware);
+        if(f.vs->originalAddress()!=family.vertex) {
+            // Bind the exact original pair; the fixture defaults to plain rigid.
             for(const auto& record:originalMaterialIdentities())if(record.originalAddress==family.vertex||record.originalAddress==family.pixel) {
                 auto shaderId=f.registry.create(record.originalAddress,std::span<const uint8_t>(image).subspan(record.originalAddress-0x82000000,record.recordBytes));
                 const auto& shader=f.registry.prepareForBind(shaderId,f.compiler);if(record.stage==MaterialStage::Vertex)f.vs=&shader;else f.ps=&shader;
@@ -768,45 +777,55 @@ void paletteInterpolation(const std::vector<uint8_t>& image,bool hardware) {
         f.backend.bindTargets({f.color,nullptr,nullptr,nullptr},f.depth);
         auto state=f.draw;state.viewport={0,0,width,height,0x3F800000,0};state.scissor={0,0,width,height};
         state.depthCompare=7;state.indexCount=4;
-        if(family.textured) {
-            auto& sampler=state.baseSampler;sampler.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-            sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D11_TEXTURE_ADDRESS_WRAP;
-            sampler.MaxAnisotropy=1;sampler.MaxLOD=13;sampler.ComparisonFunc=D3D11_COMPARISON_NEVER;
-            const std::array<uint8_t,4> red{242,4,1,255};state.baseTexture=f.backend.createTexture(1,1,TextureFormat::RGBA8,red);
+        D3D11_SAMPLER_DESC wrap{};wrap.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        wrap.AddressU=wrap.AddressV=wrap.AddressW=D3D11_TEXTURE_ADDRESS_WRAP;
+        wrap.MaxAnisotropy=1;wrap.MaxLOD=13;wrap.ComparisonFunc=D3D11_COMPARISON_NEVER;
+        if(base){state.baseSampler=wrap;state.baseTexture=texel(f.backend,{242,4,1,255});}
+        // Multitone noise off (c49.w); a flat tangent-space normal for normalmap.
+        if(noise){state.noiseSampler=wrap;state.noiseTexture=texel(f.backend,kind==Kind::normalmap?std::array<uint8_t,4>{128,128,255,255}:std::array<uint8_t,4>{0,0,0,255});}
+        if(kind==Kind::dualUv) {
+            // One character shadow at t0, material t1/t2.
+            state.shadows={f.shadows[1],nullptr};state.samplers={f.draw.samplers[1],D3D11_SAMPLER_DESC{}};
+            state.uvTextures={texel(f.backend,{192,48,32,128}),texel(f.backend,{32,160,224,192})};state.uvSamplers={wrap,wrap};
         }
-        if(family.multitone) {
-            state.noiseSampler=state.baseSampler;
-            const std::array<uint8_t,4> noise{0,0,0,255};state.noiseTexture=f.backend.createTexture(1,1,TextureFormat::RGBA8,noise);
+        if(kind==Kind::chocolate) {
+            state.materialTextures={texel(f.backend,{192,48,32,255}),texel(f.backend,{32,160,224,255}),nullptr};
+            state.materialSamplers={wrap,wrap,D3D11_SAMPLER_DESC{}};
         }
         // clip=(x,y,z/2,z): position z carries w, so the screen quad keeps its
         // corners while w differs per vertex (1..9) and interpolation is perspective.
         auto va=f.vc;va[2]={0,0,.5f,0};va[3]={0,0,1,0};
-        if(family.multitone)va[46]={2,3,4,1};
-        // No multitone noise (c49.w); c49.z is the object id; gloss exponent one.
+        if(kind==Kind::multitone)va[46]={2,3,4,1};
+        // c49.z is the object id; gloss exponent one; no multitone noise.
         auto material=f.pc;material[49]={0,0,float(id),0};material[50][0]=1;
-        if(family.multitone)material[47]={1,1,0,0};
+        if(kind==Kind::multitone)material[47]={1,1,0,0};
         f.backend.updateRigidReplayConstants(f.live,va,material);
-        auto mask=capturedMask();if(family.multitone)mask[1]=0xE0;
+        auto mask=capturedMask();if(kind==Kind::multitone)mask[1]=0xE0;
+        const auto declaration=[&](const auto&... target) {
+            if(kind==Kind::normalmap)f.backend.bindRigidNormalMeshDeclaration(target...);
+            else if(kind==Kind::chocolate)f.backend.bindChocolateMeshDeclaration(target...,false);
+            else f.backend.bindRigidMeshDeclaration(target...);
+        };
         for(const auto& coordinate:cases) {
             std::array<RigidVertex,4> vertices{};
             for(size_t i=0;i<4;++i) {
                 const float w=corners[i][2];
-                vertices[i].position={corners[i][0]*w,corners[i][1]*w,w};vertices[i].normal={0,1,0};
+                vertices[i].position={corners[i][0]*w,corners[i][1]*w,w};vertices[i].normal={0,1,0};vertices[i].tangent={1,0,0};
                 vertices[i].color={0,0,0,1};vertices[i].uv={.25f,.25f};vertices[i].uv1={.25f,.25f};
-                (family.uv1?vertices[i].uv1:vertices[i].uv)=coordinate;
+                (red?vertices[i].uv1:vertices[i].uv)=coordinate;
             }
             const std::array<uint16_t,4> quad={0,1,2,3};
             auto mesh=f.backend.uploadRigidMesh(vertices,quad);
             const uint32_t palette=code(coordinate[0],coordinate[1]);
             // Red stores (id+code)/2046 (even sums here), green stores code/1023.
-            const uint32_t expected=family.red?(id+palette)/2:palette;
-            require(!family.red||!((id+palette)&1),"Palette fixture code must be even");
+            const uint32_t expected=red?(id+palette)/2:palette;
+            require(!red||!((id+palette)&1),"Palette fixture code must be even");
             const auto check=[&](const char* path) {
                 const auto colors=f.backend.readbackTarget(f.color);
                 const uint32_t first=word(colors,0);
                 for(UINT y=0;y<height;++y)for(UINT x=0;x<width;++x) {
                     const uint32_t value=word(colors,4*(size_t(y)*width+x));
-                    const uint32_t channel=family.red?value&1023:(value>>10)&1023;
+                    const uint32_t channel=red?value&1023:(value>>10)&1023;
                     if(channel!=expected||value!=first) {
                         char text[240];std::snprintf(text,sizeof(text),"%s %s palette (%.9g,%.9g) pixel(%u,%u) channel=%u expected=%u word=%08X first=%08X",
                             family.name,path,coordinate[0],coordinate[1],x,y,channel,expected,value,first);throw Error(text);
@@ -815,18 +834,22 @@ void paletteInterpolation(const std::vector<uint8_t>& image,bool hardware) {
                 }
             };
             auto payload=f.begin(mask);
-            f.backend.bindRigidShadowDepth(payload,0,f.shadows[0]);f.backend.bindRigidShadowDepth(payload,1,f.shadows[1]);
-            f.backend.bindRigidMeshVertices(payload,mesh);f.backend.bindRigidMeshDeclaration(payload,mesh);f.backend.bindRigidMeshIndices(payload,mesh);
+            for(UINT slot=0;slot<2;++slot)if(state.shadows[slot])f.backend.bindRigidShadowDepth(payload,slot,state.shadows[slot]);
+            f.backend.bindRigidMeshVertices(payload,mesh);declaration(payload,mesh);f.backend.bindRigidMeshIndices(payload,mesh);
             f.backend.recordRigidMesh(payload,f.color,f.depth,mesh,*f.vs,*f.ps,va,material,f.live,state);
             f.backend.finishRecordingPayload(payload);
             f.backend.clearTarget(f.color,{1,0,1,1});f.backend.clearDepthTarget(f.depth,0,0x6D);
             f.backend.executeRecordingPayload(payload);f.backend.waitIdle();check("recorded");
             f.backend.releaseRecordingPayload(payload);
             f.backend.bindRigidShaders(*f.vs,*f.ps);f.backend.bindRigidMeshVertices(mesh);
-            f.backend.bindRigidMeshDeclaration(mesh);f.backend.bindRigidMeshIndices(mesh);
-            for(UINT stage=0;stage<2;++stage)f.backend.bindRigidShadowDepth(stage,f.shadows[stage]);
+            declaration(mesh);f.backend.bindRigidMeshIndices(mesh);
+            for(UINT slot=0;slot<2;++slot)if(state.shadows[slot])f.backend.bindRigidShadowDepth(slot,state.shadows[slot]);
             if(state.baseTexture)f.backend.bindEngineTexture(2,state.baseTexture);
             if(state.noiseTexture)f.backend.bindEngineTexture(3,state.noiseTexture);
+            for(UINT stage=0;stage<2;++stage) {
+                if(state.uvTextures[stage])f.backend.bindEngineTexture(1+stage,state.uvTextures[stage]);
+                if(state.materialTextures[stage])f.backend.bindEngineTexture(2+stage,state.materialTextures[stage]);
+            }
             auto commit=f.backend.commitRigid(*f.vs,*f.ps,va,material);
             f.backend.clearTarget(f.color,{1,0,1,1});f.backend.clearDepthTarget(f.depth,0,0x6D);
             f.backend.drawRigidMesh(f.color,f.depth,mesh,*f.vs,*f.ps,commit,state);check("immediate");
@@ -835,7 +858,7 @@ void paletteInterpolation(const std::vector<uint8_t>& image,bool hardware) {
         f.backend.releaseRecordingContext(f.recording);f.backend.releaseRigidReplayConstants(f.live);
         checkDebug(NativeRecordingProbe::device(f.backend));
     }
-    std::printf("PASS rigid palette interpolation %s: plain/dual-textured/gloss/multitone keep one exact code for %zu grid-aligned triangle-constant palette coordinates over a %ux%u perspective quad (%zu recorded and immediate draws)\n",
+    std::printf("PASS rigid palette interpolation %s: plain/dual-textured/gloss/multitone/normalmap/dual-textured UV/chocolate keep one exact code for %zu grid-aligned triangle-constant palette coordinates over a %ux%u perspective quad (%zu recorded and immediate draws)\n",
         hardware?"hardware":"WARP",cases.size(),width,height,draws);
 }
 uint32_t packed(uint32_t id,uint32_t alpha){return id|(528u<<10)|(alpha<<30);}

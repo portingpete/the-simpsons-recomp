@@ -192,23 +192,10 @@ def issue(i,row,stage):
         if sop in (28,29):out+=['        p0=predicate;']
     return '\n'.join(out+['    }'])
 
-# Xenos interpolates each attribute as P0+i*(P1-P0)+j*(P2-P0), so a value all
-# three vertices share arrives exactly; host perspective interpolation can land a
-# few ulps away. The opaque rigid PSs pack a palette coordinate as
-# floor(64*frac(u)) and 32*floor(32*frac(2v)) (plus the 2v>=1 bit), which change
-# only at multiples of 1/64: a shared v=0.5 interpolated an ulp low wraps frac(2v)
-# to ~1 and changes the code on alternate rows (the Eighty Bites floor strip;
-# live meshes of this PS, dual-textured, gloss and multitone carry such values).
-# Snapping onto that grid within 2^-16 of the value (at most 1/16384, 1/256 of a
-# palette cell, so large coordinates still floor) restores a shared grid value
-# exactly and moves a varying one by at most that. It follows the shared prefix
-# (before struct RigidInput), so only palette PSs and includers of this file get it.
-PALETTE_COORDINATE = '''float2 rigidPaletteCoordinate(float2 value) {
-    precise float2 grid=round(value*64)/64;
-    precise float2 tolerance=min(max(abs(grid),1.0/64)/65536,1.0/16384);
-    return float2(abs(value.x-grid.x)<=tolerance.x?grid.x:value.x,
-                  abs(value.y-grid.y)<=tolerance.y?grid.y:value.y);
-}'''
+# The palette-coordinate snap (renderer/palette_coordinate.hlsl) is the one HLSL
+# definition every palette PS uses. Generators inline it after their shared
+# prefix (here after struct RigidInput), so only palette PSs and includers get it.
+PALETTE_COORDINATE = (ROOT/'renderer/palette_coordinate.hlsl').read_text(encoding='utf-8').strip()
 
 
 def shader_source(image):

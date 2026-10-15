@@ -523,7 +523,7 @@ add_custom_command(OUTPUT "${SIMPSONS_RIGID_PALETTE_CHECK}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_rigid_dualtextured_shader.py" --verify
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_rigid_gloss_shader.py" --verify
   COMMAND "${CMAKE_COMMAND}" -E touch "${SIMPSONS_RIGID_PALETTE_CHECK}"
-  DEPENDS tools/analyze_rigid_shader.py tools/analyze_rigid_dualtextured_shader.py tools/analyze_rigid_gloss_shader.py
+  DEPENDS tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl tools/analyze_rigid_dualtextured_shader.py tools/analyze_rigid_gloss_shader.py
     tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py renderer/rigid_shader.hlsl
     renderer/rigid_dualtextured_shader.hlsl renderer/rigid_gloss_shader.hlsl analysis/simpsons.pe VERBATIM)
 foreach(ENTRY VSRigid PSRigid GSRigidProbe VSRigidPixelProbe PSRigidNormalProbe)
@@ -559,7 +559,7 @@ set(SIMPSONS_MULTITONE_SOURCE "${SIMPSONS_SHADER_DIR}/rigid_multitone_shader.hls
 add_custom_command(OUTPUT "${SIMPSONS_MULTITONE_SOURCE}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_rigid_multitone_shader.py"
     --emit-hlsl "${SIMPSONS_MULTITONE_SOURCE}"
-  DEPENDS tools/analyze_rigid_multitone_shader.py tools/analyze_rigid_shader.py
+  DEPENDS tools/analyze_rigid_multitone_shader.py tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl
     tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py analysis/simpsons.pe VERBATIM)
 foreach(ENTRY VSRigidMultitone PSRigidMultitone PSRigidMultitoneDraw GSRigidMultitoneProbe VSRigidMultitonePixelProbe)
   if(ENTRY MATCHES "^VS")
@@ -619,7 +619,7 @@ add_custom_command(OUTPUT "${SIMPSONS_RIGID_UV_CHECK}"
     --verify-hlsl "${CMAKE_SOURCE_DIR}/renderer/rigid_dualtextured_uv_shader.hlsl"
   COMMAND "${CMAKE_COMMAND}" -E touch "${SIMPSONS_RIGID_UV_CHECK}"
   DEPENDS tools/analyze_rigid_dualtextured_uv_shader.py tools/analyze_chocolate_shader.py
-    tools/analyze_rigid_shader.py tools/analyze_post_effect_catalog.py tools/analyze_effect_catalog.py
+    tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl tools/analyze_post_effect_catalog.py tools/analyze_effect_catalog.py
     tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py
     renderer/rigid_dualtextured_uv_shader.hlsl analysis/simpsons.pe VERBATIM)
 foreach(ENTRY VSRigidDualTexturedUV PSRigidDualTexturedUV VSRigidDualTexturedUVAlpha PSRigidDualTexturedUVAlpha
@@ -656,7 +656,7 @@ add_custom_command(OUTPUT "${SIMPSONS_RIGID_SINGLE_UV_CHECK}"
     --verify-hlsl "${CMAKE_SOURCE_DIR}/renderer/rigid_uv_shader.hlsl"
   COMMAND "${CMAKE_COMMAND}" -E touch "${SIMPSONS_RIGID_SINGLE_UV_CHECK}"
   DEPENDS tools/analyze_rigid_uv_shader.py tools/analyze_chocolate_shader.py
-    tools/analyze_rigid_shader.py tools/analyze_post_effect_catalog.py tools/analyze_effect_catalog.py
+    tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl tools/analyze_post_effect_catalog.py tools/analyze_effect_catalog.py
     tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py
     renderer/rigid_uv_shader.hlsl analysis/simpsons.pe VERBATIM)
 set(SIMPSONS_RIGID_SINGLE_UV_HEADERS)
@@ -695,7 +695,7 @@ add_custom_command(OUTPUT "${SIMPSONS_FLIPBOOK_CHECK}"
     --verify-hlsl "${CMAKE_SOURCE_DIR}/renderer/flipbook_shader.hlsl"
   COMMAND "${CMAKE_COMMAND}" -E touch "${SIMPSONS_FLIPBOOK_CHECK}"
   DEPENDS tools/analyze_flipbook_shader.py tools/analyze_chocolate_shader.py
-    tools/analyze_rigid_shader.py tools/analyze_post_effect_catalog.py tools/analyze_effect_catalog.py
+    tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl tools/analyze_post_effect_catalog.py tools/analyze_effect_catalog.py
     tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py
     renderer/flipbook_shader.hlsl analysis/simpsons.pe VERBATIM)
 set(SIMPSONS_FLIPBOOK_HEADERS)
@@ -745,14 +745,14 @@ set(SIMPSONS_NORMALMAP_SOURCE "${SIMPSONS_SHADER_DIR}/rigid_normalmap_shader.hls
 add_custom_command(OUTPUT "${SIMPSONS_NORMALMAP_SOURCE}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_rigid_normalmap_shader.py"
     --emit-hlsl "${SIMPSONS_NORMALMAP_SOURCE}"
-  DEPENDS tools/analyze_rigid_normalmap_shader.py tools/analyze_rigid_shader.py
+  DEPENDS tools/analyze_rigid_normalmap_shader.py tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl
     tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py analysis/simpsons.pe VERBATIM)
 # Legacy VS-only source retained for the existing tangent-layout oracle.
 set(SIMPSONS_NORMALMAP_VS_SOURCE "${SIMPSONS_SHADER_DIR}/rigid_normalmap_vs.hlsl")
 add_custom_command(OUTPUT "${SIMPSONS_NORMALMAP_VS_SOURCE}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_rigid_normalmap_shader.py"
     --emit-vs-hlsl "${SIMPSONS_NORMALMAP_VS_SOURCE}"
-  DEPENDS tools/analyze_rigid_normalmap_shader.py tools/analyze_rigid_shader.py
+  DEPENDS tools/analyze_rigid_normalmap_shader.py tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl
     tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py analysis/simpsons.pe VERBATIM)
 foreach(ENTRY VSRigidNormalmap PSRigidNormalmap PSRigidNormalmapDraw GSRigidNormalmapProbe VSRigidNormalmapPixelProbe)
   if(ENTRY MATCHES "^VS")
@@ -778,7 +778,7 @@ set(SIMPSONS_SKIN_SOURCE "${SIMPSONS_SHADER_DIR}/skin_shader.hlsl")
 add_custom_command(OUTPUT "${SIMPSONS_SKIN_SOURCE}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_skin_shader.py"
     --emit-hlsl "${SIMPSONS_SKIN_SOURCE}"
-  DEPENDS tools/analyze_skin_shader.py tools/skin_shader_emit.py tools/analyze_rigid_shader.py
+  DEPENDS tools/analyze_skin_shader.py tools/skin_shader_emit.py tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl
     tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py analysis/simpsons.pe VERBATIM)
 foreach(ENTRY VSSkin VSSkinDraw PSSkin PSSkinDraw GSSkinProbe VSSkinPixelProbe)
   if(ENTRY MATCHES "^VS")
@@ -805,7 +805,7 @@ add_custom_command(OUTPUT "${SIMPSONS_SKIN_ALPHA_SOURCE}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_skin_alpha_shader.py"
     --emit-hlsl "${SIMPSONS_SKIN_ALPHA_SOURCE}"
   DEPENDS tools/analyze_skin_alpha_shader.py tools/analyze_skin_shader.py tools/skin_shader_emit.py
-    tools/analyze_168f8alpha_shader.py tools/analyze_rigid_shader.py tools/analyze_screen_shaders.py
+    tools/analyze_168f8alpha_shader.py tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl tools/analyze_screen_shaders.py
     tools/analyze_edge_shaders.py analysis/simpsons.pe VERBATIM)
 foreach(ENTRY PSSkinAlpha PSSkinAlphaDraw)
   if(ENTRY STREQUAL "PSSkinAlphaDraw")
@@ -824,7 +824,7 @@ set(SIMPSONS_SKIN_DUAL_SOURCE "${SIMPSONS_SHADER_DIR}/skin_dualtextured_shader.h
 add_custom_command(OUTPUT "${SIMPSONS_SKIN_DUAL_SOURCE}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_skin_dualtextured_shader.py"
     --emit-hlsl "${SIMPSONS_SKIN_DUAL_SOURCE}"
-  DEPENDS tools/analyze_skin_dualtextured_shader.py tools/skin_shader_emit.py tools/analyze_rigid_shader.py
+  DEPENDS tools/analyze_skin_dualtextured_shader.py tools/skin_shader_emit.py tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl
     tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py analysis/simpsons.pe VERBATIM)
 foreach(ENTRY VSSkinDual PSSkinDual PSSkinDualDraw GSSkinDualProbe VSSkinDualPixelProbe)
   if(ENTRY MATCHES "^VS")
@@ -851,7 +851,7 @@ add_custom_command(OUTPUT "${SIMPSONS_SKIN_DUAL_ALPHA_SOURCE}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_skin_dualalpha_shader.py"
     --emit-hlsl "${SIMPSONS_SKIN_DUAL_ALPHA_SOURCE}"
   DEPENDS tools/analyze_skin_dualalpha_shader.py tools/analyze_skin_dualtextured_shader.py
-    tools/analyze_skin_alpha_shader.py tools/skin_shader_emit.py tools/analyze_rigid_shader.py
+    tools/analyze_skin_alpha_shader.py tools/skin_shader_emit.py tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl
     tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py analysis/simpsons.pe VERBATIM)
 foreach(ENTRY VSSkinDualAlpha PSSkinDualAlpha PSSkinDualAlphaDraw GSSkinDualAlphaProbe VSSkinDualAlphaPixelProbe)
   if(ENTRY MATCHES "^VS")
@@ -883,7 +883,7 @@ add_custom_command(OUTPUT "${SIMPSONS_SKIN_TEXTURED_SOURCE}"
   DEPENDS tools/analyze_skin_textured_shader.py tools/analyze_skin_shader.py tools/skin_shader_emit.py
     tools/analyze_skin_dualtextured_shader.py tools/analyze_skin_alpha_shader.py
     tools/analyze_168f8alpha_shader.py
-    tools/analyze_rigid_shader.py tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py
+    tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py
     analysis/simpsons.pe VERBATIM)
 foreach(ENTRY VSSkinTextured PSSkinTextured VSSkinTexturedAlpha PSSkinTexturedAlpha
     GSSkinTexturedProbe GSSkinTexturedAlphaProbe VSSkinTexturedPixelProbe VSSkinTexturedAlphaPixelProbe
@@ -914,7 +914,7 @@ set(SIMPSONS_SKY_SOURCE "${SIMPSONS_SHADER_DIR}/sky_shader.hlsl")
 add_custom_command(OUTPUT "${SIMPSONS_SKY_SOURCE}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_sky_shader.py"
     --emit-hlsl "${SIMPSONS_SKY_SOURCE}"
-  DEPENDS tools/analyze_sky_shader.py tools/analyze_rigid_shader.py
+  DEPENDS tools/analyze_sky_shader.py tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl
     tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py analysis/simpsons.pe VERBATIM)
 foreach(ENTRY VSSky PSSky VSSkyOpaque PSSkyOpaque)
   if(ENTRY MATCHES "^VS")
@@ -950,7 +950,7 @@ set(SIMPSONS_CHOCOLATE_SOURCE "${SIMPSONS_SHADER_DIR}/chocolate_shader.hlsl")
 add_custom_command(OUTPUT "${SIMPSONS_CHOCOLATE_SOURCE}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_chocolate_shader.py"
     --emit-hlsl "${SIMPSONS_CHOCOLATE_SOURCE}"
-  DEPENDS tools/analyze_chocolate_shader.py tools/analyze_rigid_shader.py
+  DEPENDS tools/analyze_chocolate_shader.py tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl
     tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py analysis/simpsons.pe VERBATIM)
 foreach(ENTRY VSChocolate PSChocolate)
   if(ENTRY MATCHES "^VS")
@@ -969,7 +969,7 @@ set(SIMPSONS_A168_SOURCE "${SIMPSONS_SHADER_DIR}/a168_shader.hlsl")
 add_custom_command(OUTPUT "${SIMPSONS_A168_SOURCE}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_168f8alpha_shader.py"
     --emit-hlsl "${SIMPSONS_A168_SOURCE}"
-  DEPENDS tools/analyze_168f8alpha_shader.py tools/analyze_rigid_shader.py
+  DEPENDS tools/analyze_168f8alpha_shader.py tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl
     tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py analysis/simpsons.pe VERBATIM)
 foreach(ENTRY VS168F8 PS168F8)
   if(ENTRY MATCHES "^VS")
@@ -989,7 +989,7 @@ add_custom_command(OUTPUT "${SIMPSONS_RIGID_ALPHA_SOURCE}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_rigid_alpha_shader.py"
     --emit-hlsl "${SIMPSONS_RIGID_ALPHA_SOURCE}"
   DEPENDS tools/analyze_rigid_alpha_shader.py tools/analyze_168f8alpha_shader.py
-    tools/analyze_rigid_shader.py tools/analyze_post_effect_catalog.py tools/analyze_effect_catalog.py
+    tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl tools/analyze_post_effect_catalog.py tools/analyze_effect_catalog.py
     tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py analysis/simpsons.pe VERBATIM)
 set(SIMPSONS_RIGID_ALPHA_HEADERS)
 foreach(ENTRY VSRigidAlpha PSRigidAlpha GSRigidAlphaProbe VSRigidAlphaPixelProbe)
@@ -1022,7 +1022,7 @@ set(SIMPSONS_RIGID_FAMILY_ALPHA_REFERENCES
 add_custom_command(OUTPUT "${SIMPSONS_RIGID_FAMILY_ALPHA_SOURCE}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_rigid_family_alpha_shader.py"
     --verify --emit-hlsl "${SIMPSONS_RIGID_FAMILY_ALPHA_SOURCE}"
-  DEPENDS tools/analyze_rigid_family_alpha_shader.py tools/analyze_rigid_shader.py tools/analyze_168f8alpha_shader.py
+  DEPENDS tools/analyze_rigid_family_alpha_shader.py tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl tools/analyze_168f8alpha_shader.py
     tools/analyze_rigid_dualtextured_uv_shader.py tools/analyze_chocolate_shader.py
     tools/analyze_edge_shaders.py tools/analyze_screen_shaders.py tools/analyze_post_effect_catalog.py tools/analyze_effect_catalog.py
     tools/analyze_fourtap_shaders.py ${SIMPSONS_RIGID_FAMILY_ALPHA_REFERENCES}
@@ -1058,7 +1058,7 @@ add_custom_command(OUTPUT "${SIMPSONS_VFX_CHECK}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_vfx_rigid_shader.py"
     --verify-hlsl "${CMAKE_SOURCE_DIR}/renderer/vfx_rigid_shader.hlsl"
   COMMAND "${CMAKE_COMMAND}" -E touch "${SIMPSONS_VFX_CHECK}"
-  DEPENDS tools/analyze_vfx_rigid_shader.py tools/analyze_rigid_shader.py tools/analyze_168f8alpha_shader.py
+  DEPENDS tools/analyze_vfx_rigid_shader.py tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl tools/analyze_168f8alpha_shader.py
     tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py renderer/vfx_rigid_shader.hlsl
     "${CMAKE_SOURCE_DIR}/analysis/simpsons.pe" VERBATIM)
 foreach(ENTRY VSVfxRigid PSVfxRigid PSVfxRigidDraw)
@@ -1149,33 +1149,33 @@ set(SIMPSONS_PARTICLE_SOURCE "${SIMPSONS_SHADER_DIR}/particle_shader.hlsl")
 add_custom_command(OUTPUT "${SIMPSONS_PARTICLE_SOURCE}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_particle_shader.py"
     --emit-hlsl "${SIMPSONS_PARTICLE_SOURCE}"
-  DEPENDS tools/analyze_particle_shader.py tools/analyze_rigid_shader.py tools/analyze_screen_shaders.py
+  DEPENDS tools/analyze_particle_shader.py tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl tools/analyze_screen_shaders.py
     tools/analyze_edge_shaders.py analysis/simpsons.pe VERBATIM)
 set(SIMPSONS_PROJECTED_PARTICLE_SOURCE "${SIMPSONS_SHADER_DIR}/particle_projected_shader.hlsl")
 add_custom_command(OUTPUT "${SIMPSONS_PROJECTED_PARTICLE_SOURCE}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_projected_particle_shader.py"
     --emit-hlsl "${SIMPSONS_PROJECTED_PARTICLE_SOURCE}"
-  DEPENDS tools/analyze_projected_particle_shader.py tools/analyze_particle_shader.py tools/analyze_rigid_shader.py
+  DEPENDS tools/analyze_projected_particle_shader.py tools/analyze_particle_shader.py tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl
     tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py tools/analyze_fourtap_shaders.py analysis/simpsons.pe VERBATIM)
 set(SIMPSONS_DUAL_PARTICLE_SOURCE "${SIMPSONS_SHADER_DIR}/particle_dual_shader.hlsl")
 add_custom_command(OUTPUT "${SIMPSONS_DUAL_PARTICLE_SOURCE}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_dual_particle_shader.py"
     --emit-hlsl "${SIMPSONS_DUAL_PARTICLE_SOURCE}"
   DEPENDS tools/analyze_dual_particle_shader.py tools/analyze_projected_particle_shader.py tools/analyze_particle_shader.py
-    tools/analyze_rigid_shader.py tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py analysis/simpsons.pe VERBATIM)
+    tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py analysis/simpsons.pe VERBATIM)
 set(SIMPSONS_TYPE5_PARTICLE_SOURCE "${SIMPSONS_SHADER_DIR}/particle_type5_shader.hlsl")
 add_custom_command(OUTPUT "${SIMPSONS_TYPE5_PARTICLE_SOURCE}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_particle_type5_shader.py"
     --emit-hlsl "${SIMPSONS_TYPE5_PARTICLE_SOURCE}"
   DEPENDS tools/analyze_particle_type5_shader.py tools/analyze_particle_shader.py
-    tools/analyze_rigid_shader.py tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py
+    tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py
     "${SIMPSONS_PARTICLE_SOURCE}" analysis/simpsons.pe VERBATIM)
 set(SIMPSONS_DUAL_PROJECTED_PARTICLE_SOURCE "${SIMPSONS_SHADER_DIR}/particle_dual_projected_shader.hlsl")
 add_custom_command(OUTPUT "${SIMPSONS_DUAL_PROJECTED_PARTICLE_SOURCE}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_dual_projected_particle_shader.py"
     --emit-hlsl "${SIMPSONS_DUAL_PROJECTED_PARTICLE_SOURCE}"
   DEPENDS tools/analyze_dual_projected_particle_shader.py tools/analyze_dual_particle_shader.py
-    tools/analyze_projected_particle_shader.py tools/analyze_particle_shader.py tools/analyze_rigid_shader.py
+    tools/analyze_projected_particle_shader.py tools/analyze_particle_shader.py tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl
     tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py tools/analyze_fourtap_shaders.py analysis/simpsons.pe VERBATIM)
 set(SIMPSONS_PARTICLE_HEADERS)
 foreach(ENTRY VSParticle VSParticleType5 PSParticle PSParticleDraw PSParticleSnapshotDraw GSParticleProbe PSParticleProjected PSParticleProjectedDraw VSParticleProjectedProbe PSParticleDual PSParticleDualDraw PSParticleDualProjected PSParticleDualProjectedDraw VSParticleUNormProbe PSParticleUNormDraw PSParticleProjectedUNormDraw PSParticleDualUNormDraw PSParticleDualProjectedUNormDraw PSParticleUNormRoundTripDraw)
@@ -1347,6 +1347,7 @@ add_custom_command(OUTPUT ${SIMPSONS_TEMPORAL_SOURCES} "${SIMPSONS_TEMPORAL_DIR}
     renderer/rigid_gloss_shader.hlsl
     renderer/rigid_multitone_draw.hlsl
     renderer/rigid_normalmap_draw.hlsl
+    renderer/palette_coordinate.hlsl
     renderer/rigid_remaining_draw.hlsl
     renderer/rigid_remaining_shader.hlsl
     renderer/rigid_shader.hlsl
@@ -1600,7 +1601,7 @@ add_custom_command(OUTPUT "${SIMPSONS_PARTICLE_FAMILY_FIXTURE}"
     --emit-cpp "${SIMPSONS_PARTICLE_FAMILY_FIXTURE}"
   DEPENDS tests/test_dual_projected_particle_shader.py tools/analyze_dual_projected_particle_shader.py
     tools/analyze_particle_type5_shader.py tools/analyze_dual_particle_shader.py tools/analyze_projected_particle_shader.py
-    tools/analyze_particle_shader.py tools/analyze_rigid_shader.py tools/analyze_screen_shaders.py analysis/simpsons.pe VERBATIM)
+    tools/analyze_particle_shader.py tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl tools/analyze_screen_shaders.py analysis/simpsons.pe VERBATIM)
 add_executable(ParticleFamilyShaderTests tests/test_particle_family_shader.cpp ${SIMPSONS_PARTICLE_HEADERS} "${SIMPSONS_PARTICLE_FAMILY_FIXTURE}")
 target_include_directories(ParticleFamilyShaderTests PRIVATE "${SIMPSONS_SHADER_DIR}")
 target_compile_definitions(ParticleFamilyShaderTests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -1981,7 +1982,7 @@ if(BUILD_TESTING)
     DEPENDS tests/test_skin_textured_shader.py tools/analyze_skin_textured_shader.py
       tests/test_skin_dualalpha_shader.py
       tools/analyze_skin_shader.py tools/analyze_skin_dualtextured_shader.py tools/skin_shader_emit.py
-      tools/analyze_rigid_shader.py tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py
+      tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py
       analysis/simpsons.pe VERBATIM)
   add_executable(SkinTexturedShaderTests tests/test_skin_textured_gpu.cpp
     "${SIMPSONS_SKIN_TEXTURED_FIXTURES}" ${SIMPSONS_SKIN_TEXTURED_HEADERS})
@@ -2024,7 +2025,7 @@ if(BUILD_TESTING)
       --emit-cpp "${SIMPSONS_SKIN_DUAL_ALPHA_FIXTURES}"
     DEPENDS tests/test_skin_dualalpha_shader.py tools/analyze_skin_dualalpha_shader.py
       tools/analyze_skin_dualtextured_shader.py tools/analyze_skin_alpha_shader.py tools/skin_shader_emit.py
-      tools/analyze_rigid_shader.py tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py
+      tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py
       analysis/simpsons.pe VERBATIM)
   add_executable(SkinDualAlphaShaderTests tests/test_skin_dualalpha_gpu.cpp
     "${SIMPSONS_SKIN_DUAL_ALPHA_FIXTURES}" ${SIMPSONS_SKIN_DUAL_ALPHA_HEADERS})
@@ -2187,7 +2188,7 @@ if(BUILD_TESTING)
     COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tests/test_rigid_dualtextured_uv_shader.py"
       --emit-fixtures "${SIMPSONS_RIGID_UV_FIXTURES}"
     DEPENDS tests/test_rigid_dualtextured_uv_shader.py tools/analyze_rigid_dualtextured_uv_shader.py
-      tools/analyze_chocolate_shader.py tools/analyze_rigid_shader.py tools/analyze_screen_shaders.py
+      tools/analyze_chocolate_shader.py tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl tools/analyze_screen_shaders.py
       tools/analyze_edge_shaders.py analysis/simpsons.pe VERBATIM)
   add_executable(RigidDualTexturedUVShaderTests tests/test_rigid_dualtextured_uv_gpu.cpp
     "${SIMPSONS_RIGID_UV_FIXTURES}" ${SIMPSONS_RIGID_HEADERS})
@@ -2204,7 +2205,7 @@ if(BUILD_TESTING)
     COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tests/test_rigid_uv_shader.py"
       --emit-fixtures "${SIMPSONS_RIGID_SINGLE_UV_FIXTURES}"
     DEPENDS tests/test_rigid_uv_shader.py tools/analyze_rigid_uv_shader.py
-      tools/analyze_chocolate_shader.py tools/analyze_rigid_shader.py tools/analyze_screen_shaders.py
+      tools/analyze_chocolate_shader.py tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl tools/analyze_screen_shaders.py
       tools/analyze_edge_shaders.py tools/analyze_post_effect_catalog.py tools/analyze_effect_catalog.py
       analysis/simpsons.pe VERBATIM)
   add_executable(RigidUVShaderTests tests/test_rigid_uv_gpu.cpp
@@ -2222,7 +2223,7 @@ if(BUILD_TESTING)
     COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tests/test_flipbook_shader.py"
       --emit-fixtures "${SIMPSONS_FLIPBOOK_FIXTURES}"
     DEPENDS tests/test_flipbook_shader.py tools/analyze_flipbook_shader.py
-      tools/analyze_chocolate_shader.py tools/analyze_rigid_shader.py tools/analyze_screen_shaders.py
+      tools/analyze_chocolate_shader.py tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl tools/analyze_screen_shaders.py
       tools/analyze_edge_shaders.py tools/analyze_post_effect_catalog.py tools/analyze_effect_catalog.py
       analysis/simpsons.pe VERBATIM)
   add_executable(FlipbookShaderTests tests/test_flipbook_gpu.cpp
@@ -2240,7 +2241,7 @@ if(BUILD_TESTING)
     COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tests/test_rigid_family_alpha_shader.py"
       --emit-fixtures "${SIMPSONS_RIGID_FAMILY_ALPHA_FIXTURES}"
     DEPENDS tests/test_rigid_family_alpha_shader.py tools/analyze_rigid_family_alpha_shader.py
-      tools/analyze_rigid_shader.py tools/analyze_168f8alpha_shader.py tools/analyze_rigid_dualtextured_uv_shader.py
+      tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl tools/analyze_168f8alpha_shader.py tools/analyze_rigid_dualtextured_uv_shader.py
       tools/analyze_chocolate_shader.py tools/analyze_edge_shaders.py tools/analyze_screen_shaders.py
       tools/analyze_post_effect_catalog.py tools/analyze_effect_catalog.py tools/analyze_fourtap_shaders.py
       ${SIMPSONS_RIGID_FAMILY_ALPHA_REFERENCES} analysis/simpsons.pe VERBATIM)

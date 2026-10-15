@@ -438,7 +438,7 @@ def shader_source(image):
               '    result.t0=output0; result.t1=output1; result.t2=output2; result.t3=output3;',
               '    result.t4=output4.xyz; result.t5=output5.xyz; result.t6=output6.xyz;',
               '    result.t7=output7; return result;', '}']
-    lines += ['float4 PSRigidNormalmap(NormalmapOutput input):SV_Target0 {']
+    lines += [rigid.PALETTE_COORDINATE, 'float4 PSRigidNormalmap(NormalmapOutput input):SV_Target0 {']
     lits = struct.unpack_from('>20I', image, PROFILES[1][1] - screen.BASE + 1256)
     screen.require(tuple(lits) == PS_LITERALS, 'Normalmap PS literal bank changed')
     for i in range(5):
@@ -448,7 +448,8 @@ def shader_source(image):
     # t6->r6. t7 (color) is computed by VS but not read by PS; r7+ are scratch.
     # This mapping is verified by the GPU pixel oracle (uv sampling at 16/28,
     # world/eye at 18, shadow coords at 85/112); any swap fails sampling tests.
-    lines += ['    precise float4 r0=input.t0,r1=input.t1,r2=input.t2,r3=input.t3;',
+    # t0.zw is the palette coordinate (uv1), read only through frac().
+    lines += ['    precise float4 r0=float4(input.t0.xy,rigidPaletteCoordinate(input.t0.zw)),r1=input.t1,r2=input.t2,r3=input.t3;',
               '    precise float4 r4=float4(input.t4,0),r5=float4(input.t5,0),r6=float4(input.t6,0),r7=0;',
               '    precise float4 r8=0,r9=0,r10=0,r11=0,r12=0,output0=0;',
               '    precise float ps=0; bool p0=false;']

@@ -1,6 +1,6 @@
 # Exact original shader identities for the remaining game material variants.
 set(SIMPSONS_REMAINING_ANALYZER_DEPS
-  tools/analyze_rigid_shader.py tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py
+  tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py
   tools/analyze_fourtap_shaders.py tools/analyze_chocolate_shader.py
   tools/analyze_rigid_uv_shader.py tools/analyze_post_effect_catalog.py
   tools/analyze_effect_catalog.py tools/analyze_poststart_integration.py analysis/simpsons.pe)
@@ -31,7 +31,7 @@ endforeach()
 foreach(ENTRY PSChocolateOpaqueDraw PSProjtexDraw)
   simpsons_remaining_compile(${ENTRY} "${CMAKE_SOURCE_DIR}/renderer/rigid_remaining_draw.hlsl"
     SIMPSONS_REMAINING_RIGID_HEADERS "${SIMPSONS_REMAINING_RIGID_SOURCE}"
-    renderer/rigid_remaining_shader.hlsl renderer/shadow_mesh.hlsl)
+    renderer/rigid_remaining_shader.hlsl renderer/shadow_mesh.hlsl renderer/palette_coordinate.hlsl)
 endforeach()
 simpsons_remaining_compile(PSProjtexAlphaDraw "${CMAKE_SOURCE_DIR}/renderer/projtex_alpha_draw.hlsl"
   SIMPSONS_REMAINING_RIGID_HEADERS "${SIMPSONS_REMAINING_RIGID_SOURCE}"
@@ -71,6 +71,15 @@ add_custom_command(OUTPUT "${SIMPSONS_SKIN_DUAL_UV_SOURCE}"
     --emit-hlsl "${SIMPSONS_SKIN_DUAL_UV_SOURCE}"
   DEPENDS tools/analyze_skin_dualtextured_uv_shader.py tools/skin_shader_emit.py
     ${SIMPSONS_REMAINING_ANALYZER_DEPS} VERBATIM)
+# The draw wrappers and probes include renderer/skin_dualtextured_uv_shader.hlsl
+# (local, gitignored) ahead of the generated copy; it must match. Regenerate with
+# analyze_skin_dualtextured_uv_shader.py --emit-hlsl renderer/skin_dualtextured_uv_shader.hlsl.
+set(SIMPSONS_SKIN_DUAL_UV_COPY_CHECK "${SIMPSONS_SHADER_DIR}/skin_dualtextured_uv_copy_verified.stamp")
+add_custom_command(OUTPUT "${SIMPSONS_SKIN_DUAL_UV_COPY_CHECK}"
+  COMMAND "${CMAKE_COMMAND}" -E compare_files --ignore-eol "${SIMPSONS_SKIN_DUAL_UV_SOURCE}"
+    "${CMAKE_SOURCE_DIR}/renderer/skin_dualtextured_uv_shader.hlsl"
+  COMMAND "${CMAKE_COMMAND}" -E touch "${SIMPSONS_SKIN_DUAL_UV_COPY_CHECK}"
+  DEPENDS "${SIMPSONS_SKIN_DUAL_UV_SOURCE}" renderer/skin_dualtextured_uv_shader.hlsl VERBATIM)
 foreach(ENTRY VSSkinDualUV PSSkinDualUV VSSkinDualUVAlpha PSSkinDualUVAlpha
     GSSkinDualUVProbe GSSkinDualUVAlphaProbe VSSkinDualUVPixelProbe VSSkinDualUVAlphaPixelProbe
     PSSkinDualUVDraw PSSkinDualUVAlphaDraw)
@@ -83,7 +92,8 @@ foreach(ENTRY VSSkinDualUV PSSkinDualUV VSSkinDualUVAlpha PSSkinDualUVAlpha
     set(SOURCE "${CMAKE_SOURCE_DIR}/renderer/skin_dualtextured_uv_probe.hlsl")
   endif()
   simpsons_remaining_compile(${ENTRY} "${SOURCE}" SIMPSONS_SKIN_DUAL_UV_HEADERS
-    "${SIMPSONS_SKIN_DUAL_UV_SOURCE}" renderer/skin_dualtextured_uv_shader.hlsl renderer/shadow_mesh.hlsl)
+    "${SIMPSONS_SKIN_DUAL_UV_SOURCE}" "${SIMPSONS_SKIN_DUAL_UV_COPY_CHECK}" renderer/skin_dualtextured_uv_shader.hlsl
+    renderer/shadow_mesh.hlsl)
 endforeach()
 list(APPEND SIMPSONS_RIGID_HEADERS ${SIMPSONS_REMAINING_RIGID_HEADERS}
   ${SIMPSONS_SKIN_VARIANTS_HEADERS} ${SIMPSONS_SKIN_DUAL_UV_HEADERS})

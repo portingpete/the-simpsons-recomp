@@ -13,6 +13,7 @@ import sys
 sys.dont_write_bytecode = True
 import analyze_screen_shaders as screen
 import analyze_edge_shaders as edge
+import analyze_rigid_shader as rigid
 from skin_variants_pins import PINS
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -285,9 +286,11 @@ def shader_source(image, family):
             f'[maxvertexcount(1)] void GS{name}Probe(point SkinVariantOutput input[1],inout PointStream<SkinVariantOutput> stream){{stream.Append(input[0]);}}',
             f'SkinVariantOutput VS{name}PixelProbe(uint id:SV_VertexID){{SkinVariantOutput o;o.position=float4(id==1?3:-1,id==2?-3:1,0.5,1);o.t0=skinVariantProbe[0];o.t1=skinVariantProbe[1];o.t2=skinVariantProbe[2];o.t3=skinVariantProbe[3];o.t4=skinVariantProbe[4];return o;}}']
         stage = 'PSA' if alpha else 'PS'; pin = pins[stage]
-        lines += [f'float4 PS{name}(SkinVariantOutput input):SV_Target0 {{']
+        lines += ([] if alpha else [rigid.PALETTE_COORDINATE]) + [f'float4 PS{name}(SkinVariantOutput input):SV_Target0 {{']
         lines += [f'    const float4 k{252+i}=asfloat(uint4(' + ','.join('0x%08Xu' % v for v in pin['literals'][4*i:4*i+4]) + '));' for i in range(4)]
-        lines += ['    precise float4 r0=input.t0,r1=input.t1,r2=input.t2,r3=input.t3,r4=' + ('0' if alpha else 'input.t4') + ',r5=0,r6=0,r7=0;precise float4 output0=0;precise float ps=0;bool p0=false;']
+        # Opaque t1.xy is the palette coordinate (uv1), read only through frac().
+        palette = 'input.t1' if alpha else 'float4(rigidPaletteCoordinate(input.t1.xy),input.t1.zw)'
+        lines += ['    precise float4 r0=input.t0,r1=' + palette + ',r2=input.t2,r3=input.t3,r4=' + ('0' if alpha else 'input.t4') + ',r5=0,r6=0,r7=0;precise float4 output0=0;precise float ps=0;bool p0=false;']
         lines += control_source(pin, rows[stage], False) + ['    return output0;}', f'SkinVariantDrawOutput PS{name}Draw(SkinVariantOutput input){{SkinVariantDrawOutput o;o.color=PS{name}(input);o.depth=PSShadowMeshDepth(input.position);return o;}}']
     return '\n'.join(lines) + '\n'
 

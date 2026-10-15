@@ -140,8 +140,10 @@ def shader_source(image):
    '    precise float4 output62=0,output0=0,output1=0,output2=0,output3=0,output4=0,output5=0; precise float ps=0; bool p0=false; int a0=0;'])
   for i in range(4):lines.append('    const float4 k'+str(252+i)+'=asfloat(uint4('+','.join('0x%08Xu'%x for x in VS_LITERALS[4*i:4*i+4])+'));')
   lines+=emit_control(rows[stage],stage);lines.append(f'    {name}Output o; o.position=output62; o.t0=output0.xy; o.t1=output1.xy; o.t2=output2.xy; o.t3=output3.xyz; o.t4=output4.xyz; o.t5=output5; return o; }}')
+ # t2 is the palette coordinate (uv1) in both PSs, read only through frac().
+ lines.append(rigid.PALETTE_COORDINATE)
  for stage,name in(('PS','SkinDualUV'),('PSA','SkinDualUVAlpha')):
-  lines.extend([f'float4 PS{name}({name}Output input):SV_Target0 {{','    precise float4 r0=float4(input.t0,0,0),r1=float4(input.t1,0,0),r2=float4(input.t2,0,0),r3=float4(input.t3,0),r4=float4(input.t4,0),r5=input.t5,r6=0,r7=0,output0=0; precise float ps=0; bool p0=false;'])
+  lines.extend([f'float4 PS{name}({name}Output input):SV_Target0 {{','    precise float4 r0=float4(input.t0,0,0),r1=float4(input.t1,0,0),r2=float4(rigidPaletteCoordinate(input.t2),0,0),r3=float4(input.t3,0),r4=float4(input.t4,0),r5=input.t5,r6=0,r7=0,output0=0; precise float ps=0; bool p0=false;'])
   for i in range(4):lines.append('    const float4 k'+str(252+i)+'=asfloat(uint4('+','.join('0x%08Xu'%x for x in PS_LITERALS[4*i:4*i+4])+'));')
   lines+=emit_control(rows[stage],stage);lines.append('    return output0; }')
  return '\n'.join(lines+[''])

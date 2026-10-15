@@ -182,15 +182,16 @@ it: frac(2*0.49999997) is about 1, so the code jumps by 31*32 (RGB10A2 red 379 v
 875) on alternate rows and the edge pass turned the pipe into black/red/white
 noise.
 
-`tools/analyze_rigid_shader.py` owns `rigidPaletteCoordinate` (its
-`PALETTE_COORDINATE` text), which each palette PS applies to its palette
-coordinate before any other use: a component within 2^-16 (relative to
-max(|grid value|,1/64), capped at 1/16384, a 256th of a palette cell) of a
-multiple of 1/64 snaps onto it. Only that grid can
+`renderer/palette_coordinate.hlsl` defines `rigidPaletteCoordinate`, which
+each palette PS applies to its palette coordinate before any other use: a
+component within 2^-16 (relative to max(|grid value|,1/64), capped at 1/16384, a
+256th of a palette cell) of a multiple of 1/64 snaps onto it. Only that grid can
 change `floor(64*frac(u))`, `floor(32*frac(2v))` or the `2v>=1` bit, so a shared
 grid value is exact again and a varying value moves by at most the tolerance.
 Base UVs, noise UVs and every other input are untouched; the temporal (TAA)
-exports reuse the same PS bodies.
+exports reuse the same PS bodies. The analyzers inline the file
+(`analyze_rigid_shader.py` reads it as `PALETTE_COORDINATE`) and the
+hand-written chocolate wrapper includes it.
 
 ## Palette-coordinate audit (2026-10-15)
 
@@ -199,10 +200,10 @@ through unchanged: uv0 for plain rigid (PS8200D9E8, green channel) and plain ski
 (PS8200A02C); uv1 for rigid dual-textured (8202BB44), dual-textured UV
 (820477A8), gloss (8201A6EC), multitone (82055710), normalmap (82058CBC),
 chocolate opaque (8205E5E0, via t4.w/t5.w) and skin dual (82020B9C), dual UV
-(8204E2DC), gloss (82027C18) and flipbook (82040118). Textured rigid, single-UV
-rigid, projtex, textured skin, the rigid flipbook and every alpha variant pack
-no UV palette; their other `frac()` calls are shadow-filter weights, which are
-continuous across the wrap. A triangle is at risk when one component has the
+(8204E2DC, and its alpha pass 8204E75C), gloss (82027C18) and flipbook
+(82040118). Textured rigid, single-UV rigid, projtex, textured skin, the rigid
+flipbook and every other alpha variant pack no UV palette; their other `frac()`
+calls are shadow-filter weights, which are continuous across the wrap. A triangle is at risk when one component has the
 same non-zero value on all three vertices and that value is a multiple of 1/64
 (exact zero interpolates exactly).
 
@@ -219,28 +220,40 @@ over 70 s wander routes in all 16 stage launchers and spr_hub:
 | skin, skin dual, gloss, flipbook | 5.0 M, 41 k, 26 k, 130 | 0 | |
 | chocolate opaque, skin dual UV | not drawn on these routes | | |
 
-The rigid, dual-textured and gloss translations under `renderer/` are local
-(gitignored); the build verifies all three against their analyzers before
-compiling them (`rigid_palette_hlsl_verified.stamp`), and `--write` on each
-analyzer regenerates a stale copy.
+The rigid, dual-textured, gloss, dual-textured UV, skin dual UV, skin gloss and
+skin flipbook translations under `renderer/` are local (gitignored). The build
+verifies the first five against their analyzers before compiling them
+(`rigid_palette_hlsl_verified.stamp`, `rigid_dualtextured_uv_verified.stamp`,
+`skin_dualtextured_uv_copy_verified.stamp`). `--write` (rigid, dual-textured,
+gloss) or `--emit-hlsl` (dual-textured UV, skin dual UV, and
+`analyze_skin_variants_shader.py gloss|flipbook`) regenerates a stale copy.
 
-Counts are unique draw ranges, so repeated draws are counted once. The snap is
-applied to the four families with at-risk triangles: plain rigid
+Counts are unique draw ranges, so repeated draws are counted once. The snap
+covers every palette PS above. Four families had at-risk triangles: plain rigid
 (`analyze_rigid_shader.py`, `renderer/rigid_shader.hlsl`), dual-textured
 (`analyze_rigid_dualtextured_shader.py`, which includes rigid_shader.hlsl),
-gloss (`analyze_rigid_gloss_shader.py`) and multitone. The others are unchanged:
-the sweep found no such triangles, though dual-textured UV, normalmap, chocolate
-opaque and skin dual UV were barely or never drawn, so a wider sweep would be
-needed to rule them out.
+gloss (`analyze_rigid_gloss_shader.py`) and multitone. The sweep found none for
+the rest, but dual-textured UV, normalmap, chocolate opaque and skin dual UV were
+barely or never drawn, so they get the snap too, as do skin, skin dual, skin
+gloss and skin flipbook: each analyzer applies it at PS entry. Chocolate opaque
+applies it to t4.w/t5.w in `PSChocolateOpaqueDraw`
+(`renderer/rigid_remaining_draw.hlsl`), because its analyzer is a local,
+untracked tool. Each PS reads its palette registers only through `frac()` before
+their first write.
 
 `tests/test_rigid_mesh.cpp` (`paletteInterpolation`, both renderers, WARP and
 hardware) draws a 256x144 quad with per-vertex W from 1 to 9 through the real
-plain, dual-textured, gloss and multitone VS/PS pairs with seven
-triangle-constant palette coordinates, on the recorded and the immediate path,
-and requires one exact word on every pixel. Without the snap plain rigid packed
-green 1023 where 44 was expected (v=0.5 an ulp low, upper bit lost) and
-dual-textured and gloss packed red 875 where 379 was expected, on WARP, NVIDIA
-D3D11 and Vulkan. `tests/test_rigid_shader.cpp` models the snap in
+plain, dual-textured, gloss, multitone, normalmap, dual-textured UV and
+chocolate opaque VS/PS pairs with seven triangle-constant palette coordinates,
+on the recorded and the immediate path, and requires one exact word on every
+pixel. `tests/test_skin_mesh.cpp` (`paletteInterpolation`) does the same for
+skin, skin dual, skin gloss, skin flipbook and skin dual UV (opaque and alpha).
+Its vertex colour stays clear of the `floor(color.x)` rim flag, whose exactness
+only plain skin restores (`renderer/skin_draw_input.hlsl`). With the snap
+tolerance set to 0, all 13 families fail on WARP, NVIDIA D3D11 and Vulkan for
+every grid case, recorded and immediate: plain rigid and skin pack green 1023
+where 44 is expected (v=0.5 an ulp low, upper bit lost) and every uv1 family
+packs red 875 where 379 is expected. The cell-centre case passes. `tests/test_rigid_shader.cpp` models the snap in
 `pixelExpected` and the gloss oracle and checks inputs at half and twice the
 tolerance around grid lines for plain and dual-textured; the multitone probe
 does the same.
