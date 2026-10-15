@@ -96,12 +96,13 @@ discards every triangle that uses it, and immediates already follow that rule
 - `decodeIm2DVertices` keeps every position and UV bit, non-finite ones
   included, and no longer takes a `textured` flag.
 - `NativeBackend::drawIm2DImpl` drops each triangle that uses a non-finite XYZ
-  and draws the rest in order, with the strip winding the batch uses, as
-  triangle lists of at most 9360 vertices (a full-size strip needs up to three).
-  Each list is validated like any packet, so every UV, color and coordinate a
-  drawn triangle consumes must still be finite and in range. The original
-  packet is counted once, also when nothing remains; a pending batch is
-  flushed first so order is kept.
+  and redraws the rest in order, with the strip winding the batch uses, as a
+  triangle list that is validated and batched like any packet, so every UV,
+  color and coordinate a drawn triangle consumes must still be finite and in
+  range. Only more than 3120 surviving triangles need several native lists
+  (a pending batch is flushed first so order is kept). A packet with nothing
+  left still has its state, bindings and texture validated and is counted
+  once, without drawing or flushing a pending batch.
 - The engine logs the first eight such packets as `[NATIVE IM2D NONFINITE]`
   with the vertex words and the guest stack, to name the producer.
 

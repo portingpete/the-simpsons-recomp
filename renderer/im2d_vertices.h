@@ -1,6 +1,7 @@
 #pragma once
 #include "declaration_resources.h"
 #include <array>
+#include <cmath>
 
 namespace Simpsons::Graphics {
 
@@ -13,6 +14,11 @@ struct Im2DVertex {
     std::array<float,2> uv;
 };
 static_assert(sizeof(Im2DVertex)==40);
+// Whether the position that forms triangles (XYZ) is finite; RHW is unused.
+// The backend drops every triangle that uses a vertex failing this test.
+inline bool finiteIm2DPosition(const Im2DVertex& v) {
+    return std::isfinite(v.position[0]) && std::isfinite(v.position[1]) && std::isfinite(v.position[2]);
+}
 
 // Exact complete vertex range, not the entire dynamic buffer. Accepts the
 // verified Im2D declaration only, with 3..9362 vertices (triangle strip path).

@@ -515,7 +515,8 @@ void nonfiniteTriangles(NativeBackend& b) {
         b.flushIm2D();need(b.im2dDrawCount()==count+1,"An Im2D packet with dropped triangles was not counted once");
         same("Dropping non-finite Im2D triangles changed the remaining triangles");
     }
-    // A wholly dropped packet between queued packets keeps their order.
+    // Wholly and partly dropped packets between queued packets keep their
+    // order and accounting and still join the same batch: one native draw.
     {
         reset();
         auto first=quad(W,H);color(first,{.9f,.1f,.1f,1});
@@ -523,23 +524,43 @@ void nonfiniteTriangles(NativeBackend& b) {
         auto second=quad(W,H);color(second,{.1f,.9f,.1f,1});
         for(auto& v:second.vertices){v.position[0]=v.position[0]*.75f+6;v.position[1]=v.position[1]*.75f+4;}
         auto gone=quad(W,H);for(auto& v:gone.vertices)v.position[1]=notANumber;
-        selectTargets(true);b.drawIm2D(reference,referenceDepth,first);b.drawIm2D(reference,referenceDepth,second);
-        selectTargets(false);const auto count=b.im2dDrawCount();
-        b.queueIm2D(actual,actualDepth,first);b.queueIm2D(actual,actualDepth,gone);b.queueIm2D(actual,actualDepth,second);
-        b.flushIm2D();need(b.im2dDrawCount()==count+3,"A wholly dropped Im2D packet changed packet accounting");
-        same("A wholly dropped Im2D packet reordered or lost queued packets");
+        auto part=quad(W,H);color(part,{.1f,.1f,.9f,1});
+        for(auto& v:part.vertices){v.position[0]=v.position[0]*.5f+12;v.position[1]=v.position[1]*.5f+2;}
+        part.vertices[0].position[0]=notANumber;
+        auto partKept=part;partKept.primitiveType=3;partKept.vertices={part.vertices[2],part.vertices[1],part.vertices[3]};
+        selectTargets(true);b.drawIm2D(reference,referenceDepth,first);b.drawIm2D(reference,referenceDepth,partKept);
+        b.drawIm2D(reference,referenceDepth,second);
+        selectTargets(false);const auto count=b.im2dDrawCount(),calls=b.im2dNativeDrawCount();
+        for(const auto* packet:{&first,&gone,&part,&gone,&second})b.queueIm2D(actual,actualDepth,*packet);
+        b.flushIm2D();need(b.im2dDrawCount()==count+5,"Dropped Im2D triangles changed packet accounting");
+        need(b.im2dNativeDrawCount()==calls+1,"Dropped Im2D triangles split a compatible batch");
+        same("Dropped Im2D triangles reordered or lost queued packets");
+    }
+    // A packet with nothing left to draw still has its texture validated.
+    {
+        reset();
+        const std::array<uint8_t,8> block{};
+        auto gone=quad(W,H);gone.texture=b.createTexture(4,4,TextureFormat::BC1,block);
+        for(auto& v:gone.vertices)v.position[0]=notANumber;
+        const auto count=b.im2dDrawCount();
+        rejectsDraw(gone,"A wholly dropped Im2D packet skipped its texture validation");
+        need(b.im2dDrawCount()==count,"A rejected wholly dropped Im2D packet was counted");
     }
     // A full-size strip with two bad vertices leaves 9354 triangles, more than
     // one native list holds. Overlapping replacement makes their order visible;
     // the reference draws the three finite runs as separate strips.
-    for(bool queued:{false,true}) {
-        reset();
+    const auto longStrip=[&] {
         auto packet=quad(W,H);packet.vertices.resize(9362);
         for(size_t i=0;i<packet.vertices.size();++i) {
             auto& v=packet.vertices[i];
             v.position={.5f+float((i*5)%33),i&1?float(H)+.5f:.5f,.5f,1};
             v.color={float(i%7)/7,float(i%11)/11,float(i%13)/13,1};v.uv={0,0};
         }
+        return packet;
+    };
+    for(bool queued:{false,true}) {
+        reset();
+        const auto packet=longStrip();
         auto broken=packet;broken.vertices[100].position[0]=notANumber;broken.vertices[9000].position[2]=inf;
         selectTargets(true);
         for(const auto& [from,to]:{std::pair<size_t,size_t>{0,100},{101,9000},{9001,9362}}) {
@@ -550,6 +571,15 @@ void nonfiniteTriangles(NativeBackend& b) {
         if(queued)b.queueIm2D(actual,actualDepth,broken);else b.drawIm2D(actual,actualDepth,broken);
         b.flushIm2D();need(b.im2dDrawCount()==count+1,"A split Im2D strip was not counted as one packet");
         same("Splitting a long Im2D strip around non-finite vertices changed triangle order or coverage");
+    }
+    // A later native list that fails validation after earlier lists were drawn
+    // still leaves the original packet counted exactly once.
+    {
+        reset();
+        auto packet=longStrip();packet.vertices[100].position[0]=notANumber;packet.vertices[9000].position[1]=40000;
+        const auto count=b.im2dDrawCount();
+        rejectsDraw(packet,"An out-of-range coordinate in a later Im2D list was accepted");
+        need(b.im2dDrawCount()==count+1,"A failed later Im2D list changed the original packet accounting");
     }
     // Validation follows consumption: a bad UV or color on the dropped corner
     // is ignored, the same value on a corner a drawn triangle uses is rejected.
