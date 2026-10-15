@@ -348,7 +348,7 @@ void batchEquivalence(NativeBackend& b) {
     uniformDepth(b.readbackDepthTarget(actualDepth),.5f,73);
     // Rejected following work must not discard an earlier accepted packet.
     const auto before=b.im2dDrawCount();b.queueIm2D(actual,actualDepth,packet);
-    auto bad=packet;bad.vertices[0].position[0]=std::numeric_limits<float>::quiet_NaN();bool rejected=false;
+    auto bad=packet;bad.vertices[0].color[0]=std::numeric_limits<float>::quiet_NaN();bool rejected=false;
     try {b.queueIm2D(actual,actualDepth,bad);}catch(const Error&){rejected=true;}
     need(rejected && b.im2dDrawCount()==before+1,"Batch validation lost earlier work or accepted a bad packet");
     uniformDepth(b.readbackDepthTarget(actualDepth),depth20e4(.25f),73);
@@ -464,6 +464,107 @@ void temporalOriginContracts(bool hardware) {
     std::printf("AUDIT_TEMPORAL_UI_ORIGINS queued_actual_depth=drained private_owners=ignored copied_unknown_DS=rejected partial_clears=component_exact stale_feedback=rejected stencil_preserved=passed\n");
 }
 
+// Live eighty_bites: a four-vertex Im2D strip with a non-finite position
+// stopped the game. The original GPU discards every triangle that uses such a
+// vertex; the remaining triangles must draw exactly as they would alone, in
+// order, on the direct and the batched path, also when a long strip has to be
+// split into several native lists. What a drawn triangle consumes is still
+// validated; what only a dropped triangle uses is not.
+void nonfiniteTriangles(NativeBackend& b) {
+    constexpr uint32_t W=32,H=24;
+    auto actual=b.createTarget(W,H,TargetFormat::RGB10A2),reference=b.createTarget(W,H,TargetFormat::RGB10A2);
+    auto actualDepth=b.createDepthTarget(W,H),referenceDepth=b.createDepthTarget(W,H);
+    const auto selectTargets=[&](bool toReference) {
+        b.bindTargets({toReference?reference:actual,nullptr,nullptr,nullptr},toReference?referenceDepth:actualDepth);
+        b.setViewport({0,0,float(W),float(H),0,1});
+    };
+    const auto reset=[&] {
+        b.flushIm2D();
+        selectTargets(true);b.clearTarget(reference,{.125f,.25f,.5f,1});b.clearDepthTarget(referenceDepth,.5f,73);
+        selectTargets(false);b.clearTarget(actual,{.125f,.25f,.5f,1});b.clearDepthTarget(actualDepth,.5f,73);
+    };
+    const auto same=[&](const char* why) {
+        b.flushIm2D();
+        need(b.readbackTarget(actual)==b.readbackTarget(reference),why);
+        const auto a=b.readbackDepthTarget(actualDepth),r=b.readbackDepthTarget(referenceDepth);
+        for(size_t p=0;p<W*H;++p)need(depthBits(a,p)==depthBits(r,p) && a[p*8+4]==r[p*8+4],why);
+    };
+    const auto rejectsDraw=[&](const Im2DDraw& draw,const char* why) {
+        bool rejected=false;
+        try {selectTargets(false);b.drawIm2D(actual,actualDepth,draw);}catch(const Error&){rejected=true;}
+        need(rejected,why);
+    };
+    const auto strip=[](size_t i){return std::array<size_t,3>{i-(i&1?1:2),i-(i&1?2:1),i};};
+    const float notANumber=std::numeric_limits<float>::quiet_NaN(),inf=std::numeric_limits<float>::infinity();
+    // The live shape, per bad value, corner, lane, blend and path. Corners 1
+    // and 2 belong to both triangles, so nothing remains to draw.
+    for(float bad:{notANumber,inf,-inf})for(size_t corner=0;corner<4;++corner)
+    for(uint32_t word:{0x00010001u,0x07060706u})for(bool queued:{false,true}) {
+        reset();
+        auto packet=quad(W,H);packet.blendWord=word;packet.depthTest=packet.depthWrite=true;packet.depthCompare=7;
+        for(size_t i=0;i<4;++i){packet.vertices[i].color={.2f+.2f*float(i),.7f,.1f*float(i),.6f};packet.vertices[i].position[2]=.25f+.125f*float(i);}
+        auto broken=packet;broken.vertices[corner].position[(corner+size_t(bad<0))%3]=bad;
+        Im2DDraw kept=packet;kept.primitiveType=3;kept.vertices.clear();
+        for(size_t i=2;i<4;++i) {
+            const auto corners=strip(i);
+            if(std::find(corners.begin(),corners.end(),corner)==corners.end())for(size_t c:corners)kept.vertices.push_back(packet.vertices[c]);
+        }
+        selectTargets(true);if(!kept.vertices.empty())b.drawIm2D(reference,referenceDepth,kept);
+        selectTargets(false);const auto count=b.im2dDrawCount();
+        if(queued)b.queueIm2D(actual,actualDepth,broken);else b.drawIm2D(actual,actualDepth,broken);
+        b.flushIm2D();need(b.im2dDrawCount()==count+1,"An Im2D packet with dropped triangles was not counted once");
+        same("Dropping non-finite Im2D triangles changed the remaining triangles");
+    }
+    // A wholly dropped packet between queued packets keeps their order.
+    {
+        reset();
+        auto first=quad(W,H);color(first,{.9f,.1f,.1f,1});
+        for(auto& v:first.vertices){v.position[0]*=.75f;v.position[1]*=.75f;}
+        auto second=quad(W,H);color(second,{.1f,.9f,.1f,1});
+        for(auto& v:second.vertices){v.position[0]=v.position[0]*.75f+6;v.position[1]=v.position[1]*.75f+4;}
+        auto gone=quad(W,H);for(auto& v:gone.vertices)v.position[1]=notANumber;
+        selectTargets(true);b.drawIm2D(reference,referenceDepth,first);b.drawIm2D(reference,referenceDepth,second);
+        selectTargets(false);const auto count=b.im2dDrawCount();
+        b.queueIm2D(actual,actualDepth,first);b.queueIm2D(actual,actualDepth,gone);b.queueIm2D(actual,actualDepth,second);
+        b.flushIm2D();need(b.im2dDrawCount()==count+3,"A wholly dropped Im2D packet changed packet accounting");
+        same("A wholly dropped Im2D packet reordered or lost queued packets");
+    }
+    // A full-size strip with two bad vertices leaves 9354 triangles, more than
+    // one native list holds. Overlapping replacement makes their order visible;
+    // the reference draws the three finite runs as separate strips.
+    for(bool queued:{false,true}) {
+        reset();
+        auto packet=quad(W,H);packet.vertices.resize(9362);
+        for(size_t i=0;i<packet.vertices.size();++i) {
+            auto& v=packet.vertices[i];
+            v.position={.5f+float((i*5)%33),i&1?float(H)+.5f:.5f,.5f,1};
+            v.color={float(i%7)/7,float(i%11)/11,float(i%13)/13,1};v.uv={0,0};
+        }
+        auto broken=packet;broken.vertices[100].position[0]=notANumber;broken.vertices[9000].position[2]=inf;
+        selectTargets(true);
+        for(const auto& [from,to]:{std::pair<size_t,size_t>{0,100},{101,9000},{9001,9362}}) {
+            auto run=packet;run.vertices.assign(packet.vertices.begin()+from,packet.vertices.begin()+to);
+            b.drawIm2D(reference,referenceDepth,run);
+        }
+        selectTargets(false);const auto count=b.im2dDrawCount();
+        if(queued)b.queueIm2D(actual,actualDepth,broken);else b.drawIm2D(actual,actualDepth,broken);
+        b.flushIm2D();need(b.im2dDrawCount()==count+1,"A split Im2D strip was not counted as one packet");
+        same("Splitting a long Im2D strip around non-finite vertices changed triangle order or coverage");
+    }
+    // Validation follows consumption: a bad UV or color on the dropped corner
+    // is ignored, the same value on a corner a drawn triangle uses is rejected.
+    const std::array<uint8_t,4> texel={71,32,149,255};
+    auto textured=quad(W,H);textured.texture=b.createTexture(1,1,TextureFormat::RGBA8,texel);
+    textured.vertices[0].position[0]=notANumber;
+    reset();
+    {auto packet=textured;packet.vertices[0].uv={notANumber,inf};packet.vertices[0].color={notANumber,0,0,inf};
+     selectTargets(false);b.drawIm2D(actual,actualDepth,packet);}
+    {auto packet=textured;packet.vertices[3].uv[1]=notANumber;rejectsDraw(packet,"A non-finite UV on a drawn Im2D triangle was accepted");}
+    {auto packet=textured;packet.vertices[2].color[3]=inf;rejectsDraw(packet,"A non-finite color on a drawn Im2D triangle was accepted");}
+    {auto packet=textured;packet.vertices[1].position[1]=40000;rejectsDraw(packet,"An out-of-range coordinate on a drawn Im2D triangle was accepted");}
+    b.flushIm2D();b.clearBindings();
+    std::puts("PASS Im2D non-finite vertices: triangles using them are dropped; remaining triangles, order, batching, long-strip splitting and packet accounting unchanged; consumed fields still validated");
+}
 int main(int argc,char** argv) {try {
     im2dLayerStorageContracts();
     const bool hardware=argc==2 && std::strcmp(argv[1],"--hardware")==0;
@@ -1055,7 +1156,7 @@ int main(int argc,char** argv) {try {
     bad([](auto& p){p.primitiveType=2;});
     for(size_t count:{size_t(0),size_t(1),size_t(2),size_t(5),size_t(7),size_t(9361),size_t(9362),size_t(9363),size_t(9366)})
         bad([&](auto& p){p.primitiveType=3;p.vertices.resize(count,p.vertices[0]);});
-    bad([](auto& p){p.primitiveType=3;p.vertices.resize(9360,p.vertices[0]);p.vertices.back().position[0]=NAN;});
+    bad([](auto& p){p.primitiveType=3;p.vertices.resize(9360,p.vertices[0]);p.vertices.back().color[0]=NAN;});
     bad([](auto& p){p.rasterWidth=0;});bad([](auto& p){p.rasterHeight=16385;});
     bad([](auto& p){p.depthCompare=8;});bad([](auto& p){p.depthTest=true;p.depthCompare=8;});bad([](auto& p){p.stencil=true;});
     bad([](auto& p){p.blendWord=0x00012106;});bad([](auto& p){p.cullBits=1;});bad([](auto& p){p.cullBits=10;});bad([](auto& p){p.colorWriteMask=16;});
@@ -1063,7 +1164,8 @@ int main(int argc,char** argv) {try {
     bad([](auto& p){p.expandedBlend=1;p.vertices[0].color[0]=-0.1f;});
     bad([](auto& p){p.expandedBlend=1;p.vertices[0].color[3]=1.1f;});
     bad([](auto& p){p.alphaTest=true;p.alphaCompare=8;});bad([](auto& p){p.alphaTest=true;p.alphaReference=NAN;});bad([](auto& p){p.alphaTest=true;p.alphaReference=-1;});
-    for(size_t i=0;i<3;++i)bad([&](auto& p){p.vertices[2].position[i]=NAN;});
+    // A non-finite position is not a rejection: the triangles using it are
+    // dropped (nonfiniteTriangles).
     for(size_t i=0;i<4;++i)bad([&](auto& p){p.vertices[2].color[i]=INFINITY;});
     bad([](auto& p){p.vertices[2].position[2]=1.1f;});bad([](auto& p){p.vertices[2].position[0]=65536;});
     reject([&]{b.drawIm2D({},depth,d);});reject([&]{b.drawIm2D(target,{},d);});
@@ -1267,6 +1369,6 @@ int main(int argc,char** argv) {try {
         }
         NativeIm2DProbe::cleanTransient(b);
     }
-    batchEquivalence(b);colorBatchEquivalence(b);b.waitIdle();
+    batchEquivalence(b);colorBatchEquivalence(b);nonfiniteTriangles(b);b.waitIdle();
     printf("PASS: %zu Im2D backend checks on %s; real native GPU fixtures, console precision/coverage parity unverified\n",checks,hardware?"hardware":"WARP");return 0;
 } catch(const std::exception& e) {fprintf(stderr,"FAIL after %zu checks: %s\n",checks,e.what());return 1;}}

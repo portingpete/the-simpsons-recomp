@@ -48,8 +48,9 @@ declaration: FLOAT4 at0, D3DCOLOR at16, FLOAT2 at20, stride28. The original
 frontend producer826D54B8 loads four input RGBA bytes and builds0xAARRGGBB at
 826D5690..826D5708, stored as big-endian A,R,G,B. The native decoder expands
 this to RGBA/255, without borrowing caller storage. It preserves every position,
-RHW and UV bit while rejecting nonfinite active XYZ or textured UV; flat unused
-UV and ignored RHW retain their bits. Opaque declaration stack bytes remain
+RHW and UV bit, non-finite ones included: the backend drops each triangle that
+uses a non-finite XYZ, as the original GPU discards it, and validates what the
+drawn triangles consume (see native-im2d-draw.md). Opaque declaration stack bytes remain
 preserved by the existing declaration owner and do not select semantics.
 The normalized D3DCOLOR interpretation is corroborated by Microsoft's
 [declaration documentation](https://learn.microsoft.com/en-us/windows/win32/direct3d9/d3ddecltype)
@@ -59,7 +60,7 @@ The game's own declaration bytes and original quad execution establish the
 layout and byte order; no reference engine implementation was copied.
 
 The5,956 decoder checks cover every byte value in each distinct color channel,
-unaligned source, signed zero, ignored NaN bits, active nonfinite rejection,
+unaligned source, signed zero, ignored NaN bits, exact non-finite position/UV bits,
 source extent/count limits, incompatible declarations, all opaque byte values,
 owned output after source mutation/declaration release and unchanged references.
 Normalized color values are computed at compile time. Every channel is also

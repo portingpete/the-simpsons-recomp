@@ -39,7 +39,7 @@ int main()try {
         put(p+20,std::bit_cast<uint32_t>(float(i)/128.0f-0.5f));put(p+24,0x80000000);
     }
     const auto snapshot=storage;
-    const auto decoded=decodeIm2DVertices(*record,source,true);
+    const auto decoded=decodeIm2DVertices(*record,source);
     need(decoded.size()==256,"Vertex count changed");
     for(uint32_t i=0;i<256;++i) {
         const auto& v=decoded[i];
@@ -56,21 +56,26 @@ int main()try {
     for(size_t count:{size_t(3),size_t(256),size_t(4),size_t(9362),size_t(3),size_t(128),size_t(9362),size_t(4)}) {
         std::vector<uint8_t> packet(count*28);
         for(size_t i=0;i<count;++i)std::memcpy(packet.data()+i*28,snapshot.data()+1+(i%256)*28,28);
-        decodeIm2DVertices(*record,packet,true,reusable);
+        decodeIm2DVertices(*record,packet,reusable);
         std::fill(packet.begin(),packet.end(),0xCD);
         need(reusable.size()==count,"Reusable decoder retained a previous packet extent");
         for(size_t i=0;i<count;++i)
             need(!std::memcmp(&reusable[i],&decoded[i%256],sizeof(Im2DVertex)),"Reusable decode retained stale or borrowed vertex fields");
     }
     const auto beforeOverlap=reusable;
-    rejects([&]{decodeIm2DVertices(*record,{reinterpret_cast<const uint8_t*>(reusable.data()),3*28},true,reusable);});
+    rejects([&]{decodeIm2DVertices(*record,{reinterpret_cast<const uint8_t*>(reusable.data()),3*28},reusable);});
     need(reusable.size()==beforeOverlap.size() && !std::memcmp(reusable.data(),beforeOverlap.data(),reusable.size()*sizeof(Im2DVertex)),
         "Overlapping reusable decode changed storage before rejection");
+    // Non-finite position and UV bits reach the backend unchanged; it drops
+    // every triangle using a non-finite XYZ and validates what remains.
     auto damaged=std::vector<uint8_t>(source.begin(),source.end());put(damaged.data()+255*28+24,0x7F800000);
-    rejects([&]{decodeIm2DVertices(*record,damaged,true,reusable);});
-    decodeIm2DVertices(*record,source,true,reusable);
+    put(damaged.data()+254*28,0x7FC00000);
+    decodeIm2DVertices(*record,damaged,reusable);
+    need(std::bit_cast<uint32_t>(reusable[255].uv[1])==0x7F800000 && std::bit_cast<uint32_t>(reusable[254].position[0])==0x7FC00000,
+        "Reusable decode changed non-finite position/UV bits");
+    decodeIm2DVertices(*record,source,reusable);
     need(reusable.size()==decoded.size() && !std::memcmp(reusable.data(),decoded.data(),decoded.size()*sizeof(Im2DVertex)),
-        "Reusable decoder did not recover after a rejected last vertex");
+        "Reusable decoder retained non-finite bits from the previous packet");
     {
         struct SavedEnvironment {
             std::fenv_t value;
@@ -80,7 +85,7 @@ int main()try {
         for(int mode:{FE_DOWNWARD,FE_UPWARD,FE_TOWARDZERO}) {
             if(std::fesetround(mode))throw std::runtime_error("Cannot set floating test mode");
             std::feclearexcept(FE_ALL_EXCEPT);
-            const auto converted=decodeIm2DVertices(*record,source,true);
+            const auto converted=decodeIm2DVertices(*record,source);
             need(std::fegetround()==mode,"Decoder changed caller rounding mode");
             need(!std::fetestexcept(FE_ALL_EXCEPT),"Decoder performed floating arithmetic on original input bits");
             for(size_t i=0;i<converted.size();++i)for(size_t c=0;c<4;++c)
@@ -94,20 +99,18 @@ int main()try {
     need(decoded[255].color[3]==1,"Output retained declaration lifetime");
     id=registry.create(bytes);record=registry.record(id);
     for(size_t size:{size_t(0),size_t(28),size_t(56),size_t(83),size_t(85),size_t(9362*28+1),size_t(9363*28)}) {
-        std::vector<uint8_t> invalid(size);rejects([&]{decodeIm2DVertices(*record,invalid,false);});
+        std::vector<uint8_t> invalid(size);rejects([&]{decodeIm2DVertices(*record,invalid);});
     }
     for(size_t count:{size_t(3),size_t(4),size_t(9362)}) {
-        std::vector<uint8_t> valid(count*28);need(decodeIm2DVertices(*record,valid,true).size()==count,"Valid bounded input rejected");
+        std::vector<uint8_t> valid(count*28);need(decodeIm2DVertices(*record,valid).size()==count,"Valid bounded input rejected");
     }
     std::vector<uint8_t> small(3*28);
     for(uint32_t bits:{0x7F800000u,0xFF800000u,0x7FC00000u,0x7FA12345u}) {
         for(size_t offset:{size_t(0),size_t(4),size_t(8),size_t(20),size_t(24)}) {
             put(small.data()+2*28+offset,bits);
-            rejects([&]{decodeIm2DVertices(*record,small,true);});
-            if(offset>=20) {
-                const auto flat=decodeIm2DVertices(*record,small,false);
-                need(std::bit_cast<uint32_t>(flat[2].uv[(offset-20)/4])==bits,"Inactive UV bits changed");
-            }else rejects([&]{decodeIm2DVertices(*record,small,false);});
+            const auto kept=decodeIm2DVertices(*record,small);
+            const float value=offset<20?kept[2].position[offset/4]:kept[2].uv[(offset-20)/4];
+            need(std::bit_cast<uint32_t>(value)==bits,"Non-finite position/UV bits changed");
             put(small.data()+2*28+offset,0);
         }
     }
@@ -118,19 +121,19 @@ int main()try {
         else if(field==21)bad[field]=3; // NORMAL instead of COLOR.
         else bad[field]=uint8_t(bad[field]+4);
         const auto wrong=registry.record(registry.create(bad));
-        rejects([&]{decodeIm2DVertices(*wrong,small,true);});
+        rejects([&]{decodeIm2DVertices(*wrong,small);});
     }
     auto omitted=bytes;omitted.erase(omitted.begin()+24,omitted.begin()+36);
-    auto wrong=registry.record(registry.create(omitted));rejects([&]{decodeIm2DVertices(*wrong,small,false);});
+    auto wrong=registry.record(registry.create(omitted));rejects([&]{decodeIm2DVertices(*wrong,small);});
     auto reordered=bytes;std::swap_ranges(reordered.begin(),reordered.begin()+12,reordered.begin()+12);
-    wrong=registry.record(registry.create(reordered));rejects([&]{decodeIm2DVertices(*wrong,small,true);});
+    wrong=registry.record(registry.create(reordered));rejects([&]{decodeIm2DVertices(*wrong,small);});
     for(size_t element=0;element<4;++element)for(uint32_t value=0;value<256;++value) {
         auto opaque=bytes;opaque[element*12+11]=uint8_t(value);
         const auto opaqueId=registry.create(opaque);
-        need(decodeIm2DVertices(*registry.record(opaqueId),small,true).size()==3,"Opaque original stack byte affected decoding");
+        need(decodeIm2DVertices(*registry.record(opaqueId),small).size()==3,"Opaque original stack byte affected decoding");
         registry.release(opaqueId);
     }
     need(registry.referenceCount(id)==1,"Decoder changed original declaration references");
-    std::printf("PASS: %zu Im2D packed vertex checks; bounded owned conversion, original color order, finite active fields and unchanged declaration ownership\n",checks);
+    std::printf("PASS: %zu Im2D packed vertex checks; bounded owned conversion, original color order, exact non-finite position/UV bits and unchanged declaration ownership\n",checks);
     return 0;
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL after %zu checks: %s\n",checks,e.what());return 1;}

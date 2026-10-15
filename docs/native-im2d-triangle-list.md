@@ -64,7 +64,7 @@ The upper bound is the complete-triplet subset of the existing upload bound.
   BC2 blue texel multiplied by nontrivial diffuse RGBA; caller upload bytes are
   overwritten and packet/texture references released before output observation.
 - Rejection of empty, short, incomplete and oversized lists, including complete
-  oversized counts and a nonfinite vertex at the end of a9360-vertex list.
+  oversized counts and a non-finite color on the last vertex of a9360-vertex list.
   Valid lists with foreign textures or unselected attachments also reject.
   Existing rejection checks require unchanged pixels, depth/stencil, counters,
   attachments, viewport and native state. The old primitive3/four-vertex test

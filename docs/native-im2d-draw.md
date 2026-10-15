@@ -83,3 +83,33 @@ separately and counts both when selecting a newly rendered frame. Captures
 remain unadjusted renderer readbacks, not desktop scanout evidence. The first32
 changed frames are captured even when Present reports occlusion; metadata keeps
 completed front-copy success separate from display acceptance.
+
+## Non-finite positions (2026-10-15)
+
+A Vulkan wander run in Eighty Bites stopped the game with "Nonfinite Im2D
+position is not qualified": a four-vertex strip (start vertex 64) submitted
+through the original 2D draw routine 82409308 carried a vertex whose x, y or z
+was not finite. A vertex like that cannot be rasterized; the original GPU
+discards every triangle that uses it, and immediates already follow that rule
+(`renderer/immediate_draw.cpp`). Im2D now does the same:
+
+- `decodeIm2DVertices` keeps every position and UV bit, non-finite ones
+  included, and no longer takes a `textured` flag.
+- `NativeBackend::drawIm2DImpl` drops each triangle that uses a non-finite XYZ
+  and draws the rest in order, with the strip winding the batch uses, as
+  triangle lists of at most 9360 vertices (a full-size strip needs up to three).
+  Each list is validated like any packet, so every UV, color and coordinate a
+  drawn triangle consumes must still be finite and in range. The original
+  packet is counted once, also when nothing remains; a pending batch is
+  flushed first so order is kept.
+- The engine logs the first eight such packets as `[NATIVE IM2D NONFINITE]`
+  with the vertex words and the guest stack, to name the producer.
+
+`Im2DBackendTests` (`nonfiniteTriangles`, D3D11 and Vulkan) compares the
+four-vertex strip with NaN, +Inf and -Inf at each corner, direct and batched,
+with the surviving triangle drawn alone; checks that a wholly dropped packet
+between queued packets keeps their order and accounting; splits a 9362-vertex
+strip with two bad vertices into native lists and compares it with its finite
+runs; and rejects a non-finite UV or color, or an out-of-range coordinate, on a
+vertex a drawn triangle uses. `Im2DVertexTests` checks the preserved bits.
+Finite coordinates beyond +/-32767 remain rejected as before.

@@ -296,6 +296,39 @@ void NativeBackend::drawIm2DImpl(const std::shared_ptr<RenderTarget>& target,con
     }
     if(draw.alphaTest && (draw.alphaCompare>7 || !std::isfinite(draw.alphaReference) || draw.alphaReference<0 || draw.alphaReference>1))
         throw Error("Invalid effective native Im2D alpha test/reference/comparison");
+    // A vertex whose x, y or z is not finite cannot be rasterized: the original
+    // GPU discards every triangle that uses it, as for immediates. 2D sprites
+    // do emit such vertices (live eighty_bites: a four-vertex strip through
+    // 82409308 stopped the game). Draw the remaining triangles in order, with
+    // the strip winding the batch uses, as lists of at most 9360 vertices. Each
+    // list is validated like any packet, so everything a drawn triangle
+    // consumes must still be finite. The original packet is counted once, also
+    // when no triangle remains.
+    const auto finitePosition=[](const Im2DVertex& v) {
+        return std::isfinite(v.position[0]) && std::isfinite(v.position[1]) && std::isfinite(v.position[2]);
+    };
+    if(!std::all_of(draw.vertices.begin(),draw.vertices.end(),finitePosition)) {
+        if(allowBatch)flushIm2D();
+        Im2DDraw kept=draw;kept.primitiveType=3;kept.vertices.clear();
+        const auto before=im2dDraws;
+        const auto submit=[&] {
+            if(kept.vertices.empty())return;
+            drawIm2DImpl(target,depth,kept,false);kept.vertices.clear();
+        };
+        const size_t triangles=draw.primitiveType==3?draw.vertices.size()/3:draw.vertices.size()-2;
+        for(size_t triangle=0;triangle<triangles;++triangle) {
+            const size_t i=triangle+2;
+            const std::array<size_t,3> corners=draw.primitiveType==3?
+                std::array<size_t,3>{3*triangle,3*triangle+1,3*triangle+2}:
+                std::array<size_t,3>{i-(i&1?1:2),i-(i&1?2:1),i};
+            if(!finitePosition(draw.vertices[corners[0]]) || !finitePosition(draw.vertices[corners[1]]) ||
+               !finitePosition(draw.vertices[corners[2]]))continue;
+            if(kept.vertices.size()+3>9360)submit();
+            for(const size_t corner:corners)kept.vertices.push_back(draw.vertices[corner]);
+        }
+        submit();
+        im2dDraws=before+1;requireOwner();return;
+    }
     for(const auto& v:draw.vertices) {
         for(size_t i=0;i<3;++i) if(!std::isfinite(v.position[i])) throw Error("Nonfinite active native Im2D position");
         if(std::abs(v.position[0])>32767 || std::abs(v.position[1])>32767 || v.position[2]<0 || v.position[2]>1)

@@ -59,7 +59,7 @@ void im2dQuadContracts(Simpsons::Runtime& runtime,Simpsons::EngineCpuCalls& cpu,
             require(cpu.registers().r1.u32==incoming.r1.u32-0x130-0xA0,"Original quad/Im2D stack frames differ");
             const auto buffer=driver.readbackDynamicBuffer(PPC_LOAD_U32(0x82D101CC));
             require(PPC_LOAD_U32(0x82D101C8)==0 && PPC_LOAD_U32(0x82D0D0E0)==112,"Original quad allocation range differs");
-            const auto vertices=decodeIm2DVertices(*declaration,std::span(buffer.data(),112),true);
+            const auto vertices=decodeIm2DVertices(*declaration,std::span(buffer.data(),112));
             const uint32_t originalSource=incoming.r1.u32-0x130+0x60;
             require(std::equal(buffer.begin(),buffer.begin()+112,runtime.pointer(originalSource,112,false)),"GPU storage differs from original quad stack vertices");
             for(size_t i=0;i<4;++i) {
