@@ -1,4 +1,6 @@
 #include "native_backend.h"
+#include "native_copy_submission.h"
+#include "temporal_scene.h"
 #include "material_resources.h"
 #include "runtime/stall_profiler.h"
 #include <algorithm>
@@ -144,6 +146,28 @@ struct ScreenPipeline {
     ComPtr<ID3D11Buffer> vertices,constants,postConstants;
     ComPtr<ID3D11DepthStencilState> depth;
     ComPtr<ID3D11RasterizerState> rasterizer;
+    ComPtr<ID3D11Device> blendDevice;
+    std::array<ComPtr<ID3D11BlendState>,128> blends;
+    ComPtr<ID3D11BlendState> blendState(ID3D11Device* device,bool original,uint32_t selector,uint32_t mask) {
+        if(!device||selector>3||mask>15)throw Error("Screen blend cache requires its exact qualified state");
+        if(blendDevice.Get()!=device){for(auto& state:blends)state.Reset();blendDevice=device;}
+        const size_t index=(original?64u:0u)+selector*16u+mask;
+        if(!blends[index]) {
+            // Retain every requested field, including ignored factors when
+            // blending is disabled. Finite indexing avoids eviction churn.
+            D3D11_BLEND_DESC blend{};auto& color=blend.RenderTarget[0];color.BlendEnable=!original;
+            color.SrcBlend=selector==3?D3D11_BLEND_ONE:D3D11_BLEND_SRC_ALPHA;
+            color.DestBlend=selector==1?D3D11_BLEND_INV_SRC_ALPHA:(selector==3?D3D11_BLEND_ZERO:D3D11_BLEND_ONE);
+            color.BlendOp=selector==2?D3D11_BLEND_OP_REV_SUBTRACT:D3D11_BLEND_OP_ADD;
+            color.SrcBlendAlpha=D3D11_BLEND_ONE;color.DestBlendAlpha=D3D11_BLEND_ZERO;color.BlendOpAlpha=D3D11_BLEND_OP_ADD;
+            color.RenderTargetWriteMask=UINT8(mask);
+            ComPtr<ID3D11BlendState> created;
+            StallProfiler::Scope profile(StallProfiler::Section::Rendering,"D3D11.CreateBlendState.screen",nullptr,reinterpret_cast<uintptr_t>(device));
+            check(device->CreateBlendState(&blend,&created),"blend state creation");
+            blends[index]=std::move(created);
+        }
+        return blends[index];
+    }
     ScreenPipeline(ID3D11Device* device) {
         check(device->CreateVertexShader(kVSFlat,sizeof(kVSFlat),nullptr,&flatVS),"flat vertex shader creation");
         check(device->CreateVertexShader(kVSTextured,sizeof(kVSTextured),nullptr,&texturedVS),"textured vertex shader creation");
@@ -179,7 +203,7 @@ struct ScreenPipeline {
         depthDesc.BackFace=depthDesc.FrontFace;
         check(device->CreateDepthStencilState(&depthDesc,&depth),"depth/stencil state creation");
         D3D11_RASTERIZER_DESC raster{};
-        raster.FillMode=D3D11_FILL_SOLID;raster.CullMode=D3D11_CULL_NONE;raster.DepthClipEnable=TRUE;
+        raster.FillMode=D3D11_FILL_SOLID;raster.CullMode=D3D11_CULL_NONE;raster.DepthClipEnable=TRUE;raster.MultisampleEnable=TRUE;
         check(device->CreateRasterizerState(&raster,&rasterizer),"rasterizer state creation");
     }
 };
@@ -212,8 +236,7 @@ bool artifactOnDevice(const NativeShaderArtifact& artifact,ID3D11Device* device)
 NativeScreenInputReceipt NativeBackend::bindDirectSpriteInputs(const std::shared_ptr<Texture>& texture,const D3D11_SAMPLER_DESC& sampler) {
     validateSubmissionContext();validateTexture(texture);
     if(!screenPipeline)screenPipeline=std::make_shared<ScreenPipeline>(device.Get());
-    ComPtr<ID3D11SamplerState> nativeSampler;
-    check(device->CreateSamplerState(&sampler,&nativeSampler),"direct sprite sampler creation");
+    auto nativeSampler=sceneSamplerState(sampler);
     if(screenInputBinds==UINT64_MAX)throw Error("Native screen input binding serial exhausted");
     NativeScreenInputReceipt receipt;UINT classes=0;context->PSGetShader(&receipt.retainedPixel,nullptr,&classes);
     if(classes)throw Error("Original sprite inputs cannot retain dynamic pixel shader classes");
@@ -452,9 +475,12 @@ uint64_t NativeBackend::publishConstants(ConstantBankId id,const void* bytes,UIN
     D3D11_MAPPED_SUBRESOURCE mapped{};
     static constexpr const char* mapNames[]={"D3D11.Map.constants.ZPrepass","D3D11.Map.constants.Mono",
         "D3D11.Map.constants.ShadowDepth","D3D11.Map.constants.RigidVertex","D3D11.Map.constants.RigidPixel",
-        "D3D11.Map.constants.SkinVertex","D3D11.Map.constants.SkinPixel","D3D11.Map.constants.SkyVertex","D3D11.Map.constants.SkyPixel"};
+        "D3D11.Map.constants.SkinVertex","D3D11.Map.constants.SkinPixel","D3D11.Map.constants.SkyVertex","D3D11.Map.constants.SkyPixel",
+        "D3D11.Map.constants.ImmediateVertex","D3D11.Map.constants.ImmediatePixel"};
     static_assert(std::size(mapNames)==ConstantBankCount);
     StallProfiler::Scope mapProfile(StallProfiler::Section::Wait,mapNames[id],nullptr,reinterpret_cast<uintptr_t>(bank.buffer.Get()));
+    if(id==ShadowDepthBank || id==RigidVertexBank || id==SkyVertexBank ||
+       id==ImmediateVertexBank || id==ImmediatePixelBank)bank.publicationValid=false;
     check(context->Map(bank.buffer.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped),"constant bank map");
     mapProfile.finish();
     if(!mapped.pData) {context->Unmap(bank.buffer.Get(),0);throw Error("Native constant bank mapped no storage");}
@@ -462,6 +488,106 @@ uint64_t NativeBackend::publishConstants(ConstantBankId id,const void* bytes,UIN
     std::memcpy(bank.contents.data(),bytes,size);bank.contentsValid=true;
     published=bank.buffer;
     return ++bank.generation;
+}
+detail::ConstantBufferSlice NativeBackend::publishConstantSlice(ConstantBankId id,const void* bytes,UINT size) {
+    validateSubmissionContext();
+    const UINT expected=id==ShadowDepthBank?sizeof(ShadowDepthConstants):
+        id==RigidVertexBank?sizeof(RigidVertexConstants):id==SkyVertexBank?sizeof(SkyVertexConstants):
+        id==ImmediateVertexBank?80u:id==ImmediatePixelBank?16u:0;
+    if(!expected || size!=expected || !bytes)throw Error("Native ranged constant bank publish is malformed");
+    const auto ranged=constantBindingContext();
+    auto& bank=constantBanks[id];
+    if(!constantArenaSupported || !ranged) {
+        // A replacement context can disable arena admission. Never reuse its
+        // larger allocation as a legacy whole-buffer constant bank.
+        if(bank.latestSlice.arena) {
+            bank.buffer.Reset();bank.device.Reset();bank.proof={};bank.bytes=0;
+            bank.contentsValid=false;bank.publicationValid=false;bank.latestSlice={};bank.arenaCursor=0;
+        }
+        detail::ConstantBufferSlice result;
+        result.generation=publishConstants(id,bytes,size,result.binding.buffer);
+        result.logicalBytes=size;bank.latestSlice=result;bank.publicationValid=true;
+        return result;
+    }
+    constexpr UINT capacity=64*1024;
+    const UINT window=(size+255u)&~255u;
+    if(bank.buffer && bank.device.Get()==device.Get() && bank.bytes==size && bank.latestSlice.arena &&
+       bank.publicationValid && bank.contentsValid && bank.contents.size()==size &&
+       !std::memcmp(bank.contents.data(),bytes,size)) {
+        bank.latestSlice.generation=++bank.generation;
+        return bank.latestSlice;
+    }
+    ComPtr<ID3D11Buffer> buffer=bank.buffer;
+    const bool reuse=buffer && bank.device.Get()==device.Get() && bank.latestSlice.arena && bank.bytes==size;
+    if(!reuse) {
+        D3D11_BUFFER_DESC desc{};desc.ByteWidth=capacity;desc.Usage=D3D11_USAGE_DYNAMIC;
+        desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;desc.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
+        StallProfiler::Scope allocationProfile(StallProfiler::Section::Rendering,"D3D11.CreateBuffer.constantBank",nullptr,reinterpret_cast<uintptr_t>(device.Get()));
+        check(device->CreateBuffer(&desc,nullptr,buffer.ReleaseAndGetAddressOf()),"constant arena allocation");
+    }
+    bank.contents.resize(size); // All host allocation precedes exposure of driver memory.
+    const UINT cursor=reuse?bank.arenaCursor:0;
+    const bool discard=!cursor || cursor>capacity-window;
+    const UINT offset=discard?0:cursor;
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    const char* name=id==ShadowDepthBank?"D3D11.Map.constants.ShadowDepth":
+        id==RigidVertexBank?"D3D11.Map.constants.RigidVertex":id==SkyVertexBank?"D3D11.Map.constants.SkyVertex":
+        id==ImmediateVertexBank?"D3D11.Map.constants.ImmediateVertex":"D3D11.Map.constants.ImmediatePixel";
+    StallProfiler::Scope mapProfile(StallProfiler::Section::Wait,name,nullptr,reinterpret_cast<uintptr_t>(buffer.Get()));
+    // A failed attempted Map cannot leave a former publication acceptable.
+    // Bound-state restoration is separate from this logical owner proof.
+    bank.publicationValid=false;bank.contentsValid=false;
+    check(context->Map(buffer.Get(),0,discard?D3D11_MAP_WRITE_DISCARD:D3D11_MAP_WRITE_NO_OVERWRITE,0,&mapped),"constant arena map");
+    mapProfile.finish();
+    if(!mapped.pData) {context->Unmap(buffer.Get(),0);throw Error("Native constant arena mapped no storage");}
+    auto* destination=static_cast<uint8_t*>(mapped.pData)+offset;
+    std::memcpy(destination,bytes,size);std::memset(destination+size,0,window-size);
+    context->Unmap(buffer.Get(),0);
+    detail::ConstantBufferSlice result;
+    result.binding.buffer=buffer;result.binding.firstConstant=offset/16;result.binding.numConstants=window/16;
+    result.binding.view=detail::ConstantBufferView::Ranged;result.logicalBytes=size;
+    result.generation=++bank.generation;result.arena=true;
+    bank.buffer=buffer;bank.device=device;bank.bytes=size;bank.latestSlice=result;bank.arenaCursor=offset+window;
+    std::memcpy(bank.contents.data(),bytes,size);bank.contentsValid=true;bank.publicationValid=true;
+    if(discard)++bank.arenaDiscardMaps;else ++bank.arenaNoOverwriteMaps;
+    return result;
+}
+void NativeBackend::requireConstantSlice(ConstantBankId id,const detail::ConstantBufferSlice& slice,UINT expectedBytes,const char* what) const {
+    validateSubmissionContext();
+    const UINT expected=id==ShadowDepthBank?sizeof(ShadowDepthConstants):
+        id==RigidVertexBank?sizeof(RigidVertexConstants):id==SkyVertexBank?sizeof(SkyVertexConstants):
+        id==ImmediateVertexBank?80u:id==ImmediatePixelBank?16u:0;
+    if(!expected || expectedBytes!=expected)throw Error(what);
+    const auto& bank=constantBanks[id];
+    if(!bank.publicationValid || !slice.binding.buffer || slice.logicalBytes!=expected || !slice.generation ||
+       slice.generation!=bank.generation || bank.bytes!=expected || slice.arena!=bank.latestSlice.arena ||
+       slice.binding.view!=bank.latestSlice.binding.view ||
+       !detail::constantBufferBindingMatches(slice.binding,bank.latestSlice.binding))throw Error(what);
+    const auto* desc=provenBufferDescriptor(slice.binding.buffer.Get(),bank.proof);
+    if(!desc)throw Error("Native screen resource belongs to another graphics device");
+    if(desc->ByteWidth!=(slice.arena?64*1024:expected) || desc->Usage!=D3D11_USAGE_DYNAMIC ||
+       desc->BindFlags!=D3D11_BIND_CONSTANT_BUFFER || desc->CPUAccessFlags!=D3D11_CPU_ACCESS_WRITE ||
+       desc->MiscFlags || desc->StructureByteStride)throw Error(what);
+    if(slice.arena) {
+        if(!constantBindingContext() || !constantArenaSupported || slice.binding.view!=detail::ConstantBufferView::Ranged ||
+           (slice.binding.firstConstant&15) || (slice.binding.numConstants&15) ||
+           slice.binding.numConstants!=((expected+255u)&~255u)/16 ||
+           slice.binding.firstConstant>4096-slice.binding.numConstants)throw Error(what);
+    } else if(slice.binding.view!=detail::ConstantBufferView::Full || slice.binding.firstConstant || slice.binding.numConstants)
+        throw Error(what);
+}
+void NativeBackend::readConstantSlice(ConstantBankId id,const detail::ConstantBufferSlice& slice,std::span<uint8_t> output) const {
+    validateSubmissionContext();
+    if(output.size()!=slice.logicalBytes)throw Error("Native constant slice readback extent differs");
+    requireConstantSlice(id,slice,static_cast<UINT>(output.size()),"Native constant slice readback lacks its current publication");
+    D3D11_BUFFER_DESC desc{};slice.binding.buffer->GetDesc(&desc);
+    desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Buffer> staging;check(device->CreateBuffer(&desc,nullptr,&staging),"constant slice readback allocation");
+    context->CopyResource(staging.Get(),slice.binding.buffer.Get());D3D11_MAPPED_SUBRESOURCE mapped{};
+    check(context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped),"constant slice readback map");
+    if(!mapped.pData) {context->Unmap(staging.Get(),0);throw Error("Native constant slice readback mapped no storage");}
+    std::memcpy(output.data(),static_cast<const uint8_t*>(mapped.pData)+slice.binding.firstConstant*16,output.size());
+    context->Unmap(staging.Get(),0);
 }
 const D3D11_BUFFER_DESC* NativeBackend::provenBufferDescriptor(ID3D11Buffer* buffer,BufferDescriptorProof& proof) const {
     if(!buffer)return nullptr;
@@ -504,33 +630,34 @@ ComPtr<ID3D11Buffer> NativeBackend::zeroBooleans() {
 }
 class NativeShadowDepthCommit {
     friend class NativeBackend;
-    ComPtr<ID3D11Buffer> constants;
-    uint64_t generation{};
+    detail::ConstantBufferSlice slice;
 };
 std::shared_ptr<NativeShadowDepthCommit> NativeBackend::commitShadowDepth(const CompiledMaterial& vertex,const ShadowDepthConstants& values) {
     requireShadowDepthShader(vertex);
     for(const auto& row:values)for(const auto value:row)
         if(!std::isfinite(value))throw Error("Nonfinite native character shadow constant");
     auto result=std::make_shared<NativeShadowDepthCommit>();
-    result->generation=publishConstants(ShadowDepthBank,values.data(),sizeof(values),result->constants);
-    context->VSSetConstantBuffers(0,1,result->constants.GetAddressOf());requireShadowDepthCommit(result);return result;
+    result->slice=publishConstantSlice(ShadowDepthBank,values.data(),sizeof(values));
+    const auto ranged=constantBindingContext();
+    const auto previous=detail::captureConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,0);
+    detail::bindConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,0,result->slice.binding);
+    try {requireShadowDepthCommit(result);}
+    catch(...) {detail::bindConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,0,previous);throw;}
+    return result;
 }
 void NativeBackend::requireShadowDepthCommit(const std::shared_ptr<NativeShadowDepthCommit>& commit) const {
     validateSubmissionContext();
-    if(!commit||!commit->constants)throw Error("Native character shadow has no committed constants");
-    requireConstantBank(ShadowDepthBank,commit->constants.Get(),commit->generation,sizeof(ShadowDepthConstants),
+    if(!commit||!commit->slice.binding.buffer)throw Error("Native character shadow has no committed constants");
+    requireConstantSlice(ShadowDepthBank,commit->slice,sizeof(ShadowDepthConstants),
         "Actual native character shadow constants differ from their owner's current bank commit");
-    ComPtr<ID3D11Buffer> bound;
-    context->VSGetConstantBuffers(0,1,&bound);
-    if(bound.Get()!=commit->constants.Get())throw Error("Actual native character shadow constants differ from their owner");
+    const auto ranged=constantBindingContext();
+    const auto bound=detail::captureConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,0);
+    if(!detail::constantBufferBindingMatches(bound,commit->slice.binding))
+        throw Error("Actual native character shadow constants differ from their owner");
 }
 ShadowDepthConstants NativeBackend::readbackShadowDepthConstants(const std::shared_ptr<NativeShadowDepthCommit>& commit) {
-    requireShadowDepthCommit(commit);D3D11_BUFFER_DESC desc{};commit->constants->GetDesc(&desc);
-    desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
-    ComPtr<ID3D11Buffer> staging;check(device->CreateBuffer(&desc,nullptr,&staging),"character shadow constant readback allocation");
-    context->CopyResource(staging.Get(),commit->constants.Get());D3D11_MAPPED_SUBRESOURCE mapped{};
-    check(context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped),"character shadow constant readback map");
-    ShadowDepthConstants values{};std::memcpy(values.data(),mapped.pData,sizeof(values));context->Unmap(staging.Get(),0);return values;
+    requireShadowDepthCommit(commit);ShadowDepthConstants values{};
+    readConstantSlice(ShadowDepthBank,commit->slice,{reinterpret_cast<uint8_t*>(values.data()),sizeof(values)});return values;
 }
 void NativeBackend::validateZPrepassShader(const CompiledMaterial& vertex) const {
     validateSubmissionContext();const auto* vs=dynamic_cast<const NativeShaderArtifact*>(&vertex);
@@ -569,13 +696,15 @@ std::shared_ptr<NativeZPrepassCommit> NativeBackend::commitZPrepass(
     result->generation=publishConstants(ZPrepassBank,values.data(),sizeof(values),result->constants);
     // Bind both banks only after the fully validated upload succeeded.
     flushIm2D();requireZPrepassShader(vertex);
-    ComPtr<ID3D11Buffer> previous0,previous1;
-    context->VSGetConstantBuffers(0,1,&previous0);context->VSGetConstantBuffers(1,1,&previous1);
+    const auto ranged=constantBindingContext();
+    const auto previous0=detail::captureConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,0);
+    const auto previous1=detail::captureConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,1);
     ID3D11Buffer* buffers[]={result->constants.Get(),result->booleans.Get()};
     context->VSSetConstantBuffers(0,2,buffers);
     try {requireZPrepassCommit(result);}
     catch(...) {
-        ID3D11Buffer* previous[]={previous0.Get(),previous1.Get()};context->VSSetConstantBuffers(0,2,previous);throw;
+        detail::bindConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,0,previous0);
+        detail::bindConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,1,previous1);throw;
     }
     return result;
 }
@@ -663,13 +792,15 @@ std::shared_ptr<NativeMonoCommit> NativeBackend::commitMono(
     result->generation=publishConstants(MonoBank,values.data(),sizeof(values),result->constants);
     // Bind both banks only after the fully validated upload succeeded.
     flushIm2D();requireMonoShaders(vertex,pixel);
-    ComPtr<ID3D11Buffer> previous0,previous1;
-    context->VSGetConstantBuffers(0,1,&previous0);context->VSGetConstantBuffers(1,1,&previous1);
+    const auto ranged=constantBindingContext();
+    const auto previous0=detail::captureConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,0);
+    const auto previous1=detail::captureConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,1);
     ID3D11Buffer* buffers[]={result->constants.Get(),result->booleans.Get()};
     context->VSSetConstantBuffers(0,2,buffers);
     try {requireMonoCommit(result);}
     catch(...) {
-        ID3D11Buffer* previous[]={previous0.Get(),previous1.Get()};context->VSSetConstantBuffers(0,2,previous);throw;
+        detail::bindConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,0,previous0);
+        detail::bindConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,1,previous1);throw;
     }
     return result;
 }
@@ -798,6 +929,7 @@ class NativeRigidCommit {
     ComPtr<ID3D11PixelShader> pixel;
     ComPtr<ID3D11Buffer> vertexConstants,pixelConstants;
     uint64_t vertexGeneration{},pixelGeneration{};
+    detail::ConstantBufferSlice vertexSlice;
 };
 class NativeSkinCommit {
     friend class NativeBackend;
@@ -812,6 +944,7 @@ class NativeSkyCommit {
     ComPtr<ID3D11PixelShader> pixel;
     ComPtr<ID3D11Buffer> vertexConstants,pixelConstants;
     uint64_t vertexGeneration{},pixelGeneration{};
+    detail::ConstantBufferSlice vertexSlice;
 };
 void NativeBackend::validateSkinShaders(const CompiledMaterial& vertex,const CompiledMaterial& pixel) const {
     validateSubmissionContext();
@@ -866,12 +999,15 @@ std::shared_ptr<NativeSkinCommit> NativeBackend::commitSkin(const CompiledMateri
     result->vertexGeneration=publishConstants(SkinVertexBank,vertices.data(),sizeof(vertices),result->vertexConstants);
     result->pixelGeneration=publishConstants(SkinPixelBank,pixels.data(),sizeof(pixels),result->pixelConstants);
     flushIm2D();requireSkinShaders(vertex,pixel);
-    ComPtr<ID3D11Buffer> oldVS,oldPS;context->VSGetConstantBuffers(0,1,&oldVS);context->PSGetConstantBuffers(0,1,&oldPS);
+    const auto ranged=constantBindingContext();
+    const auto oldVS=detail::captureConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,0);
+    const auto oldPS=detail::captureConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Pixel,0);
     context->VSSetConstantBuffers(0,1,result->vertexConstants.GetAddressOf());
     context->PSSetConstantBuffers(0,1,result->pixelConstants.GetAddressOf());
     try {requireSkinCommit(result);}
     catch(...) {
-        auto* v=oldVS.Get();auto* p=oldPS.Get();context->VSSetConstantBuffers(0,1,&v);context->PSSetConstantBuffers(0,1,&p);throw;
+        detail::bindConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,0,oldVS);
+        detail::bindConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Pixel,0,oldPS);throw;
     }
     return result;
 }
@@ -900,15 +1036,19 @@ std::shared_ptr<NativeRigidCommit> NativeBackend::commitRigid(const CompiledMate
     auto result=std::make_shared<NativeRigidCommit>();
     result->vertex=static_cast<const NativeShaderArtifact&>(vertex).vertex;
     result->pixel=static_cast<const NativeShaderArtifact&>(pixel).pixel;
-    result->vertexGeneration=publishConstants(RigidVertexBank,vertices.data(),sizeof(vertices),result->vertexConstants);
+    result->vertexSlice=publishConstantSlice(RigidVertexBank,vertices.data(),sizeof(vertices));
+    result->vertexConstants=result->vertexSlice.binding.buffer;result->vertexGeneration=result->vertexSlice.generation;
     result->pixelGeneration=publishConstants(RigidPixelBank,pixels.data(),sizeof(pixels),result->pixelConstants);
     flushIm2D();requireRigidShaders(vertex,pixel);
-    ComPtr<ID3D11Buffer> oldVS,oldPS;context->VSGetConstantBuffers(0,1,&oldVS);context->PSGetConstantBuffers(0,1,&oldPS);
-    context->VSSetConstantBuffers(0,1,result->vertexConstants.GetAddressOf());
+    const auto ranged=constantBindingContext();
+    const auto oldVS=detail::captureConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,0);
+    const auto oldPS=detail::captureConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Pixel,0);
+    detail::bindConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,0,result->vertexSlice.binding);
     context->PSSetConstantBuffers(0,1,result->pixelConstants.GetAddressOf());
     try {requireRigidCommit(result);}
     catch(...) {
-        auto* v=oldVS.Get();auto* p=oldPS.Get();context->VSSetConstantBuffers(0,1,&v);context->PSSetConstantBuffers(0,1,&p);throw;
+        detail::bindConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,0,oldVS);
+        detail::bindConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Pixel,0,oldPS);throw;
     }
     return result;
 }
@@ -916,19 +1056,22 @@ void NativeBackend::requireRigidCommit(const std::shared_ptr<NativeRigidCommit>&
     validateSubmissionContext();
     if(!commit||!commit->vertex||!commit->pixel||!commit->vertexConstants||!commit->pixelConstants)
         throw Error("Native rigid material has no committed constants");
-    requireConstantBank(RigidVertexBank,commit->vertexConstants.Get(),commit->vertexGeneration,sizeof(RigidVertexConstants),
+    requireConstantSlice(RigidVertexBank,commit->vertexSlice,sizeof(RigidVertexConstants),
         "Actual native rigid vertex constants differ from their owner's current bank commit");
     requireConstantBank(RigidPixelBank,commit->pixelConstants.Get(),commit->pixelGeneration,sizeof(RigidPixelConstants),
         "Actual native rigid pixel constants differ from their owner's current bank commit");
-    ComPtr<ID3D11VertexShader> vs;ComPtr<ID3D11PixelShader> ps;ComPtr<ID3D11Buffer> vb,pb;
+    ComPtr<ID3D11VertexShader> vs;ComPtr<ID3D11PixelShader> ps;ComPtr<ID3D11Buffer> pb;
     context->VSGetShader(&vs,nullptr,nullptr);context->PSGetShader(&ps,nullptr,nullptr);
-    context->VSGetConstantBuffers(0,1,&vb);context->PSGetConstantBuffers(0,1,&pb);
+    const auto ranged=constantBindingContext();
+    const auto bound=detail::captureConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,0);
+    context->PSGetConstantBuffers(0,1,&pb);
     if(vs.Get()!=commit->vertex.Get()||ps.Get()!=commit->pixel.Get())throw Error("Native rigid commit shader identity differs");
-    if(vb.Get()!=commit->vertexConstants.Get()||pb.Get()!=commit->pixelConstants.Get())
+    if(!detail::constantBufferBindingMatches(bound,commit->vertexSlice.binding)||pb.Get()!=commit->pixelConstants.Get())
         throw Error("Actual native rigid constants differ from their owner");
 }
 RigidVertexConstants NativeBackend::readbackRigidVertexConstants(const std::shared_ptr<NativeRigidCommit>& commit) {
-    requireRigidCommit(commit);return readZPrepassBuffer<RigidVertexConstants>(device.Get(),context.Get(),commit->vertexConstants.Get());
+    requireRigidCommit(commit);RigidVertexConstants values{};
+    readConstantSlice(RigidVertexBank,commit->vertexSlice,{reinterpret_cast<uint8_t*>(values.data()),sizeof(values)});return values;
 }
 RigidPixelConstants NativeBackend::readbackRigidPixelConstants(const std::shared_ptr<NativeRigidCommit>& commit) {
     requireRigidCommit(commit);return readZPrepassBuffer<RigidPixelConstants>(device.Get(),context.Get(),commit->pixelConstants.Get());
@@ -950,15 +1093,19 @@ std::shared_ptr<NativeSkyCommit> NativeBackend::commitSky(const CompiledMaterial
     auto result=std::make_shared<NativeSkyCommit>();
     result->vertex=static_cast<const NativeShaderArtifact&>(vertex).vertex;
     result->pixel=static_cast<const NativeShaderArtifact&>(pixel).pixel;
-    result->vertexGeneration=publishConstants(SkyVertexBank,vertices.data(),sizeof(vertices),result->vertexConstants);
+    result->vertexSlice=publishConstantSlice(SkyVertexBank,vertices.data(),sizeof(vertices));
+    result->vertexConstants=result->vertexSlice.binding.buffer;result->vertexGeneration=result->vertexSlice.generation;
     result->pixelGeneration=publishConstants(SkyPixelBank,pixels.data(),sizeof(pixels),result->pixelConstants);
     flushIm2D();requireRigidShaders(vertex,pixel);
-    ComPtr<ID3D11Buffer> oldVS,oldPS;context->VSGetConstantBuffers(0,1,&oldVS);context->PSGetConstantBuffers(0,1,&oldPS);
-    context->VSSetConstantBuffers(0,1,result->vertexConstants.GetAddressOf());
+    const auto ranged=constantBindingContext();
+    const auto oldVS=detail::captureConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,0);
+    const auto oldPS=detail::captureConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Pixel,0);
+    detail::bindConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,0,result->vertexSlice.binding);
     context->PSSetConstantBuffers(0,1,result->pixelConstants.GetAddressOf());
     try {requireSkyCommit(result);}
     catch(...) {
-        auto* v=oldVS.Get();auto* p=oldPS.Get();context->VSSetConstantBuffers(0,1,&v);context->PSSetConstantBuffers(0,1,&p);throw;
+        detail::bindConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,0,oldVS);
+        detail::bindConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Pixel,0,oldPS);throw;
     }
     return result;
 }
@@ -966,10 +1113,14 @@ void NativeBackend::requireSkyCommit(const std::shared_ptr<NativeSkyCommit>& com
     validateSubmissionContext();
     if(!commit||!commit->vertex||!commit->pixel||!commit->vertexConstants||!commit->pixelConstants)
         throw Error("Native sky material has no committed constants");
-    requireConstantBank(SkyVertexBank,commit->vertexConstants.Get(),commit->vertexGeneration,sizeof(SkyVertexConstants),
+    requireConstantSlice(SkyVertexBank,commit->vertexSlice,sizeof(SkyVertexConstants),
         "Actual native sky vertex constants differ from their owner's current bank commit");
     requireConstantBank(SkyPixelBank,commit->pixelConstants.Get(),commit->pixelGeneration,sizeof(SkyPixelConstants),
         "Actual native sky pixel constants differ from their owner's current bank commit");
+    const auto ranged=constantBindingContext();
+    const auto bound=detail::captureConstantBuffer(context.Get(),ranged.Get(),detail::ConstantBufferStage::Vertex,0);
+    if(!detail::constantBufferBindingMatches(bound,commit->vertexSlice.binding))
+        throw Error("Actual native sky vertex constants differ from their owner");
 }
 class NativeEdgeCommit {
     friend class NativeBackend;
@@ -979,6 +1130,8 @@ class NativeEdgeCommit {
     uint32_t pixelAddress{};
     EdgeAAInputs edgeAA;
     std::array<ComPtr<ID3D11SamplerState>,4> additionalSamplers;
+    // Freeze the actual copy tokens at parameter commit, not at later draw.
+    std::array<std::shared_ptr<NativeCopySubmission>,4> spatialCopies{};
     const NativeBackend* owner{};
     uint64_t generation{};
 };
@@ -1030,7 +1183,7 @@ struct EdgePipeline {
         D3D11_DEPTH_STENCIL_DESC d{};d.DepthFunc=D3D11_COMPARISON_ALWAYS;
         d.FrontFace={D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_COMPARISON_ALWAYS};d.BackFace=d.FrontFace;
         check(device->CreateDepthStencilState(&d,&depth),"edge disabled depth creation");
-        D3D11_RASTERIZER_DESC r{};r.FillMode=D3D11_FILL_SOLID;r.CullMode=D3D11_CULL_NONE;r.DepthClipEnable=TRUE;
+        D3D11_RASTERIZER_DESC r{};r.FillMode=D3D11_FILL_SOLID;r.CullMode=D3D11_CULL_NONE;r.DepthClipEnable=TRUE;r.MultisampleEnable=TRUE;
         check(device->CreateRasterizerState(&r,&raster),"edge raster creation");
     }
 };
@@ -1055,6 +1208,7 @@ std::shared_ptr<NativeEdgeCommit> NativeBackend::commitEdge(const std::shared_pt
         alias|=resource.Get()==source->texture.Get();output->Release();}
     if(alias)throw Error("Native edge source aliases an actual output");
     auto result=std::make_shared<NativeEdgeCommit>();result->source=source;
+    result->spatialCopies[0]=temporalCopiedOrigin(source->texture.Get(),1);
     result->pixelAddress=antiAlias?0x820302EC:0x8202E840;
     static_assert(sizeof(EdgeConstants)==144);
     auto effective=values;
@@ -1066,7 +1220,7 @@ std::shared_ptr<NativeEdgeCommit> NativeBackend::commitEdge(const std::shared_pt
     effective.dimensions[0]=float(std::min(source->width,source->pixelWidth()));
     effective.dimensions[1]=float(std::min(source->height,source->pixelHeight()));
     // Keep the original export/compositor while replacing neighbor smoothing.
-    if(antiAlias && antialiasingMode==Antialiasing::FXAA)
+    if(antiAlias && replacesOriginalSmoothing(antialiasingMode))
         for(auto& tap:effective.kernel)tap[0]=tap[1]=0;
     result->constants=edgeConstantBuffer(&effective,sizeof(effective));
     result->sampler=sceneSamplerState(sampler);
@@ -1109,6 +1263,8 @@ std::shared_ptr<NativeEdgeCommit> NativeBackend::commitEdgeAA(const EdgeAAInputs
        sampler.MaxAnisotropy!=1 || sampler.ComparisonFunc!=D3D11_COMPARISON_NEVER)
         throw Error("Native edgeAA requires five original point/wrap samplers");
     auto result=std::make_shared<NativeEdgeCommit>();result->pixelAddress=0x82034900;result->source=inputs.color;result->edgeAA=inputs;
+    result->spatialCopies={temporalCopiedOrigin(inputs.color->texture.Get(),1),temporalCopiedOrigin(inputs.depth->texture.Get(),2),
+        temporalCopiedOrigin(inputs.base->texture.Get(),1),temporalCopiedOrigin(inputs.line->texture.Get(),1)};
     static_assert(sizeof(EdgeAAConstants)==176);
     auto effective=values;
     // Match the ink detector/AA sampling span when the scene is downscaled.
@@ -1117,7 +1273,7 @@ std::shared_ptr<NativeEdgeCommit> NativeBackend::commitEdgeAA(const EdgeAAInputs
     effective.c20_27[4][0]=float(std::min(inputs.color->height,inputs.color->pixelHeight()));
     // This shader also decodes cel shading/shadows and composites ink outlines.
     // Zero radius samples the center in its ten-tap loops, preserving that work.
-    if(antialiasingMode==Antialiasing::FXAA)effective.c48_50[1][0]=0;
+    if(replacesOriginalSmoothing(antialiasingMode))effective.c48_50[1][0]=0;
     result->constants=edgeConstantBuffer(&effective,sizeof(effective));
     std::array<ID3D11SamplerState*,5> nativeSamplers{};
     for(size_t i=0;i<5;++i){auto& owner=i?result->additionalSamplers[i-1]:result->sampler;
@@ -1189,19 +1345,82 @@ void NativeBackend::drawEdge(const std::shared_ptr<RenderTarget>& target,const s
         StallProfiler::Scope allocationProfile(StallProfiler::Section::Rendering,"D3D11.CreateBuffer.edgeVertices",nullptr,reinterpret_cast<uintptr_t>(device.Get()));
         check(device->CreateBuffer(&desc,&data,buffer.ReleaseAndGetAddressOf()),"edge original vertex upload");
     }
+    std::optional<NativeTemporalSceneOrigins> filterDestination;
+    std::optional<TemporalRasterOrigin> filterOrigin;
+    const bool mainColor=temporalOrigins&&target->texture.Get()==temporalOriginPins->colorTexture.Get()&&
+        target->view.Get()==temporalOriginPins->colorView.Get();
+    const bool strictTemporal=mainColor&&temporalScene&&temporalScene->active()&&!temporalScene->reconstructed();
+    if(strictTemporal) {
+        // Same physical pixel indices, canonical UVs, and the unchanged shader
+        // offsets inherit the copied source grid. Palette coordinates are material
+        // codes, so the palette is intentionally not a spatial provenance input.
+        if(target->pixelWidth()!=commit->source->pixelWidth()||target->pixelHeight()!=commit->source->pixelHeight())
+            throw Error("Temporal filter source/output physical extents differ");
+        auto inherited=requireTemporalCopiedOrigin(commit->spatialCopies[0],commit->source->texture.Get(),1);
+        const auto combine=[&](const std::shared_ptr<NativeCopySubmission>& token,ID3D11Texture2D* resource,uint32_t component) {
+            const auto inputOrigin=requireTemporalCopiedOrigin(token,resource,component);
+            if(inputOrigin.kind==TemporalRasterOriginKind::Grid) {
+                if(inherited.kind==TemporalRasterOriginKind::Grid&&inherited.jitter!=inputOrigin.jitter)
+                    throw Error("Temporal filter spatial inputs have incompatible captured raster grids");
+                inherited=inputOrigin;
+            }
+        };
+        if(commit->pixelAddress==0x82034900) {
+            const auto& inputs=commit->edgeAA;
+            if(inputs.base->pixelWidth()!=target->pixelWidth()||inputs.base->pixelHeight()!=target->pixelHeight()||
+               inputs.line->pixelWidth()!=target->pixelWidth()||inputs.line->pixelHeight()!=target->pixelHeight()||
+               inputs.depth->storageWidth()!=target->pixelWidth()||inputs.depth->storageHeight()!=target->pixelHeight())
+                throw Error("Temporal edgeAA spatial input physical extents differ");
+            combine(commit->spatialCopies[1],inputs.depth->texture.Get(),2);
+            combine(commit->spatialCopies[2],inputs.base->texture.Get(),1);
+            combine(commit->spatialCopies[3],inputs.line->texture.Get(),1);
+        }
+        // All-uniform spatial inputs stay uniform: every UV sample is the same
+        // constant, -abs(uv.x)>0 is false, and material-palette coordinates are
+        // then constant. Otherwise all non-uniform inputs share one proven grid.
+        if(inherited.kind==TemporalRasterOriginKind::Grid&&inherited.jitter!=temporalScene->frame().jitter)
+            throw Error("Temporal filter source snapshot is not compatible with the actual active frame grid");
+        filterDestination=temporalSceneOrigins();validateTemporalSceneFeedback(*filterDestination,1);
+        filterOrigin=inherited;
+        D3D11_VIEWPORT physical{};UINT viewportCount=1;context->RSGetViewports(&viewportCount,&physical);
+        if(viewportCount!=1||physical.TopLeftX||physical.TopLeftY||physical.Width!=float(target->pixelWidth())||
+           physical.Height!=float(target->pixelHeight())||physical.MinDepth!=0||physical.MaxDepth!=1)
+            throw Error("Temporal filter does not cover its complete physical output");
+    }
     const UINT stride=sizeof(ScreenVertex),offset=0;
     context->IASetVertexBuffers(0,1,buffer.GetAddressOf(),&stride,&offset);
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
     context->RSSetState(edgePipeline->raster.Get());
     context->OMSetBlendState(edgePipeline->blend.Get(),nullptr,UINT32_MAX);
     context->OMSetDepthStencilState(edgePipeline->depth.Get(),0);
+    if(filterDestination) {
+        // These immutable states were created above with ScissorEnable=false,
+        // RGBA replacement/all channels, disabled DS, and full sample mask.
+        // Check actual bound owners without per-draw descriptor/device queries.
+        ComPtr<ID3D11RasterizerState> raster;ComPtr<ID3D11BlendState> blend;ComPtr<ID3D11DepthStencilState> disabledDepth;
+        std::array<float,4> factors{};UINT sampleMask{},stencilRef{};
+        context->RSGetState(&raster);context->OMGetBlendState(&blend,factors.data(),&sampleMask);
+        context->OMGetDepthStencilState(&disabledDepth,&stencilRef);
+        if(raster.Get()!=edgePipeline->raster.Get()||blend.Get()!=edgePipeline->blend.Get()||
+           disabledDepth.Get()!=edgePipeline->depth.Get()||sampleMask!=UINT32_MAX||stencilRef)
+            throw Error("Temporal filter lost its complete replacement raster/depth/blend profile");
+    }
     // Edge zero/one or AA five-sample means use native UNORM quantization with
     // blending disabled. AA rounding is covered by independent packed tests;
     // console precision parity is not implied by that native policy.
     // D3D11 owns the immutable vertices and bound resources through submission.
     StallProfiler::Scope drawProfile(StallProfiler::Section::Rendering,"D3D11.Draw.edge",nullptr,reinterpret_cast<uintptr_t>(context.Get()));
+    // The composite always binds its own PS b1 (other draws leave theirs bound):
+    // all zeros is the original black, full-strength outline.
+    const bool ink=commit->pixelAddress==0x82034900;
+    if(ink&&!inkConstants)configureInk({0,0,0},0);
+    ComPtr<ID3D11Buffer> previousInkSlot;
+    if(ink){context->PSGetConstantBuffers(1,1,&previousInkSlot);context->PSSetConstantBuffers(1,1,inkConstants.GetAddressOf());}
     context->Draw(4,0);
+    if(ink){ID3D11Buffer* restore=previousInkSlot.Get();context->PSSetConstantBuffers(1,1,&restore);}
     drawProfile.finish();
+    if(filterDestination)publishTemporalFilterColor(*filterDestination,*filterOrigin);
+    else noteTemporalSceneDraw(target,depth,15,false,false,std::array<float,2>{});
     check(device->GetDeviceRemovedReason(),"edge draw submission");
     if(commit->pixelAddress==0x82034900)++edgeAADraws;
     else if(commit->pixelAddress==0x820302EC)++aaDraws;else ++edgeDraws;
@@ -1219,7 +1438,7 @@ std::shared_ptr<RenderTarget> NativeBackend::createTarget(uint32_t width,uint32_
     }
     const auto extent=renderExtent(width,height,scale);renderingAllocated=true;
     D3D11_TEXTURE2D_DESC desc{};desc.Width=extent[0];desc.Height=extent[1];
-    desc.MipLevels=1;desc.ArraySize=1;desc.Format=nativeFormat;desc.SampleDesc.Count=1;
+    desc.MipLevels=1;desc.ArraySize=1;desc.Format=nativeFormat;desc.SampleDesc={1,0};
     desc.Usage=D3D11_USAGE_DEFAULT;desc.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
     auto result=std::make_shared<RenderTarget>();result->width=width;result->height=height;
     result->physicalWidth=desc.Width;result->physicalHeight=desc.Height;
@@ -1228,6 +1447,8 @@ std::shared_ptr<RenderTarget> NativeBackend::createTarget(uint32_t width,uint32_
     tagRenderExtent(result->texture.Get(),width,height);
     check(device->CreateRenderTargetView(result->texture.Get(),nullptr,&result->view),"target view creation");
     check(device->CreateShaderResourceView(result->texture.Get(),nullptr,&result->sampledView),"target sampled view creation");
+    result->scaleRole=scale;
+    if(scale!=TargetScale::Fixed)registerLive(liveColorTargets,result);
     return result;
 }
 void NativeBackend::clearTarget(const std::shared_ptr<RenderTarget>& target,const std::array<float,4>& color) {
@@ -1236,6 +1457,7 @@ void NativeBackend::clearTarget(const std::shared_ptr<RenderTarget>& target,cons
     if(!target) throw Error("Missing native screen target");
     sameDevice(target->texture.Get(),device.Get());finiteColor(color);
     context->ClearRenderTargetView(target->view.Get(),color.data());
+    noteTemporalSceneClear(target,{},1);
 }
 std::vector<uint8_t> NativeBackend::readbackTarget(const std::shared_ptr<RenderTarget>& target) {
     flushIm2D();
@@ -1295,13 +1517,16 @@ void NativeBackend::drawCoronaQueries(const std::shared_ptr<RenderTarget>& scene
     // Original8276AAA0..AAE4 leaves the restored Screen_Xenon program
     // selected. Its one completed query is separate from screen geometry.
     invalidateScreenReplacement();
+    // The query pass already renders to its private64x8 target; no scene
+    // pixel is overwritten.
     ID3D11ShaderResourceView* nulls[2]{};context->PSSetShaderResources(0,2,nulls);context->OMSetRenderTargets(0,nullptr,nullptr);
     // The original saves the upper 64x8 scene tile, draws queries into that
     // tile, resolves it, then restores it. Native distinct resources preserve
     // identical scene pixels and both copy destinations without touching EDRAM.
     const D3D11_BOX tile{0,0,0,64,8,1};
-    context->CopySubresourceRegion(backup->texture.Get(),0,0,0,0,scene->texture.Get(),0,&tile);
-    context->CopySubresourceRegion(packed.Get(),0,0,0,0,scene->texture.Get(),0,&tile);
+    auto* tileSource=scene->texture.Get();
+    context->CopySubresourceRegion(backup->texture.Get(),0,0,0,0,tileSource,0,&tile);
+    context->CopySubresourceRegion(packed.Get(),0,0,0,0,tileSource,0,&tile);
     auto* rt=output.Get();context->OMSetRenderTargets(1,&rt,nullptr);
     context->OMSetBlendState(replace.Get(),nullptr,0xFFFFFFFF);context->OMSetDepthStencilState(p.depth.Get(),0);
     // The fixed 64x8 query tile occupies physical pixels even when the scene
@@ -1463,16 +1688,10 @@ void NativeBackend::drawScreenImpl(const std::shared_ptr<RenderTarget>& target,c
     ComPtr<ID3D11SamplerState> sampler;
     if(draw.texture) {
         validateTexture(draw.texture);
-        check(device->CreateSamplerState(&draw.sampler,&sampler),"explicit sampler state creation");
+        sampler=sceneSamplerState(draw.sampler);
     }
-    D3D11_BLEND_DESC blend{};
-    auto& color=blend.RenderTarget[0];color.BlendEnable=!original;
-    color.SrcBlend=draw.blendSelector==3?D3D11_BLEND_ONE:D3D11_BLEND_SRC_ALPHA;
-    color.DestBlend=draw.blendSelector==1?D3D11_BLEND_INV_SRC_ALPHA:(draw.blendSelector==3?D3D11_BLEND_ZERO:D3D11_BLEND_ONE);
-    color.BlendOp=draw.blendSelector==2?D3D11_BLEND_OP_REV_SUBTRACT:D3D11_BLEND_OP_ADD;
-    color.SrcBlendAlpha=D3D11_BLEND_ONE;color.DestBlendAlpha=D3D11_BLEND_ZERO;color.BlendOpAlpha=D3D11_BLEND_OP_ADD;
-    color.RenderTargetWriteMask=draw.colorWriteMask;
-    ComPtr<ID3D11BlendState> blendState;check(device->CreateBlendState(&blend,&blendState),"blend state creation");
+    auto prepared=screenPipeline?screenPipeline:std::make_shared<ScreenPipeline>(device.Get());
+    auto blendState=prepared->blendState(device.Get(),original,draw.blendSelector,draw.colorWriteMask);
     ComPtr<ID3D11DepthStencilState> postDepth;
     ComPtr<ID3D11Texture2D> packedOutput;
     ComPtr<ID3D11RenderTargetView> packedView;
@@ -1487,19 +1706,17 @@ void NativeBackend::drawScreenImpl(const std::shared_ptr<RenderTarget>& target,c
         const D3D11_SUBRESOURCE_DATA initial{words.data(),0,0};check(device->CreateBuffer(&bd,&initial,&coronaConstants),"corona sprite constants");
         D3D11_SAMPLER_DESC sd{};sd.Filter=D3D11_FILTER_MIN_MAG_MIP_POINT;sd.AddressU=sd.AddressV=D3D11_TEXTURE_ADDRESS_MIRROR;
         sd.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;sd.MaxAnisotropy=1;sd.ComparisonFunc=D3D11_COMPARISON_NEVER;
-        check(device->CreateSamplerState(&sd,&querySampler),"corona query sampler");
+        querySampler=sceneSamplerState(sd);
         context->PSGetShaderResources(2,1,&savedTexture2);
     }
     if(original) {
-        D3D11_DEPTH_STENCIL_DESC post{};post.DepthEnable=postDepthEnable;
-        post.DepthWriteMask=depthWrite?D3D11_DEPTH_WRITE_MASK_ALL:D3D11_DEPTH_WRITE_MASK_ZERO;
-        post.DepthFunc=D3D11_COMPARISON_FUNC(depthCompare+1);
-        post.FrontFace={D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_COMPARISON_ALWAYS};post.BackFace=post.FrontFace;
-        check(device->CreateDepthStencilState(&post,&postDepth),"original post-draw depth state creation");
+        // sceneDepthState constructs the same complete descriptor: disabled
+        // stencil, zero masks/reference and KEEP/ALWAYS on both faces.
+        postDepth=sceneDepthState(uint32_t(postDepthEnable),uint32_t(depthWrite),depthCompare);
         // Integer output prevents adapter-dependent UNORM conversion from
         // rounding the recovered blend result a second time. Same packed family;
         // CopyResource transfers the bits without changing the engine target.
-        // Use actual storage dimensions (including SSAA/internal scale), never
+        // Use actual storage dimensions and coverage samples, never
         // logical guest/front dimensions. The exact device and full normalized
         // descriptor are the cache key; allocation/view failures publish nothing.
         D3D11_TEXTURE2D_DESC packed=*attachmentDescriptor(*target);
@@ -1526,7 +1743,7 @@ void NativeBackend::drawScreenImpl(const std::shared_ptr<RenderTarget>& target,c
         context->RSGetViewports(&savedViewportCount,savedViewports.data());
         context->PSGetShaderResources(1,1,&savedTexture1);
     }
-    if(!screenPipeline) screenPipeline=std::make_shared<ScreenPipeline>(device.Get());
+    screenPipeline=std::move(prepared);
     auto& pipeline=*screenPipeline;
     D3D11_MAPPED_SUBRESOURCE mapped{};
     check(context->Map(pipeline.vertices.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped),"vertex snapshot map");
@@ -1579,6 +1796,8 @@ void NativeBackend::drawScreenImpl(const std::shared_ptr<RenderTarget>& target,c
     if(original){auto* sampled=draw.blendSelector!=3?target->sampledView.Get():nullptr;context->PSSetShaderResources(draw.coronaQuery?2:1,1,&sampled);}
     context->Draw(4,0);
     ++screenDraws; // A submitted draw is never represented as an untouched failure.
+    // Draw uses pipeline.depth (disabled); postDepth is retained only afterward.
+    noteTemporalSceneDraw(target,depth,draw.colorWriteMask,false,false,std::array<float,2>{});
     completedOriginalModulatedPostFilterDraw=0;completedScreenInputBind=0;
     if(original) {
         auto* restored=draw.coronaQuery?savedTexture2.Get():savedTexture1.Get();context->PSSetShaderResources(draw.coronaQuery?2:1,1,&restored);
@@ -1604,5 +1823,20 @@ void NativeBackend::drawScreenImpl(const std::shared_ptr<RenderTarget>& target,c
     // in-flight GPU use; no guest owner or queued borrowed pointer is required.
     view=nullptr;sample=nullptr;context->PSSetShaderResources(0,1,&view);context->PSSetSamplers(0,1,&sample);
     context->OMSetRenderTargets(0,nullptr,nullptr);
+}
+}
+
+namespace Simpsons::Graphics {
+void NativeBackend::configureInk(std::array<float,3> color,float fade) {
+    requireOwner();
+    for(float value:color)if(!(value>=0&&value<=1))throw Error("Native ink color must be within 0..1");
+    if(!(fade>=0&&fade<=1))throw Error("Native ink fade must be within 0..1");
+    const std::array<float,8> values{color[0],color[1],color[2],0,fade,0,0,0};
+    if(values==inkValues&&inkConstants)return;
+    inkValues=values;
+    D3D11_BUFFER_DESC desc{};desc.ByteWidth=sizeof(values);desc.Usage=D3D11_USAGE_IMMUTABLE;desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+    const D3D11_SUBRESOURCE_DATA data{values.data(),0,0};
+    ComPtr<ID3D11Buffer> created;check(device->CreateBuffer(&desc,&data,&created),"ink constants");
+    inkConstants=std::move(created);
 }
 }

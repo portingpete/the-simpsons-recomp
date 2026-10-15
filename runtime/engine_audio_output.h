@@ -20,6 +20,11 @@ public:
     };
     explicit EngineAudioOutput(Runtime&);
     ~EngineAudioOutput();
+    // Main-thread host preparation before original startup. Opens only the
+    // endpoint/mastering graph; original ownership and source creation still
+    // require begin/acquire/source. Safe to repeat before begin; returns only
+    // the host backend generation, never an original source identity.
+    uint64_t prepareEndpoint();
     void begin(PPCContext&,uint8_t*);
     void acquire(PPCContext&,uint8_t*);
     void source(PPCContext&,uint8_t*);
@@ -45,5 +50,7 @@ public:
     // Held only across native publication/commit, never across original calls.
     PcmLease pcm(PPCContext&,uint8_t*,uint32_t root,uint32_t descriptor,uint32_t channels);
     View view() const;
+    // Video menu master volume (0..1), applied to the current and future endpoint.
+    void setMasterVolume(float);
 };
 }

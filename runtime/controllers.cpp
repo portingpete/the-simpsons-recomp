@@ -4,6 +4,7 @@
 #include "native_window.h"
 #include "engine_cpu_calls.h"
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <cstdio>
 #include <cstdlib>
@@ -11,6 +12,7 @@
 #include <fstream>
 #include <limits>
 #include <optional>
+#include <string>
 #include <string_view>
 
 namespace Simpsons {bool firstMissionCompletionSkipBootstrap(uint8_t*);bool auditStageSkipBootstrap(uint8_t*);}
@@ -325,11 +327,28 @@ bool NativeKeyboard::key(uint32_t code,bool down) {
         }
         if(capturing)return captureInput(code,down,wasHeld);
         if(!mapped)return false;
+        if(down&&!wasHeld)latchActionPress(code);
         if(code==VK_RETURN&&(!down||!held[code]))movieEnterHeld=false;
         if(down) {pressed[code]=pressed[code]||!held[code];held[code]=true;}
         else held[code]=false;
     }
     return mapped;
+}
+void NativeKeyboard::latchActionPress(uint32_t code) {
+    for(const auto action:{ControlAction::FreeCamera,ControlAction::PhotoMode})
+        for(const auto binding:controlSettings.bindings[uint32_t(action)])
+            if(binding&&binding==code)actionPresses|=1u<<uint32_t(action);
+}
+uint32_t NativeKeyboard::takeActionPresses() {
+    std::lock_guard lock(mutex);const auto value=actionPresses;actionPresses=0;return value;
+}
+void NativeKeyboard::wheel(int32_t delta) {
+    std::lock_guard lock(mutex);
+    if(!focused||menuMouse||!delta)return;
+    const uint32_t code=delta>0?NativeControlSettings::wheelUp:NativeControlSettings::wheelDown;
+    // A notch is a complete press: capture binds it, gameplay sees it for one poll.
+    if(capturing){captureInput(code,true,false);captureInput(code,false,true);return;}
+    pressed[code]=true;latchActionPress(code);
 }
 NativeControlSettings NativeKeyboard::controls(){std::lock_guard lock(mutex);return controlSettings;}
 void NativeKeyboard::configureControls(const NativeControlSettings& settings) {
@@ -411,6 +430,7 @@ bool NativeKeyboard::mouseButton(uint32_t code,bool down) {
             else pointerHeld&=uint8_t(~bit);
             return true;
         }
+        if(down&&!held[code])latchActionPress(code);
         if(down){pressed[code]=pressed[code]||!held[code];held[code]=true;}
         else held[code]=false;
         if(down) {mousePressed|=uint8_t(bit&~mouseHeld);mouseHeld|=bit;}
@@ -505,8 +525,17 @@ XINPUT_STATE NativeKeyboard::sample(bool movie,WORD* directionPresses,NativeMous
     const bool right=menuMouse?active('D'):actionActive(ControlAction::MoveRight);
     const bool up=menuMouse?active('W'):actionActive(ControlAction::MoveForward);
     const bool down=menuMouse?active('S'):actionActive(ControlAction::MoveBackward);
-    value.sThumbLX=left==right?0:(right?32767:-32768);
-    value.sThumbLY=up==down?0:(up?32767:-32768);
+    // Walk keeps the original analogue walk speed by holding half deflection.
+    const bool walk=!menuMouse&&actionActive(ControlAction::Walk);
+    const SHORT full=walk?16384:32767,fullNegative=walk?-16384:-32768;
+    value.sThumbLX=left==right?0:(right?full:fullNegative);
+    value.sThumbLY=up==down?0:(up?full:fullNegative);
+    if(!menuMouse) {
+        const bool lookLeft=actionActive(ControlAction::LookLeft),lookRight=actionActive(ControlAction::LookRight);
+        const bool lookUp=actionActive(ControlAction::LookUp),lookDown=actionActive(ControlAction::LookDown);
+        value.sThumbRX=lookLeft==lookRight?0:(lookRight?32767:-32768);
+        value.sThumbRY=lookUp==lookDown?0:(lookUp?32767:-32768);
+    }
     if(directionPresses) {
         *directionPresses=0;
         if(!capturing) {
@@ -604,6 +633,14 @@ DWORD NativeControllers::state(uint32_t slot,XINPUT_STATE& result,NativeMovieSta
         return returned;
     }
     const auto status=stateUnlocked(slot,result);
+    if(slot==0)lastSlotZeroButtons=status==ERROR_SUCCESS?result.Gamepad.wButtons:0;
+    if(slot==0&&freeCameraActive&&status==ERROR_SUCCESS) {
+        freeCameraButtons|=WORD(result.Gamepad.wButtons&~freeCameraPad.wButtons);
+        freeCameraPad=result.Gamepad;freeCameraMouseX+=mouse.x;freeCameraMouseY+=mouse.y;
+        const DWORD packet=result.dwPacketNumber;result={};result.dwPacketNumber=packet;mouse={};
+        if(recording)recording->sample(slot,status,result,false,mouse);
+        return status;
+    }
     if(releaseAfterModal[slot]){
         const auto& pad=result.Gamepad;
         const bool released=status!=ERROR_SUCCESS||(!pad.wButtons&&!pad.bLeftTrigger&&!pad.bRightTrigger&&
@@ -630,6 +667,25 @@ DWORD NativeControllers::state(uint32_t slot,XINPUT_STATE& result,NativeMovieSta
     if(slot==0&&movieOwner)mouse={};
     if(recording)recording->sample(slot,status,result,false,mouse);
     return status;
+}
+void NativeControllers::setFreeCamera(bool active){
+    std::lock_guard lock(mutex);
+    if(freeCameraActive==active)return;
+    // Buttons still held at the switch stay held until the next poll; they
+    // are not new presses, and a toggle combination must be released first.
+    freeCameraActive=active;freeCameraPad={};freeCameraPad.wButtons=lastSlotZeroButtons;
+    freeCameraButtons=0;freeCameraMouseX=freeCameraMouseY=0;mouse={};
+    // The game receives neutral input from the next poll on; held buttons
+    // must be released before they reach gameplay again.
+    if(!active)releaseAfterModal[0]=true;
+    if(auto keys=keyboard.lock())keys->discard(false);
+}
+WORD NativeControllers::slotZeroButtons(){std::lock_guard lock(mutex);return lastSlotZeroButtons;}
+NativeControllers::FreeCameraInput NativeControllers::takeFreeCameraInput(){
+    std::lock_guard lock(mutex);
+    const auto clamp=[](int64_t value){return int32_t(value<INT32_MIN?INT32_MIN:value>INT32_MAX?INT32_MAX:value);};
+    FreeCameraInput input{freeCameraPad,freeCameraButtons,clamp(freeCameraMouseX),clamp(freeCameraMouseY)};
+    freeCameraButtons=0;freeCameraMouseX=freeCameraMouseY=0;return input;
 }
 void NativeControllers::beginMovie(uint32_t owner){
     std::lock_guard lock(mutex);
@@ -955,9 +1011,21 @@ bool SimpsonsNativeMovieSkip(PPCContext& ctx,uint8_t* base){
     need(owner>=0x10000 && owner<=UINT32_MAX-0x1C,"movie skip owner address out of range");
     need(owner==PPC_LOAD_U32(0x82D09750),"foreign movie update owner");
     const auto state=PPC_LOAD_U32(owner+0x14);
+    // Video menu "Skip intro videos": the three launch logos only.
+    const auto introLogo=[&] {
+        if(!rt.videoSettings.skipIntros)return false;
+        const auto name=PPC_LOAD_U32(owner+0x1C);
+        if(!name)return false;
+        std::string text;
+        for(uint32_t i=0;i<128;++i){const char ch=char(PPC_LOAD_U8(name+i));if(!ch)break;text+=char(std::tolower(uint8_t(ch)));}
+        const bool logo=text.find("ealogo")!=std::string::npos||text.find("foxlogo")!=std::string::npos||text.find("gracielogo")!=std::string::npos;
+        if(logo)std::fprintf(stderr,"[NATIVE MOVIE SKIP] intro video setting skips %s\n",text.c_str());
+        return logo;
+    };
     const bool shortcutSkip=rt.renderTestFirstMission||
         Simpsons::auditStageSkipBootstrap(base)||
-        (rt.bartmanBegins&&!rt.bartmanBeginsMapStarted)||Simpsons::firstMissionCompletionSkipBootstrap(base);
+        (rt.bartmanBegins&&!rt.bartmanBeginsMapStarted)||Simpsons::firstMissionCompletionSkipBootstrap(base)||
+        ((state==2||state==3||state==6)&&introLogo());
     if((state!=2&&state!=3&&state!=6)||
        (!shortcutSkip&&!rt.controllerSource()->takeMovieSkip(owner)))return false;
     std::fprintf(stderr,"[NATIVE MOVIE SKIP] %s owner=%08X; original stop and completion begin\n",

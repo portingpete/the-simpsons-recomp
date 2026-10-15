@@ -2,9 +2,12 @@
 #define NOMINMAX
 #endif
 #include "renderer/rigid_mesh.h"
+#include "header/test_graphics_device.h"
+#include "header/test_owned_mesh_cache.h"
 #include "renderer/native_material_compiler.h"
 #include "renderer/effect_reflection.h"
 #include "renderer/device_availability.h"
+#include "renderer/d3d_call_stats.h"
 #include "VSFlat.h"
 #include "PSFlat.h"
 #include "VSRigidNormalTangent.h"
@@ -24,6 +27,8 @@
 #include <string>
 #include <thread>
 
+extern "C" uint64_t gD3DDeviceCounts[64];
+
 using namespace Simpsons::Graphics;
 size_t rigidChecks{};
 void require(bool value,const char* reason){++rigidChecks;if(!value)throw Error(reason);}
@@ -38,15 +43,28 @@ struct NativeRecordingProbe {
     // TEST ONLY: drops the backend's exact-content rigid cache. shared_ptr reset
     // is valid on the incomplete pointee; live handles keep their meshes alive.
     static void resetMeshCache(NativeBackend& b){b.rigidMeshCache_.reset();}
+    struct RecordedStates {
+        ComPtr<ID3D11DepthStencilState> depth;
+        ComPtr<ID3D11BlendState> blend;
+        ComPtr<ID3D11RasterizerState> raster;
+        ComPtr<ID3D11SamplerState> sampler;
+        ComPtr<ID3D11Buffer> constants;
+    };
+    static RecordedStates recordedStates(NativeBackend& b,const RigidMeshDraw& d) {
+        return {b.sceneDepthState(d.depthEnable,d.depthWrite,d.depthCompare),
+            b.sceneBlendState(d.blendEnable,d.blendWord,d.colorMask),b.sceneRasterState(d.cull,d.scissorEnable),
+            b.sceneSamplerState(d.samplers[0]),b.sceneDepthConstantBuffer(d.viewport[4]==0x3F800000&&d.viewport[5]==0,d.depthBiasBits,d.slopeBiasBits)};
+    }
+    static ComPtr<ID3D11SamplerState> sampler(NativeBackend& b,const D3D11_SAMPLER_DESC& d){return b.sceneSamplerState(d);}
+    static void resetSceneCache(NativeBackend& b){b.resetSceneStateCacheForDevice();}
     static void replaceDevice(NativeBackend& b,bool hardware) {
         ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;D3D_FEATURE_LEVEL level{};
-        const D3D_FEATURE_LEVEL levels[]={D3D_FEATURE_LEVEL_11_1,D3D_FEATURE_LEVEL_11_0};
-        const auto hr=D3D11CreateDevice(nullptr,hardware?D3D_DRIVER_TYPE_HARDWARE:D3D_DRIVER_TYPE_WARP,nullptr,
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,levels,2,D3D11_SDK_VERSION,&device,&level,&context);
+        const auto hr=createTestDevice(hardware,D3D11_CREATE_DEVICE_BGRA_SUPPORT,&device,&level,&context);
         if(FAILED(hr)) throw Error("Deterministic rigid device replacement failed");
         b.availability=std::make_shared<DeviceAvailability>(device.Get());b.device=device;b.context=context;b.featureLevel=level;
     }
     static void debug(NativeBackend& b,bool hardware) {
+        if(testUsesVulkan())return; // D3D11 debug layer: a D3D11-only diagnostic.
         ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;D3D_FEATURE_LEVEL level{};
         const D3D_FEATURE_LEVEL levels[]={D3D_FEATURE_LEVEL_11_1,D3D_FEATURE_LEVEL_11_0};
         auto hr=D3D11CreateDevice(nullptr,hardware?D3D_DRIVER_TYPE_HARDWARE:D3D_DRIVER_TYPE_WARP,nullptr,
@@ -111,8 +129,8 @@ struct Fixture {
     ComPtr<ID3D11Buffer> sentinelConstants;
     ID3D11DeviceContext* immediate{};
     static constexpr UINT extent=16;
-    explicit Fixture(const std::vector<uint8_t>& image,bool hardware,bool textured=false,bool gloss=false,bool multitone=false,bool alpha=false,bool vfx=false,bool uv=false,bool singleUv=false,bool flipbook=false):backend(!hardware),compiler(backend) {
-        NativeRecordingProbe::debug(backend,hardware);immediate=NativeRecordingProbe::immediate(backend);
+    explicit Fixture(const std::vector<uint8_t>& image,bool hardware,bool textured=false,bool gloss=false,bool multitone=false,bool alpha=false,bool vfx=false,bool uv=false,bool singleUv=false,bool flipbook=false,bool debug=true):backend(!hardware),compiler(backend) {
+        if(debug)NativeRecordingProbe::debug(backend,hardware);immediate=NativeRecordingProbe::immediate(backend);
         for(const auto& record:originalMaterialIdentities())if(record.originalAddress==(flipbook?(alpha?0x82039D70u:0x820398BCu):singleUv?(alpha?0x82043BC0u:0x8204364Cu):uv?(alpha?0x82047318u:0x82046D9Cu):vfx?0x8205BE70u:alpha?0x8200D734u:multitone?0x82054F2Cu:gloss?0x8201A07Cu:textured?0x8201700Cu:0x8200D3ACu)||
             record.originalAddress==(flipbook?(alpha?0x8203A644u:0x8203A24Cu):singleUv?(alpha?0x82044850u:0x82044068u):uv?(alpha?0x82047F44u:0x820477A8u):vfx?0x8205C100u:alpha?0x8200E1BCu:multitone?0x82055710u:gloss?0x8201A6ECu:textured?0x82017658u:0x8200D9E8u)) {
             auto id=registry.create(record.originalAddress,std::span<const uint8_t>(image).subspan(record.originalAddress-0x82000000,record.recordBytes));
@@ -768,6 +786,54 @@ void inheritedOpaque(const std::vector<uint8_t>& image,bool hardware) {
     f.backend.releaseRecordingPayload(pending);f.backend.releaseRigidReplayConstants(f.live);
     f.backend.releaseRecordingContext(f.recording);checkDebug(NativeRecordingProbe::device(f.backend));
 }
+// A live render-resolution change re-backs Scene owners in place. The sealed
+// list recorded against their old storage must replay into the new storage
+// with the new physical viewport, and an open recording session defers it.
+void liveRerecord(const std::vector<uint8_t>& image,bool hardware) {
+    Fixture f(image,hardware);auto& b=f.backend;
+    auto color=b.createTarget(f.extent,f.extent,TargetFormat::RGB10A2,TargetScale::Scene);
+    auto depth=b.createDepthTarget(f.extent,f.extent,TargetScale::Scene);
+    const auto* colorOwner=color.get();const auto* depthOwner=depth.get();
+    auto mesh=b.uploadRigidMesh(geometry(),strip);
+    b.bindTargets({color,nullptr,nullptr,nullptr},depth);
+    auto payload=f.begin();
+    b.bindRigidShadowDepth(payload,0,f.shadows[0]);b.bindRigidShadowDepth(payload,1,f.shadows[1]);
+    b.bindRigidMeshVertices(payload,mesh);b.bindRigidMeshDeclaration(payload,mesh);b.bindRigidMeshIndices(payload,mesh);
+    b.recordRigidMesh(payload,color,depth,mesh,*f.vs,*f.ps,f.vc,f.material(333),f.live,f.draw);
+    b.finishRecordingPayload(payload);
+    // The first replay, before any live change, is the reference covered word.
+    uint32_t coveredWord=0;
+    const auto replay=[&](uint32_t scale) {
+        const uint32_t side=f.extent*scale;
+        require(color.get()==colorOwner&&depth.get()==depthOwner&&color->width==f.extent&&
+                color->pixelWidth()==side&&color->pixelHeight()==side&&depth->storageWidth()==side&&depth->storageHeight()==side,
+                "Live render change replaced scene owners or missed their storage extent");
+        b.clearTarget(color,{1,0,1,1});b.clearDepthTarget(depth,0,0x6D);
+        b.executeRecordingPayload(payload);b.waitIdle();
+        const auto colors=b.readbackTarget(color),depths=b.readbackDepthTarget(depth);
+        require(colors.size()==size_t(side)*side*4&&depths.size()==size_t(side)*side*8,"Live replay readback extent differs");
+        if(!coveredWord)coveredWord=word(colors,0);
+        require((coveredWord&0x3FFFFFFF)==(packed(333,0)&0x3FFFFFFF),"Recorded rigid reference lost its material id");
+        for(uint32_t y=0;y<side;++y)for(uint32_t x=0;x<side;++x) {
+            const size_t i=size_t(y)*side+x;const bool covered=x<side/2;
+            require(word(colors,4*i)==(covered?coveredWord:untouched)&&word(depths,8*i)==bits(covered?.5f:0.f)&&depths[8*i+4]==0x6D,
+                    "Re-recorded rigid list did not cover the new storage through its physical viewport");
+        }
+    };
+    replay(1);
+    require(b.reconfigureRendering(2560,1440,1),"Live render change deferred without an open recording session");
+    require(b.lastLiveRendering().payloads>=1&&b.lastLiveRendering().colors>=1&&b.lastLiveRendering().depths>=1,
+            "Live render change did not re-back scene owners and re-record the sealed list");
+    replay(2);
+    auto pending=f.begin();
+    require(!b.reconfigureRendering(1920,1080,1)&&color->pixelWidth()==2*f.extent,"Live render change ignored an open recording session");
+    b.releaseRecordingPayload(pending);
+    require(b.reconfigureRendering(1280,720,1),"Live render change back to 720p deferred");
+    replay(1);
+    b.releaseRecordingPayload(payload);b.releaseRigidReplayConstants(f.live);b.releaseRecordingContext(f.recording);
+    checkDebug(NativeRecordingProbe::device(b));
+    std::printf("PASS rigid live re-record %s: sealed list followed re-backed scene owners at 2x and back, open session deferred\n",hardware?"hardware":"WARP");
+}
 void tangent(const std::vector<uint8_t>& image,bool hardware) {
     // Tangent GPU input layout and shader input interface only. No normalmap
     // shading, material staging or source admission is exercised here.
@@ -797,101 +863,105 @@ void tangent(const std::vector<uint8_t>& image,bool hardware) {
      context->IAGetInputLayout(&six);
      require(stride==sizeof(RigidVertex)&&!offset,"Tangent rigid declaration changed stride/offset");}
     require(five.Get()&&six.Get()&&five.Get()!=six.Get(),"Tangent declaration aliases the default 5-element layout");
-    // Stream-output round-trip through the production tangent layout and the
-    // passthrough VS8205855C input interface: every lane must arrive bit-exact.
-    ComPtr<ID3D11VertexShader> vs;ComPtr<ID3D11GeometryShader> gs;
-    hr(device->CreateVertexShader(kVSRigidNormalTangent,sizeof(kVSRigidNormalTangent),nullptr,&vs),"Normalmap tangent VS");
-    const D3D11_SO_DECLARATION_ENTRY entries[]={{0,"SV_Position",0,0,4,0},{0,"TEXCOORD",0,0,3,0},
-        {0,"TEXCOORD",1,0,4,0},{0,"TEXCOORD",2,0,2,0},{0,"TEXCOORD",3,0,2,0},{0,"TEXCOORD",4,0,3,0}};
-    const UINT soStride=18*sizeof(float);
-    hr(device->CreateGeometryShaderWithStreamOutput(kGSRigidNormalTangentProbe,sizeof(kGSRigidNormalTangentProbe),
-        entries,6,&soStride,1,D3D11_SO_NO_RASTERIZED_STREAM,nullptr,&gs),"Normalmap tangent observer");
-    D3D11_BUFFER_DESC desc{};desc.ByteWidth=UINT(raw.size()*soStride);desc.Usage=D3D11_USAGE_DEFAULT;desc.BindFlags=D3D11_BIND_STREAM_OUTPUT;
-    ComPtr<ID3D11Buffer> out;hr(device->CreateBuffer(&desc,nullptr,&out),"Tangent stream outputs");
-    desc.BindFlags=0;desc.Usage=D3D11_USAGE_STAGING;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
-    ComPtr<ID3D11Buffer> staging;hr(device->CreateBuffer(&desc,nullptr,&staging),"Tangent stream staging");
-    ComPtr<ID3D11VertexShader> oldVS;ComPtr<ID3D11GeometryShader> oldGS;ComPtr<ID3D11PixelShader> oldPS;ComPtr<ID3D11InputLayout> oldLayout;
-    D3D11_PRIMITIVE_TOPOLOGY oldTopology{};
-    context->VSGetShader(&oldVS,nullptr,nullptr);context->GSGetShader(&oldGS,nullptr,nullptr);
-    context->PSGetShader(&oldPS,nullptr,nullptr);context->IAGetInputLayout(&oldLayout);context->IAGetPrimitiveTopology(&oldTopology);
-    context->OMSetRenderTargets(0,nullptr,nullptr);
-    f.backend.bindRigidMeshVertices(mesh);f.backend.bindRigidNormalMeshDeclaration(mesh);
-    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
-    context->VSSetShader(vs.Get(),nullptr,0);context->GSSetShader(gs.Get(),nullptr,0);context->PSSetShader(nullptr,nullptr,0);
-    const UINT zero=0;auto* output=out.Get();context->SOSetTargets(1,&output,&zero);
-    context->Draw(UINT(raw.size()),0);
-    context->SOSetTargets(0,nullptr,nullptr);context->CopyResource(staging.Get(),out.Get());
-    D3D11_MAPPED_SUBRESOURCE mapped{};hr(context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped),"Tangent stream readback");
-    std::vector<float> actual(raw.size()*18);std::memcpy(actual.data(),mapped.pData,raw.size()*soStride);context->Unmap(staging.Get(),0);
-    const auto laneBits=[&](size_t vertex,size_t lane){return std::bit_cast<uint32_t>(actual[vertex*18+lane]);};
-    for(size_t i=0;i<raw.size();++i) {
-        for(size_t lane=0;lane<3;++lane) {
-            require(laneBits(i,lane)==std::bit_cast<uint32_t>(raw[i].position[lane]),"Tangent VS position lane changed");
-            require(laneBits(i,4+lane)==std::bit_cast<uint32_t>(raw[i].normal[lane]),"Tangent VS normal lane changed");
-            require(laneBits(i,15+lane)==std::bit_cast<uint32_t>(raw[i].tangent[lane]),"Tangent VS tangent lane changed");
-        }
-        require(laneBits(i,3)==std::bit_cast<uint32_t>(1.0f),"Tangent VS homogeneous W differs");
-        for(size_t lane=0;lane<4;++lane)
-            require(laneBits(i,7+lane)==std::bit_cast<uint32_t>(raw[i].color[lane]),"Tangent VS color lane changed");
-        for(size_t lane=0;lane<2;++lane) {
-            require(laneBits(i,11+lane)==std::bit_cast<uint32_t>(raw[i].uv[lane]),"Tangent VS UV lane changed");
-            require(laneBits(i,13+lane)==std::bit_cast<uint32_t>(raw[i].uv1[lane]),"Tangent VS UV1 lane changed");
-        }
-        rigidChecks+=18;
-    }
-    // The Chocolate VS declares tangent before color/UV in its input
-    // signature. Reusing the normalmap layout silently routes the constant
-    // second UV into the animated first UV. Exercise the production Chocolate
-    // declaration with the actual Chocolate VS and stream out its texture
-    // coordinates before any pixel shader or authored texture can mask it.
-    {
-        auto river=raw;
-        for(size_t i=0;i<river.size();++i) {
-            river[i].uv={.125f+float(i)*.0625f,.625f-float(i)*.0625f};
-            river[i].uv1={.8125f,.9375f};
-        }
-        auto riverMesh=f.backend.uploadRigidMesh(river,strip);
-        ComPtr<ID3D11VertexShader> chocolateVS;
-        hr(device->CreateVertexShader(kVSChocolate,sizeof(kVSChocolate),nullptr,&chocolateVS),"Chocolate VS");
-        ComPtr<ID3D11GeometryShader> chocolateGS;
-        const D3D11_SO_DECLARATION_ENTRY uvEntry{0,"TEXCOORD",0,0,4,0};
-        const UINT uvStride=4*sizeof(float);
-        hr(device->CreateGeometryShaderWithStreamOutput(kGSChocolateUVProbe,sizeof(kGSChocolateUVProbe),
-            &uvEntry,1,&uvStride,1,D3D11_SO_NO_RASTERIZED_STREAM,nullptr,&chocolateGS),"Chocolate UV observer");
-        RigidVertexConstants constants{};
-        constants[0]={0,1,0,0};constants[1]={0,0,1,0};
-        constants[2]={1,0,0,0};constants[3]={0,0,0,1};
-        constants[46]={1,1,1,1}; // t0.xyzw must equal UV0.xyxy.
-        D3D11_BUFFER_DESC constantDesc{};constantDesc.ByteWidth=sizeof(constants);
-        constantDesc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;constantDesc.Usage=D3D11_USAGE_IMMUTABLE;
-        D3D11_SUBRESOURCE_DATA initial{constants.data(),0,0};
-        ComPtr<ID3D11Buffer> chocolateConstants;
-        hr(device->CreateBuffer(&constantDesc,&initial,&chocolateConstants),"Chocolate VS constants");
-        ComPtr<ID3D11Buffer> oldConstants;
-        context->VSGetConstantBuffers(0,1,&oldConstants);
-        f.backend.bindRigidMeshVertices(riverMesh);
-        f.backend.bindChocolateMeshDeclaration(riverMesh);
+    // Geometry-shader stream output is a D3D11-only oracle (Vulkan builds no
+    // geometry shaders); a Vulkan run keeps every other tangent check.
+    if(!testUsesVulkan()) {
+        // Stream-output round-trip through the production tangent layout and the
+        // passthrough VS8205855C input interface: every lane must arrive bit-exact.
+        ComPtr<ID3D11VertexShader> vs;ComPtr<ID3D11GeometryShader> gs;
+        hr(device->CreateVertexShader(kVSRigidNormalTangent,sizeof(kVSRigidNormalTangent),nullptr,&vs),"Normalmap tangent VS");
+        const D3D11_SO_DECLARATION_ENTRY entries[]={{0,"SV_Position",0,0,4,0},{0,"TEXCOORD",0,0,3,0},
+            {0,"TEXCOORD",1,0,4,0},{0,"TEXCOORD",2,0,2,0},{0,"TEXCOORD",3,0,2,0},{0,"TEXCOORD",4,0,3,0}};
+        const UINT soStride=18*sizeof(float);
+        hr(device->CreateGeometryShaderWithStreamOutput(kGSRigidNormalTangentProbe,sizeof(kGSRigidNormalTangentProbe),
+            entries,6,&soStride,1,D3D11_SO_NO_RASTERIZED_STREAM,nullptr,&gs),"Normalmap tangent observer");
+        D3D11_BUFFER_DESC desc{};desc.ByteWidth=UINT(raw.size()*soStride);desc.Usage=D3D11_USAGE_DEFAULT;desc.BindFlags=D3D11_BIND_STREAM_OUTPUT;
+        ComPtr<ID3D11Buffer> out;hr(device->CreateBuffer(&desc,nullptr,&out),"Tangent stream outputs");
+        desc.BindFlags=0;desc.Usage=D3D11_USAGE_STAGING;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Buffer> staging;hr(device->CreateBuffer(&desc,nullptr,&staging),"Tangent stream staging");
+        ComPtr<ID3D11VertexShader> oldVS;ComPtr<ID3D11GeometryShader> oldGS;ComPtr<ID3D11PixelShader> oldPS;ComPtr<ID3D11InputLayout> oldLayout;
+        D3D11_PRIMITIVE_TOPOLOGY oldTopology{};
+        context->VSGetShader(&oldVS,nullptr,nullptr);context->GSGetShader(&oldGS,nullptr,nullptr);
+        context->PSGetShader(&oldPS,nullptr,nullptr);context->IAGetInputLayout(&oldLayout);context->IAGetPrimitiveTopology(&oldTopology);
+        context->OMSetRenderTargets(0,nullptr,nullptr);
+        f.backend.bindRigidMeshVertices(mesh);f.backend.bindRigidNormalMeshDeclaration(mesh);
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
-        context->VSSetShader(chocolateVS.Get(),nullptr,0);
-        auto* cb=chocolateConstants.Get();context->VSSetConstantBuffers(0,1,&cb);
-        context->GSSetShader(chocolateGS.Get(),nullptr,0);context->PSSetShader(nullptr,nullptr,0);
-        auto* output=out.Get();context->SOSetTargets(1,&output,&zero);
-        context->Draw(UINT(river.size()),0);
+        context->VSSetShader(vs.Get(),nullptr,0);context->GSSetShader(gs.Get(),nullptr,0);context->PSSetShader(nullptr,nullptr,0);
+        const UINT zero=0;auto* output=out.Get();context->SOSetTargets(1,&output,&zero);
+        context->Draw(UINT(raw.size()),0);
         context->SOSetTargets(0,nullptr,nullptr);context->CopyResource(staging.Get(),out.Get());
-        D3D11_MAPPED_SUBRESOURCE chocolateMapped{};
-        hr(context->Map(staging.Get(),0,D3D11_MAP_READ,0,&chocolateMapped),"Chocolate UV stream readback");
-        std::vector<float> chocolateActual(river.size()*4);
-        std::memcpy(chocolateActual.data(),chocolateMapped.pData,river.size()*uvStride);
-        context->Unmap(staging.Get(),0);
-        for(size_t i=0;i<river.size();++i)for(size_t lane=0;lane<4;++lane) {
-            const float expected=river[i].uv[lane&1];
-            require(std::bit_cast<uint32_t>(chocolateActual[i*4+lane])==std::bit_cast<uint32_t>(expected),
-                "Chocolate VS sampled constant UV1 instead of varying UV0");
+        D3D11_MAPPED_SUBRESOURCE mapped{};hr(context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped),"Tangent stream readback");
+        std::vector<float> actual(raw.size()*18);std::memcpy(actual.data(),mapped.pData,raw.size()*soStride);context->Unmap(staging.Get(),0);
+        const auto laneBits=[&](size_t vertex,size_t lane){return std::bit_cast<uint32_t>(actual[vertex*18+lane]);};
+        for(size_t i=0;i<raw.size();++i) {
+            for(size_t lane=0;lane<3;++lane) {
+                require(laneBits(i,lane)==std::bit_cast<uint32_t>(raw[i].position[lane]),"Tangent VS position lane changed");
+                require(laneBits(i,4+lane)==std::bit_cast<uint32_t>(raw[i].normal[lane]),"Tangent VS normal lane changed");
+                require(laneBits(i,15+lane)==std::bit_cast<uint32_t>(raw[i].tangent[lane]),"Tangent VS tangent lane changed");
+            }
+            require(laneBits(i,3)==std::bit_cast<uint32_t>(1.0f),"Tangent VS homogeneous W differs");
+            for(size_t lane=0;lane<4;++lane)
+                require(laneBits(i,7+lane)==std::bit_cast<uint32_t>(raw[i].color[lane]),"Tangent VS color lane changed");
+            for(size_t lane=0;lane<2;++lane) {
+                require(laneBits(i,11+lane)==std::bit_cast<uint32_t>(raw[i].uv[lane]),"Tangent VS UV lane changed");
+                require(laneBits(i,13+lane)==std::bit_cast<uint32_t>(raw[i].uv1[lane]),"Tangent VS UV1 lane changed");
+            }
+            rigidChecks+=18;
         }
-        cb=oldConstants.Get();context->VSSetConstantBuffers(0,1,&cb);
+        // The Chocolate VS declares tangent before color/UV in its input
+        // signature. Reusing the normalmap layout silently routes the constant
+        // second UV into the animated first UV. Exercise the production Chocolate
+        // declaration with the actual Chocolate VS and stream out its texture
+        // coordinates before any pixel shader or authored texture can mask it.
+        {
+            auto river=raw;
+            for(size_t i=0;i<river.size();++i) {
+                river[i].uv={.125f+float(i)*.0625f,.625f-float(i)*.0625f};
+                river[i].uv1={.8125f,.9375f};
+            }
+            auto riverMesh=f.backend.uploadRigidMesh(river,strip);
+            ComPtr<ID3D11VertexShader> chocolateVS;
+            hr(device->CreateVertexShader(kVSChocolate,sizeof(kVSChocolate),nullptr,&chocolateVS),"Chocolate VS");
+            ComPtr<ID3D11GeometryShader> chocolateGS;
+            const D3D11_SO_DECLARATION_ENTRY uvEntry{0,"TEXCOORD",0,0,4,0};
+            const UINT uvStride=4*sizeof(float);
+            hr(device->CreateGeometryShaderWithStreamOutput(kGSChocolateUVProbe,sizeof(kGSChocolateUVProbe),
+                &uvEntry,1,&uvStride,1,D3D11_SO_NO_RASTERIZED_STREAM,nullptr,&chocolateGS),"Chocolate UV observer");
+            RigidVertexConstants constants{};
+            constants[0]={0,1,0,0};constants[1]={0,0,1,0};
+            constants[2]={1,0,0,0};constants[3]={0,0,0,1};
+            constants[46]={1,1,1,1}; // t0.xyzw must equal UV0.xyxy.
+            D3D11_BUFFER_DESC constantDesc{};constantDesc.ByteWidth=sizeof(constants);
+            constantDesc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;constantDesc.Usage=D3D11_USAGE_IMMUTABLE;
+            D3D11_SUBRESOURCE_DATA initial{constants.data(),0,0};
+            ComPtr<ID3D11Buffer> chocolateConstants;
+            hr(device->CreateBuffer(&constantDesc,&initial,&chocolateConstants),"Chocolate VS constants");
+            ComPtr<ID3D11Buffer> oldConstants;
+            context->VSGetConstantBuffers(0,1,&oldConstants);
+            f.backend.bindRigidMeshVertices(riverMesh);
+            f.backend.bindChocolateMeshDeclaration(riverMesh);
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
+            context->VSSetShader(chocolateVS.Get(),nullptr,0);
+            auto* cb=chocolateConstants.Get();context->VSSetConstantBuffers(0,1,&cb);
+            context->GSSetShader(chocolateGS.Get(),nullptr,0);context->PSSetShader(nullptr,nullptr,0);
+            auto* output=out.Get();context->SOSetTargets(1,&output,&zero);
+            context->Draw(UINT(river.size()),0);
+            context->SOSetTargets(0,nullptr,nullptr);context->CopyResource(staging.Get(),out.Get());
+            D3D11_MAPPED_SUBRESOURCE chocolateMapped{};
+            hr(context->Map(staging.Get(),0,D3D11_MAP_READ,0,&chocolateMapped),"Chocolate UV stream readback");
+            std::vector<float> chocolateActual(river.size()*4);
+            std::memcpy(chocolateActual.data(),chocolateMapped.pData,river.size()*uvStride);
+            context->Unmap(staging.Get(),0);
+            for(size_t i=0;i<river.size();++i)for(size_t lane=0;lane<4;++lane) {
+                const float expected=river[i].uv[lane&1];
+                require(std::bit_cast<uint32_t>(chocolateActual[i*4+lane])==std::bit_cast<uint32_t>(expected),
+                    "Chocolate VS sampled constant UV1 instead of varying UV0");
+            }
+            cb=oldConstants.Get();context->VSSetConstantBuffers(0,1,&cb);
+        }
+        context->VSSetShader(oldVS.Get(),nullptr,0);context->GSSetShader(oldGS.Get(),nullptr,0);context->PSSetShader(oldPS.Get(),nullptr,0);
+        context->IASetInputLayout(oldLayout.Get());context->IASetPrimitiveTopology(oldTopology);
     }
-    context->VSSetShader(oldVS.Get(),nullptr,0);context->GSSetShader(oldGS.Get(),nullptr,0);context->PSSetShader(oldPS.Get(),nullptr,0);
-    context->IASetInputLayout(oldLayout.Get());context->IASetPrimitiveTopology(oldTopology);
     // The deferred recording path accepts the same explicit declaration.
     auto payload=f.begin();
     f.backend.bindRigidMeshVertices(payload,mesh);f.backend.bindRigidNormalMeshDeclaration(payload,mesh);f.backend.bindRigidMeshIndices(payload,mesh);
@@ -972,12 +1042,56 @@ void direct(const std::vector<uint8_t>& image,bool hardware) {
     std::printf("PASS rigid direct mesh %s: %llu real direct draws; immutable commits, exact color/depth/stencil, state restoration and rejection ownership\n",
         hardware?"hardware":"WARP",static_cast<unsigned long long>(f.backend.rigidMeshDrawCount()));
 }
-void uploadCacheReuse(bool hardware) {
+void ownedUploadChecks(bool hardware) {
+    runOwnedMeshCacheChecks(require);
     NativeBackend backend(!hardware);
+    const auto input=geometry();
+    const std::vector<RigidVertex> expected(input.begin(),input.end());
+    const std::vector<uint16_t> expectedIndices(strip.begin(),strip.end());
+    auto vertices=expected;auto indices=expectedIndices;
+    auto mesh=backend.uploadRigidMeshOwned(vertices,indices);
+    require(vertices.empty()&&indices==expectedIndices,"Owned rigid miss did not consume only vertices");
+    vertices.assign(expected.begin(),expected.end());vertices[0].uv[0]+=2;indices[0]=3;
+    require(backend.uploadRigidMesh(expected,expectedIndices)==mesh,"Owned rigid exact bytes missed legacy lookup");
+    const auto read=backend.readbackRigidMeshVertices(mesh);
+    require(read.size()==expected.size()&&!std::memcmp(read.data(),expected.data(),expected.size()*sizeof(RigidVertex))&&
+            backend.readbackRigidMeshIndices(mesh)==expectedIndices,"Owned rigid upload changed immutable GPU bytes");
+    auto hit=expected;const auto* hitPointer=hit.data();
+    require(backend.uploadRigidMeshOwned(hit,expectedIndices)==mesh&&hit.data()==hitPointer&&
+            !std::memcmp(hit.data(),expected.data(),expected.size()*sizeof(RigidVertex)),"Owned rigid hit consumed caller vertices");
+    auto bad=expected;bad[0].position[0]=std::numeric_limits<float>::quiet_NaN();const auto* badPointer=bad.data();bool rejected=false;
+    try{backend.uploadRigidMeshOwned(bad,expectedIndices);}catch(const Error&){rejected=true;}
+    require(rejected&&bad.data()==badPointer&&bad.size()==expected.size()&&std::isnan(bad[0].position[0]),
+            "Owned rigid rejection consumed caller vertices");
+    auto wrongThread=expected;const auto* threadPointer=wrongThread.data();bool ownerRejected=false;
+    std::thread probe([&]{try{backend.uploadRigidMeshOwned(wrongThread,expectedIndices);}catch(const Error&){ownerRejected=true;}});
+    probe.join();require(ownerRejected&&wrongThread.data()==threadPointer&&wrongThread.size()==expected.size(),
+                        "Owned rigid thread rejection consumed vertices");
+    NativeBackend foreign(!hardware);auto foreignVertices=expected;
+    const auto foreignMesh=foreign.uploadRigidMeshOwned(foreignVertices,expectedIndices);rejected=false;
+    try{backend.bindRigidMeshVertices(foreignMesh);}catch(const Error&){rejected=true;}
+    require(rejected&&foreignVertices.empty(),"Owned rigid device isolation changed");
+    NativeRecordingProbe::resetMeshCache(backend);
+    const auto retained=backend.readbackRigidMeshVertices(mesh);
+    require(retained.size()==expected.size()&&!std::memcmp(retained.data(),expected.data(),expected.size()*sizeof(RigidVertex)),
+            "Owned cache reset invalidated live rigid GPU owner");
+    auto replacement=expected;
+    require(backend.uploadRigidMeshOwned(replacement,expectedIndices)!=mesh&&replacement.empty(),
+            "Owned rigid cache reset reused retired cache ownership");
+}
+void uploadCacheReuse(bool hardware) {
+    ownedUploadChecks(hardware);
+    NativeBackend backend(!hardware);
+    installD3DCallStats(NativeRecordingProbe::immediate(backend),NativeRecordingProbe::device(backend));
+    const auto adapterCounts=[] {return std::array<uint64_t,2>{gD3DDeviceCounts[11],gD3DDeviceCounts[15]};};
+    const auto beforeFirst=adapterCounts();
     const auto base = geometry();
     std::vector<RigidVertex> vv(base.begin(), base.end());
     std::vector<uint16_t> ii(strip.begin(), strip.end());
     auto first = backend.uploadRigidMesh(vv, ii);
+    const auto afterFirst=adapterCounts();
+    require(afterFirst[0]-beforeFirst[0]==5&&afterFirst[1]-beforeFirst[1]==22,
+            "Rigid first mesh did not create exactly one complete five-layout/22-pixel adapter pack");
     require(backend.uploadRigidMesh(vv, ii).get() == first.get(), "Rigid repeat upload did not reuse exact bytes");
     // Same content at a different guest address must still hit (never by pointer).
     std::vector<RigidVertex> vvAlias = vv;
@@ -988,7 +1102,9 @@ void uploadCacheReuse(bool hardware) {
     const std::vector<RigidVertex> origV = vv;
     const std::vector<uint16_t> origI = ii;
     vv[0].uv[0] += 0.5f;
+    const auto beforeChanged=adapterCounts();
     require(backend.uploadRigidMesh(vv, ii).get() != first.get(), "Rigid single-float change incorrectly hit");
+    require(adapterCounts()==beforeChanged,"Changed rigid geometry recreated fixed input layouts or pixel adapters");
     require(backend.uploadRigidMesh(origV, origI).get() == first.get(), "Rigid original bytes missed after caller mutation");
     const auto snapshot = backend.readbackRigidMeshVertices(first);
     require(snapshot.size() == origV.size() &&
@@ -1011,7 +1127,11 @@ void uploadCacheReuse(bool hardware) {
     require(backend.uploadRigidMesh(origV, origI).get() == first.get(), "Rigid valid bytes missed after invalid rejections");
     // Device isolation: no static global, no cross-device hits.
     NativeBackend foreign(!hardware);
+    const auto beforeForeign=adapterCounts();
     auto foreignMesh = foreign.uploadRigidMesh(origV, origI);
+    const auto afterForeign=adapterCounts();
+    require(afterForeign[0]-beforeForeign[0]==5&&afterForeign[1]-beforeForeign[1]==22,
+            "Distinct backend/device reused a foreign rigid adapter pack");
     require(foreignMesh.get() != first.get(), "Rigid cross-device hit");
     rejected = false;
     try {
@@ -1021,8 +1141,8 @@ void uploadCacheReuse(bool hardware) {
     }
     require(rejected, "Rigid foreign mesh bound on local device");
     require(backend.uploadRigidMesh(origV, origI).get() == first.get(), "Rigid local hit lost after foreign upload");
-    // Deterministic device replacement through the fixture: both the stale
-    // handle bind and the exact-byte reupload must reject via State::validate.
+    // Actual device replacement resets the content cache and adapter pack.
+    // Existing handles remain pinned to their original device and still reject.
     auto stale = first;
     ID3D11Device* beforeDevice = NativeRecordingProbe::device(backend);
     NativeRecordingProbe::replaceDevice(backend, hardware);
@@ -1034,13 +1154,21 @@ void uploadCacheReuse(bool hardware) {
         rejected = std::string(e.what()).find("another backend") != std::string::npos;
     }
     require(rejected, "Rigid stale mesh survived a device replacement");
-    rejected = false;
-    try {
-        backend.uploadRigidMesh(origV, origI);
-    } catch (const Error& e) {
-        rejected = std::string(e.what()).find("another backend") != std::string::npos;
-    }
-    require(rejected, "Rigid cached reupload accepted stale device bytes");
+    const auto beforeReplacement=adapterCounts();
+    const auto rebuilt=backend.uploadRigidMesh(origV,origI);
+    const auto afterReplacement=adapterCounts();
+    require(rebuilt!=stale&&afterReplacement[0]-beforeReplacement[0]==5&&afterReplacement[1]-beforeReplacement[1]==22,
+            "Replacement device failed to create its own complete rigid adapter pack");
+    backend.bindRigidMeshVertices(rebuilt);backend.bindRigidMeshDeclaration(rebuilt);
+    ComPtr<ID3D11InputLayout> actualLayout;
+    NativeRecordingProbe::immediate(backend)->IAGetInputLayout(&actualLayout);
+    ComPtr<ID3D11Device> layoutDevice;actualLayout->GetDevice(&layoutDevice);
+    require(layoutDevice.Get()==NativeRecordingProbe::device(backend),"Replacement rigid layout belongs to the old device");
+    auto changedAfterReplacement=origV;changedAfterReplacement[0].uv[0]+=0.25f;
+    const auto beforeReplacementChange=adapterCounts();
+    require(backend.uploadRigidMesh(changedAfterReplacement,origI)!=rebuilt,
+            "Replacement rigid mesh ignored changed source bytes");
+    require(adapterCounts()==beforeReplacementChange,"Replacement rigid geometry recreated its device adapter pack");
     // Owner isolation: a different thread must fail owner checks, never hit.
     bool ownerRejected = false;
     std::thread probe([&] {
@@ -1052,6 +1180,95 @@ void uploadCacheReuse(bool hardware) {
     });
     probe.join();
     require(ownerRejected, "Rigid cross-thread upload bypassed owner checks");
+}
+// Verify actual native descriptors against the qualified per-draw creation
+// profile. GetDesc normalization is identical on both real D3D objects.
+void samplerDescriptor(ID3D11Device* device,ID3D11SamplerState* cached,const D3D11_SAMPLER_DESC& input,const char* message) {
+    ComPtr<ID3D11SamplerState> original;hr(device->CreateSamplerState(&input,&original),"Original uncached sampler profile");
+    D3D11_SAMPLER_DESC actual{},expected{};cached->GetDesc(&actual);original->GetDesc(&expected);
+    require(!std::memcmp(&actual,&expected,sizeof(actual)),message);
+}
+void recordedStateDescriptors(NativeBackend& backend,const RigidMeshDraw& d) {
+    const auto objects=NativeRecordingProbe::recordedStates(backend,d);auto* device=NativeRecordingProbe::device(backend);
+    const auto owned=[&](ID3D11DeviceChild* child){ComPtr<ID3D11Device> actual;child->GetDevice(&actual);
+        require(actual.Get()==device,"Recorded scene state belongs to another device");};
+    owned(objects.depth.Get());owned(objects.blend.Get());owned(objects.raster.Get());owned(objects.sampler.Get());owned(objects.constants.Get());
+    D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthEnable=d.depthEnable;dd.DepthWriteMask=d.depthWrite?D3D11_DEPTH_WRITE_MASK_ALL:D3D11_DEPTH_WRITE_MASK_ZERO;
+    dd.DepthFunc=D3D11_COMPARISON_FUNC(d.depthCompare+1);
+    dd.FrontFace={D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_COMPARISON_ALWAYS};dd.BackFace=dd.FrontFace;
+    ComPtr<ID3D11DepthStencilState> originalDepth;hr(device->CreateDepthStencilState(&dd,&originalDepth),"Original recorded depth profile");
+    D3D11_DEPTH_STENCIL_DESC actualDepth{},expectedDepth{};objects.depth->GetDesc(&actualDepth);originalDepth->GetDesc(&expectedDepth);
+    require(!std::memcmp(&actualDepth,&expectedDepth,sizeof(actualDepth)),"Recorded cached depth descriptor changed");
+    D3D11_BLEND_DESC bd{};auto& color=bd.RenderTarget[0];color.RenderTargetWriteMask=UINT8(d.colorMask);color.BlendEnable=d.blendEnable;
+    if(d.blendWord==0x07060706){color.SrcBlend=color.SrcBlendAlpha=D3D11_BLEND_SRC_ALPHA;color.DestBlend=color.DestBlendAlpha=D3D11_BLEND_INV_SRC_ALPHA;}
+    else{color.SrcBlend=color.SrcBlendAlpha=D3D11_BLEND_ONE;color.DestBlend=color.DestBlendAlpha=D3D11_BLEND_ZERO;}
+    color.BlendOp=color.BlendOpAlpha=D3D11_BLEND_OP_ADD;
+    ComPtr<ID3D11BlendState> originalBlend;hr(device->CreateBlendState(&bd,&originalBlend),"Original recorded blend profile");
+    D3D11_BLEND_DESC actualBlend{},expectedBlend{};objects.blend->GetDesc(&actualBlend);originalBlend->GetDesc(&expectedBlend);
+    require(!std::memcmp(&actualBlend,&expectedBlend,sizeof(actualBlend)),"Recorded cached blend descriptor changed");
+    D3D11_RASTERIZER_DESC rd{};rd.FillMode=D3D11_FILL_SOLID;rd.CullMode=d.cull==0?D3D11_CULL_NONE:D3D11_CULL_BACK;
+    rd.FrontCounterClockwise=d.cull==2;rd.ScissorEnable=d.scissorEnable;rd.DepthClipEnable=TRUE;rd.MultisampleEnable=TRUE;
+    ComPtr<ID3D11RasterizerState> originalRaster;hr(device->CreateRasterizerState(&rd,&originalRaster),"Original recorded raster profile");
+    D3D11_RASTERIZER_DESC actualRaster{},expectedRaster{};objects.raster->GetDesc(&actualRaster);originalRaster->GetDesc(&expectedRaster);
+    require(!std::memcmp(&actualRaster,&expectedRaster,sizeof(actualRaster)),"Recorded cached raster descriptor changed");
+    samplerDescriptor(device,objects.sampler.Get(),d.samplers[0],"Recorded cached shadow sampler descriptor changed");
+    D3D11_BUFFER_DESC descriptor{};objects.constants->GetDesc(&descriptor);
+    require(descriptor.ByteWidth==16&&descriptor.Usage==D3D11_USAGE_IMMUTABLE&&descriptor.BindFlags==D3D11_BIND_CONSTANT_BUFFER&&
+        !descriptor.CPUAccessFlags&&!descriptor.MiscFlags&&!descriptor.StructureByteStride,"Recorded depth constants backing changed");
+    descriptor.Usage=D3D11_USAGE_STAGING;descriptor.BindFlags=0;descriptor.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Buffer> staging;hr(device->CreateBuffer(&descriptor,nullptr,&staging),"Recorded depth constants readback");
+    auto* immediate=NativeRecordingProbe::immediate(backend);immediate->CopyResource(staging.Get(),objects.constants.Get());
+    D3D11_MAPPED_SUBRESOURCE mapped{};hr(immediate->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped),"Recorded depth constants map");
+    const std::array<uint32_t,4> expected={uint32_t(d.viewport[4]==0x3F800000&&d.viewport[5]==0),d.depthBiasBits,d.slopeBiasBits,0};
+    const bool exact=mapped.pData&&mapped.RowPitch>=16&&!std::memcmp(mapped.pData,expected.data(),16);immediate->Unmap(staging.Get(),0);
+    require(exact,"Recorded depth constants changed exact float bits or reserved word");
+}
+void recordedStateReuse(const std::vector<uint8_t>& image,bool hardware) {
+    // Call counters hook the ordinary device vtable; other fixtures retain the
+    // debug layer and independently cover every direct/recorded pixel profile.
+    Fixture f(image,hardware,false,false,false,false,false,false,false,false,false);
+    auto mesh=f.backend.uploadRigidMesh(geometry(),strip);auto payload=f.begin();
+    const auto counts=[] {return std::array<uint64_t,5>{gD3DDeviceCounts[3],gD3DDeviceCounts[20],gD3DDeviceCounts[21],gD3DDeviceCounts[22],gD3DDeviceCounts[23]};};
+    const auto difference=[](const auto& after,const auto& before){auto result=after;for(size_t i=0;i<result.size();++i)result[i]-=before[i];return result;};
+    auto before=counts();f.record(payload,mesh,f.vc,f.material(64),f.draw);
+    require(difference(counts(),before)==std::array<uint64_t,5>{3,1,1,1,1},"First recorded draw did not create one immutable scene profile and two private mutable banks");
+    auto right=f.draw;right.startIndex=5;before=counts();f.record(payload,mesh,f.vc,f.material(512),right);
+    require(difference(counts(),before)==std::array<uint64_t,5>{2,0,0,0,0},"Repeated recorded draw recreated immutable states, constants or samplers");
+    f.backend.finishRecordingPayload(payload);recordedStateDescriptors(f.backend,f.draw);
+    f.clear();f.execute(payload);f.pixels([](UINT x,UINT){return packed(x<8?64:512,1);},[](UINT,UINT){return .5f;});
+    auto changed=f.draw;changed.depthCompare=3;changed.cull=2;changed.scissorEnable=1;changed.colorMask=7;
+    changed.blendEnable=1;changed.blendWord=0x07060706;changed.depthBiasBits=0x80000000; // Preserve signed zero in immutable constants.
+    auto other=f.begin();before=counts();f.record(other,mesh,f.vc,f.material(91),changed);
+    require(difference(counts(),before)==std::array<uint64_t,5>{3,1,1,1,0},"Changed recorded descriptor incorrectly reused a different scene profile");
+    f.backend.finishRecordingPayload(other);recordedStateDescriptors(f.backend,changed);
+    f.backend.releaseRecordingPayload(other);
+    NativeRecordingProbe::resetSceneCache(f.backend);f.clear();f.execute(payload);
+    f.pixels([](UINT x,UINT){return packed(x<8?64:512,1);},[](UINT,UINT){return .5f;});
+    auto rebuilt=f.begin();before=counts();f.record(rebuilt,mesh,f.vc,f.material(32),f.draw);
+    require(difference(counts(),before)==std::array<uint64_t,5>{3,1,1,1,1},"Dropped scene cache failed to recreate its own immutable profile");
+    f.backend.finishRecordingPayload(rebuilt);f.backend.releaseRecordingPayload(rebuilt);
+    f.backend.releaseRecordingPayload(payload);f.backend.releaseRecordingContext(f.recording);f.backend.releaseRigidReplayConstants(f.live);
+    NativeBackend foreign(!hardware);before=counts();auto foreignStates=NativeRecordingProbe::recordedStates(foreign,f.draw);
+    require(difference(counts(),before)==std::array<uint64_t,5>{1,1,1,1,1},"Distinct backend reused another recorded scene profile");
+    recordedStateDescriptors(foreign,f.draw);auto* oldDevice=NativeRecordingProbe::device(foreign);
+    NativeRecordingProbe::replaceDevice(foreign,hardware);require(oldDevice!=NativeRecordingProbe::device(foreign),"Recorded scene device replacement did not occur");
+    before=counts();auto replaced=NativeRecordingProbe::recordedStates(foreign,f.draw);
+    require(difference(counts(),before)==std::array<uint64_t,5>{1,1,1,1,1},"Replaced device reused old recorded scene objects");
+    recordedStateDescriptors(foreign,f.draw);
+    ComPtr<ID3D11Device> retainedDevice;foreignStates.constants->GetDevice(&retainedDevice);
+    require(retainedDevice.Get()==oldDevice&&replaced.constants.Get()!=foreignStates.constants.Get(),"Replacement mutated a retained immutable depth owner");
+    Fixture noise(image,hardware,true,false,true,false,false,false,false,false,false);
+    auto noiseMesh=noise.backend.uploadRigidMesh(geometry(),strip);auto& sampler=noise.draw.baseSampler;
+    sampler.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D11_TEXTURE_ADDRESS_WRAP;
+    sampler.MaxAnisotropy=1;sampler.MaxLOD=13;sampler.ComparisonFunc=D3D11_COMPARISON_NEVER;noise.draw.noiseSampler=sampler;
+    const std::array<uint8_t,4> rgba={64,96,128,255};noise.draw.baseTexture=noise.backend.createTexture(1,1,TextureFormat::RGBA8,rgba);
+    noise.draw.noiseTexture=noise.backend.createTexture(1,1,TextureFormat::RGBA8,rgba);auto noisy=noise.begin();
+    noise.record(noisy,noiseMesh,noise.vc,noise.pc,noise.draw);before=counts();noise.record(noisy,noiseMesh,noise.vc,noise.pc,noise.draw);
+    require(difference(counts(),before)==std::array<uint64_t,5>{2,0,0,0,0},"Repeated recorded multitone draw recreated noise or shadow sampler");
+    auto noiseSampler=NativeRecordingProbe::sampler(noise.backend,noise.draw.noiseSampler);
+    samplerDescriptor(NativeRecordingProbe::device(noise.backend),noiseSampler.Get(),noise.draw.noiseSampler,"Recorded cached noise sampler descriptor changed");
+    noise.backend.finishRecordingPayload(noisy);noise.backend.releaseRecordingPayload(noisy);noise.backend.releaseRecordingContext(noise.recording);
+    noise.backend.releaseRigidReplayConstants(noise.live);
 }
 void run(const std::vector<uint8_t>& image,bool hardware) {
     Fixture f(image,hardware);const auto raw=geometry();auto mesh=f.backend.uploadRigidMesh(raw,strip);
@@ -1293,5 +1510,5 @@ int main(int argc,char** argv)try {
     SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);
     require(argc==2||(argc==3&&std::string(argv[2])=="--hardware"),"Supply analysis/simpsons.pe and optional --hardware");
     std::ifstream input(argv[1],std::ios::binary);const std::vector<uint8_t> image((std::istreambuf_iterator<char>(input)),{});
-    require(image.size()==15466496,"Original flat image size differs");chocolateBindings(image);uploadCacheReuse(argc==3);run(image,argc==3);direct(image,argc==3);textured(image,argc==3);gloss(image,argc==3);multitone(image,argc==3);tangent(image,argc==3);rigidAlpha(image,argc==3);inheritedOpaque(image,argc==3);largeOwner(image,argc==3);stripBoundary(image,argc==3);vfxRigid(image,argc==3);animatedUv(image,argc==3);singleAnimatedUv(image,argc==3);flipbookVariants(image,argc==3);requireMeshGpuRetirements([](bool value,const char* message){require(value,message);});return 0;
+    require(image.size()==15466496,"Original flat image size differs");chocolateBindings(image);uploadCacheReuse(argc==3);recordedStateReuse(image,argc==3);run(image,argc==3);direct(image,argc==3);textured(image,argc==3);gloss(image,argc==3);multitone(image,argc==3);tangent(image,argc==3);rigidAlpha(image,argc==3);inheritedOpaque(image,argc==3);largeOwner(image,argc==3);stripBoundary(image,argc==3);vfxRigid(image,argc==3);animatedUv(image,argc==3);singleAnimatedUv(image,argc==3);flipbookVariants(image,argc==3);liveRerecord(image,argc==3);requireMeshGpuRetirements([](bool value,const char* message){require(value,message);});return 0;
 }catch(const std::exception& error){std::fprintf(stderr,"FAIL rigid recorded mesh after %zu checks: %s\n",rigidChecks,error.what());return 1;}

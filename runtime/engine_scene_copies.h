@@ -6,7 +6,7 @@
 struct PPCContext;
 namespace Simpsons {
 class Runtime;
-namespace Graphics {class NativeBackend;class RenderTarget;}
+namespace Graphics {class NativeBackend;class RenderTarget;class NativeCopySubmission;}
 // Two original global RGB10A2 camera-copy destinations. Shader sampling and
 // attachment binding require separate qualification; allocation does not draw.
 class EngineSceneCopies {
@@ -27,7 +27,7 @@ public:
     void requireReleased() const;
 private:
     friend class EngineDriver;
-    void copied(uint32_t id,uint32_t camera);
+    void copied(uint32_t id,uint32_t camera,std::shared_ptr<Graphics::NativeCopySubmission> actualCopy);
     struct State;std::unique_ptr<State> state;
 };
 }

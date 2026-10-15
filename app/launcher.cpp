@@ -388,6 +388,47 @@ void copyPrivateStores(const GamePaths& source, const PrivateRun& run) {
     }
 }
 
+// Normal launches first copy the real profile, saves and native settings to
+// save-backups\Saves-<UTC time>, keeping the newest `keep` copies. Only
+// folders this launcher names Saves-* are ever rotated out.
+constexpr size_t kSaveBackups = 20;
+fs::path backupSaves(const GamePaths& source, const SYSTEMTIME& time, size_t keep = kSaveBackups) {
+    rejectReparseAncestors(source.profileStore);
+    rejectReparseAncestors(source.contentStore);
+    const auto parent = source.root / L"save-backups";
+    ensureDirectory(parent);
+    rejectReparseAncestors(parent);
+    fs::path directory;
+    for (unsigned int sequence = 0; sequence < 10000 && directory.empty(); ++sequence) {
+        const auto candidate = parent / (L"Saves-" + logStem(time).substr(9) + L"-" + padded(sequence, 4));
+        if (CreateDirectoryW(win32Path(candidate).c_str(), nullptr)) directory = candidate;
+        else if (const DWORD error = GetLastError(); error != ERROR_ALREADY_EXISTS) failWindows(L"Could not create a save backup folder", error);
+    }
+    if (directory.empty()) throw Failure{L"Could not choose a new save backup folder."};
+    copySourceTree(source.profileStore, directory / L"profile");
+    copySourceTree(source.contentStore, directory / L"content");
+    for (const wchar_t* suffix : {L".video.cfg", L".controls.cfg", L".audio.cfg"}) {
+        auto setting = source.profileStore;
+        setting += suffix;
+        if (GetFileAttributesW(win32Path(setting).c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+        sourceAttributes(setting);
+        auto copied = directory / L"profile";
+        copied += suffix;
+        copySourceFile(setting, copied);
+    }
+    std::vector<fs::path> backups;
+    std::error_code error;
+    fs::directory_iterator entries(fs::path(win32Path(parent)), error), end;
+    while (!error && entries != end) {
+        const auto name = entries->path().filename().native();
+        if (name.starts_with(L"Saves-") && entries->is_directory(error)) backups.push_back(parent / name);
+        entries.increment(error);
+    }
+    std::sort(backups.begin(), backups.end());
+    for (size_t i = 0; i + keep < backups.size(); ++i) fs::remove_all(fs::path(win32Path(backups[i])), error);
+    return directory;
+}
+
 fs::path latestLog(const fs::path& directory) {
     fs::path latest;
     std::error_code error;
@@ -516,6 +557,16 @@ PreparedLaunch prepareLaunch(const GamePaths& source, LaunchMode mode, const SYS
     auto log = createLog(launchPaths.logs, time);
     if (mode == LaunchMode::StallProfile)
         writeText(log.handle.get(), L"Runtime stall profiling launch. SIMPSONS_STALL_PROFILE=1 for this game process.\r\n");
+    if (!privateRun) {
+        // A failed backup is reported but never blocks playing.
+        try {
+            writeText(log.handle.get(), L"Save backup: " + backupSaves(source, time).native() + L"\r\n");
+        } catch (const Failure& failure) {
+            writeText(log.handle.get(), L"Save backup failed (the game still starts):\r\n" + failure.message + L"\r\n");
+        } catch (...) {
+            writeText(log.handle.get(), L"Save backup failed unexpectedly (the game still starts).\r\n");
+        }
+    }
     if (privateRun) {
         const auto label = mode == LaunchMode::BartmanBegins ? L"Bartman Begins direct launch." : L"First-mission completion launch.";
         writeText(log.handle.get(), std::wstring(label) + L" Original stores remain unchanged.\r\n"
@@ -796,6 +847,30 @@ int selfTest() {
         auto completionLaunch = prepareLaunch(paths, LaunchMode::FirstMissionCompletion, time);
         require(completionLaunch.paths.profileStore != paths.profileStore && completionLaunch.paths.contentStore != paths.contentStore &&
             regularFile(completionLaunch.log.path), L"direct completion launch preparation did not isolate stores or create its log");
+        // Normal and profiling launches back up the real stores; private mission runs do not.
+        const auto backupParent = root / L"save-backups";
+        const auto listBackups = [&] {
+            std::vector<fs::path> found;
+            for (const auto& entry : fs::directory_iterator(fs::path(win32Path(backupParent))))
+                if (entry.path().filename().native().starts_with(L"Saves-")) found.push_back(backupParent / entry.path().filename());
+            std::sort(found.begin(), found.end());
+            return found;
+        };
+        const auto backups = listBackups();
+        require(backups.size() == 2, L"normal and profiling launches did not each back up the saves");
+        for (const auto& backup : backups) {
+            auto backupVideo = backup / L"profile";
+            backupVideo += L".video.cfg";
+            require(fixtureContents(backup / L"profile" / sourceProfile.filename()) == "profile source bytes" &&
+                fixtureContents(backup / L"content" / sourceSave.lexically_relative(paths.contentStore)) == "save source bytes" &&
+                fixtureContents(backup / L"content" / longRelative) == "long source save bytes" &&
+                fixtureContents(backupVideo) == "video source bytes", L"save backup bytes differ");
+        }
+        require(fixtureContents(normalLaunch.log.path).find("Save backup:") != std::string::npos, L"normal launch log lacks its save backup");
+        ensureDirectory(backupParent / L"user-kept");
+        for (int i = 0; i < 3; ++i) backupSaves(paths, time, 2);
+        require(listBackups().size() == 2 && fs::exists(fs::path(win32Path(backupParent / L"user-kept"))),
+            L"save backup rotation kept the wrong folders");
         require(fixtureContents(completionLaunch.paths.profileStore / sourceProfile.filename()) == "profile source bytes" &&
             fixtureContents(completionLaunch.paths.contentStore / sourceSave.lexically_relative(paths.contentStore)) == "save source bytes",
             L"direct completion launch preparation did not copy the selected profile/save");

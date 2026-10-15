@@ -1,6 +1,9 @@
 #include "runtime.h"
 #include "frame_timing.h"
+#include "pacing_trace.h"
 #include "stall_profiler.h"
+#include "native_window.h"
+#include <dwmapi.h>
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -42,10 +45,20 @@ void SimpsonsNativeGameplayClockInitialize(PPCContext& ctx,uint8_t* base) {
 void SimpsonsNativeGameplayClockSample(PPCContext& ctx,uint8_t* base) {
     // This runs before the original enabled check, so disabled updates cannot
     // accumulate a backlog to replay when gameplay resumes.
-    auto& clock=gameplayRuntime(base).gameplayTiming;
+    auto& rt=gameplayRuntime(base);auto& clock=rt.gameplayTiming;
     if(ctx.r30.u32!=PPCLoadU32(base,0x82D572D0))
         throw Simpsons::Failure("Native gameplay clock update owner mismatch");
-    clock.sample(ctx.r30.u32,PPCQueryTimebase());
+    // While the native limiter paces this thread, the update is timed for the
+    // release (or vblank) it will be shown at, so dt equals the displayed interval.
+    static const bool predict=[]{const char* text=std::getenv("SIMPSONS_PACE_PREDICT");return !text || *text!='0';}();
+    const uint64_t previous=clock.previousTimebase,real=PPCQueryTimebase();
+    uint64_t now=real;
+    if(predict && rt.pacingFrameRate && rt.pacingThread==GetCurrentThreadId())now=rt.framePacer.predict(real);
+    // A predicted sample can lead real time by up to a refresh plus the lead. When
+    // pacing stops (Unlimited, or a reset) the next real sample must not step back.
+    if(now-previous>=(uint64_t(1)<<63))now=previous;
+    clock.sample(ctx.r30.u32,now);
+    Simpsons::PacingTrace::instance().clockSample(real,now,now-previous);
     Simpsons::firstMissionCompletionFrame(ctx,base);
 }
 void SimpsonsNativeGameplayClockReset(PPCContext&,uint8_t* base) {
@@ -62,6 +75,7 @@ void SimpsonsNativeGameplayClockAdvance(PPCContext& ctx,uint8_t* base) {
     const auto maxRefreshes=std::max(PPCLoadU32(base,0x82CED740),1u);
     const auto previousMs=uint64_t(clock.totalSeconds*1000.0+0.5);
     const double step=clock.advance(double(maxRefreshes)*refreshMs/1000.0);
+    Simpsons::PacingTrace::instance().clockStep(step);
     const auto storeFloat=[&](uint32_t address,double value) {
         PPCStoreU32(base,address,std::bit_cast<uint32_t>(float(value)));
     };
@@ -119,58 +133,141 @@ void SimpsonsNativeFrameSchedulerConfigure(PPCContext& ctx,uint8_t* base) {
     if(!Simpsons::NativeVideoSettings::validFrameRate(rt->requestedFrameRate))throw Simpsons::Failure("Invalid native frame rate");
     if(uint32_t(ctx.lr)!=0x82867A78 || ctx.r4.u32!=2)
         throw Simpsons::Failure("Native frame rate requires the original two-interval scheduler constructor");
-    if(rt->requestedFrameRate!=60) {
-        // Native presentation pacing expresses these limits independently of
-        // the original integer-refresh scheduler and the display refresh rate.
-        ctx.r4.u64=0;
-        std::fprintf(stderr,"[NATIVE FRAME RATE] original scheduler bypassed with native %.6gms floor (%u FPS target; real dt preserved)\n",1000.0/rt->requestedFrameRate,rt->requestedFrameRate);
-        return;
-    }
-    ctx.r4.u64=1;
-    std::fprintf(stderr,"[NATIVE FRAME RATE] original scheduler configured for one refresh interval (60 FPS target)\n");
+    // All explicit caps, including 60 FPS, share the same high-resolution native
+    // limiter. The original loop quantizes refresh intervals and repeatedly
+    // yields before spinning; it must not add another wait after presentation.
+    ctx.r4.u64=0;
+    std::fprintf(stderr,"[NATIVE FRAME RATE] original scheduler bypassed with native %.6gms floor (%u FPS target; real dt preserved)\n",1000.0/rt->requestedFrameRate,rt->requestedFrameRate);
+}
+namespace {
+uint64_t qpcToTimebase(uint64_t qpc) {
+    static const uint64_t frequency=[]{LARGE_INTEGER value{};QueryPerformanceFrequency(&value);return uint64_t(value.QuadPart);}();
+    if(!frequency)return 0;
+    return qpc/frequency*Simpsons::Runtime::timebaseFrequency+qpc%frequency*Simpsons::Runtime::timebaseFrequency/frequency;
+}
+// The display's vblank grid from DWM composition timing: its refresh period and the
+// latest vblank, re-read every frame (about one microsecond). Empty when unavailable.
+// https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/nf-dwmapi-dwmgetcompositiontiminginfo
+Simpsons::RefreshGrid displayRefreshGrid() {
+    DWM_TIMING_INFO info{};info.cbSize=sizeof(info);
+    if(FAILED(DwmGetCompositionTimingInfo(nullptr,&info)) || !info.qpcRefreshPeriod || !info.qpcVBlank)return {};
+    const uint64_t period=qpcToTimebase(info.qpcRefreshPeriod);
+    // 20-500 Hz; anything else is not a display refresh this limiter can lock to.
+    if(period<Simpsons::Runtime::timebaseFrequency/500 || period>Simpsons::Runtime::timebaseFrequency/20)return {};
+    return {qpcToTimebase(info.qpcVBlank),period};
+}
 }
 // Native limiter with an even cadence (see frame_pacer.h). Called at present
 // entry, before the present is submitted: planned releases are separated by the
 // selected interval, or a high percentile of recent natural frame times when the
-// machine cannot sustain the limit. A timer overshoot can shorten the next actual
-// interval as the planned cadence catches up. (The old
+// machine cannot sustain the limit. Actual wake timestamps prevent a late timer
+// from shortening the next interval or entering the workload history. (The old
 // version slept after submission, measured from this present's own entry, which added
-// the whole floor to every frame.) Guest clocks, scheduler requests and simulation dt
-// are untouched; only the owner thread waits, on a high-resolution timer with a
-// processor-yield tail. SIMPSONS_PACE_PERCENTILE (50-100, default 85) tunes the target.
+// the whole floor to every frame.) With VSync, a cap at or above the display refresh
+// (or a whole multiple of its period) locks releases to the display's vblank grid
+// instead of a free-running clock. Guest clocks and scheduler requests are untouched;
+// the gameplay clock reads predict() for the same releases. Only the owner thread
+// waits: a short wait spins, a longer one sleeps on a high-resolution timer and
+// spins its tail.
+// Diagnostics: SIMPSONS_PACE_PERCENTILE (50-100, default 85) tunes the held target,
+// SIMPSONS_PACE_LOCK=0 disables refresh locking, SIMPSONS_PACE_LEAD_US (default 4500,
+// at most 55% of a refresh) sets the minimum release lead before the targeted vblank,
+// SIMPSONS_PACE_PREDICT=0 times gameplay updates by their real start instead.
 void Simpsons::SimpsonsNativeFramePace(Simpsons::Runtime& runtime) {
-    const uint32_t rate=runtime.requestedFrameRate;
-    if(!rate||!Simpsons::NativeVideoSettings::validFrameRate(rate))throw Simpsons::Failure("Invalid native presentation limit");
+    if(!NativeVideoSettings::validFrameRate(runtime.requestedFrameRate))throw Failure("Invalid native presentation limit");
+    const uint32_t background=runtime.videoSettings.backgroundFrameRate;
+    if(std::find(NativeVideoSettings::backgroundFrameRates.begin(),NativeVideoSettings::backgroundFrameRates.end(),background)==NativeVideoSettings::backgroundFrameRates.end())
+        throw Failure("Invalid native background presentation limit");
+    // The existing diagnostic window mode deliberately never takes focus. Keep
+    // that opt-in measurement path at its requested foreground rate.
+    static const bool diagnosticWindow=[] {
+        const char* value=std::getenv("SIMPSONS_BACKGROUND_WINDOW");return value&&*value&&*value!='0';
+    }();
+    const HWND window=runtime.window?runtime.window->handle():nullptr;
+    const bool foreground=diagnosticWindow || !window || (!IsIconic(window) && GetForegroundWindow()==window);
+    uint32_t rate=effectiveFrameRate(runtime.requestedFrameRate,background,foreground);
+    // Menu frame limit: menus and the pause screen own the visible pointer.
+    const uint32_t menuRate=runtime.videoSettings.menuFrameRate;
+    if(menuRate&&runtime.window&&runtime.window->isMenuMouse())rate=rate?std::min(rate,menuRate):menuRate;
+    if(rate!=runtime.pacingFrameRate) {runtime.framePacer.reset();runtime.pacingFrameRate=rate;}
+    if(!rate)return;
+    runtime.pacingThread=GetCurrentThreadId();
     // Ceiling division keeps the actual limit at or below the selected rate.
     const uint64_t floor=Simpsons::Runtime::timebaseFrequency/rate+
         (Simpsons::Runtime::timebaseFrequency%rate?1:0);
     const uint64_t ceiling=Simpsons::Runtime::timebaseFrequency/10; // A pause or stall never raises the target.
     static const unsigned percentile=[]{const char* text=std::getenv("SIMPSONS_PACE_PERCENTILE");return text?unsigned(std::atoi(text)):85u;}();
+    static const bool lockToRefresh=[]{const char* text=std::getenv("SIMPSONS_PACE_LOCK");return !text || *text!='0';}();
+    // Minimum release lead before the targeted vblank. A present needs ~1.5 ms in the
+    // measured (overlay plane) path; 4.5 ms (at most 55% of a refresh, at least 2 ms) also
+    // absorbs an isolated game frame up to ~3 ms over budget after a quiet stretch,
+    // when the debt-driven part of the lead has expired. SIMPSONS_PACE_LEAD_US overrides.
+    static const long leadOverride=[]{const char* text=std::getenv("SIMPSONS_PACE_LEAD_US");return text?std::clamp(std::atol(text),100L,20000L):0L;}();
+    constexpr uint64_t tickPerUs=Simpsons::Runtime::timebaseFrequency/1000000;
+    const RefreshGrid grid=runtime.vsyncEnabled && lockToRefresh?displayRefreshGrid():RefreshGrid{};
+    const uint64_t minimumLead=leadOverride?uint64_t(leadOverride)*tickPerUs:
+        std::max<uint64_t>(2000*tickPerUs,std::min<uint64_t>(4500*tickPerUs,grid.period*55/100));
     struct PaceTimer {
         HANDLE handle=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_MODIFY_STATE|SYNCHRONIZE);
+        PaceTimer(){if(!handle)handle=CreateWaitableTimerExW(nullptr,nullptr,0,TIMER_MODIFY_STATE|SYNCHRONIZE);}
         ~PaceTimer(){if(handle)CloseHandle(handle);}
-        void sleep100ns(long long units) const {
+        void sleep100ns(long long units,Runtime& owner) const {
             if(units<=0)return;
             if(!handle){Sleep(1);return;} // Older Windows retains a coarser but correct wait.
             LARGE_INTEGER due{};due.QuadPart=-units;
-            if(!SetWaitableTimerEx(handle,&due,0,nullptr,nullptr,nullptr,0))return;
-            if(WaitForSingleObject(handle,1000)!=WAIT_OBJECT_0)return;
+            if(!SetWaitableTimerEx(handle,&due,0,nullptr,nullptr,nullptr,0))throw Failure("Native frame pacing timer could not be armed");
+            const HANDLE waits[]{handle,owner.stopEvent};
+            const DWORD result=WaitForMultipleObjects(owner.stopEvent?2u:1u,waits,FALSE,1000);
+            if(result==WAIT_OBJECT_0+1) {owner.checkRunning();return;}
+            if(result!=WAIT_OBJECT_0)throw Failure("Native frame pacing timer failed to signal");
         }
     };
     thread_local PaceTimer timer;
-    const uint64_t release=runtime.framePacer.release(PPCQueryTimebase(),floor,ceiling,percentile);
+    const uint32_t refreshes=grid.valid()?refreshesPerFrame(floor,grid.period):0;
+    const uint64_t arrival=PPCQueryTimebase();
+    const uint64_t release=refreshes?runtime.framePacer.releaseLocked(arrival,grid,refreshes,minimumLead,ceiling,percentile):
+        runtime.framePacer.release(arrival,floor,ceiling,percentile);
     StallProfiler::Scope paceProfile(StallProfiler::Section::Wait,"SimpsonsNativeFramePace",nullptr,reinterpret_cast<uintptr_t>(timer.handle));
     for(;;) {
+        runtime.checkRunning();
         const uint64_t now=PPCQueryTimebase();
         if(now-release>(~uint64_t(0)>>1))  // Unsigned: now < release (50MHz wrap is still ordered).
         {
             // 50MHz ticks are 20ns; five ticks make one 100ns timer unit.
             const uint64_t remain100ns=(release-now)/5;
-            if(remain100ns>10000)timer.sleep100ns(static_cast<long long>(remain100ns-10000)); // Keep the last 1ms for the yield tail.
-            else if(remain100ns>500)timer.sleep100ns(static_cast<long long>(remain100ns-500));
+            // A high-resolution timer wakes 0.3 ms late (median) and up to ~1.9 ms late
+            // (eight 105 s Medal of Homer runs), so one timer wait ends 2 ms early and the
+            // rest spins; arming a second timer inside the guard would reintroduce that
+            // latency. About once a minute a system-wide stall (seen by a separate
+            // process at the same instant) also held timer expiry back 9-18 ms while
+            // a spinning thread lost under 3 ms, which the release lead absorbs; a wait
+            // short enough to cost little CPU therefore spins without a timer.
+            constexpr uint64_t yieldGuard100ns=20000,spinOnly100ns=25000;
+            if(remain100ns>spinOnly100ns) {
+                timer.sleep100ns(static_cast<long long>(remain100ns-yieldGuard100ns),runtime);
+                if(auto& trace=PacingTrace::instance();trace.enabled())
+                    trace.timerWait(now+(remain100ns-yieldGuard100ns)*5,PPCQueryTimebase());
+            }
             else YieldProcessor();
-        } else return;
+        } else {
+            auto& pacer=runtime.framePacer;
+            pacer.complete(now);
+            if(auto& trace=PacingTrace::instance();trace.enabled())
+                trace.paced(arrival,release,now,pacer.latestInterval(),pacer.latestTarget(),pacer.lead(),
+                    pacer.locked()?(pacer.onSlot()?1u:2u):pacer.held()?3u:0u,grid.period,grid.origin);
+            return;
+        }
     }
+}
+// After a present: DXGI's count for it and the statistics of the latest flip that
+// reached the display. Locked pacing learns its lead from vblanks its frames missed.
+void Simpsons::SimpsonsNativeFramePresented(Runtime& runtime,uint32_t present,bool valid,uint32_t displayedPresent,uint64_t syncQpc) {
+    const uint64_t sync=valid&&syncQpc?qpcToTimebase(syncQpc):0;
+    if(runtime.pacingFrameRate) {
+        runtime.framePacer.submitted(present);
+        if(sync)runtime.framePacer.displayed(displayedPresent,sync);
+    }
+    PacingTrace::instance().displayStatistics(present,sync!=0,displayedPresent,sync);
 }
 // Original82718788 resets the scheduler after Present. Include the preceding
 // native presentation cost in the next deadline by using its real entry time.
@@ -264,10 +361,29 @@ PPC_FUNC(__imp__KeDelayExecutionThread) {
         // The requested zero interval still elapsed; KeDelay reports completion.
         if(uint32_t(status)==0x40000024) status=0;
     } else {
-        static auto wait=service<NtWaitFn>("NtWaitForSingleObject");
-        status=wait(Simpsons::active->stopEvent,alertable,&interval);
-        if(status==0) Simpsons::active->checkRunning();
-        if(status==0x102) status=0; // Normal delay expiry, not an object wait timeout.
+        // A guest Sleep(1) lasted about 1 ms on the console. A wait timeout follows the
+        // host's timer resolution instead (15.6 ms by default), which turned occasional
+        // main-thread Sleep(1) calls into 10-15 ms frames. A high-resolution waitable
+        // timer keeps the requested relative or absolute expiry without raising the
+        // process-wide timer resolution; stop and APC delivery behave as before.
+        struct DelayTimer {
+            HANDLE handle=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_MODIFY_STATE|SYNCHRONIZE);
+            ~DelayTimer(){if(handle)CloseHandle(handle);}
+        };
+        thread_local DelayTimer timer;
+        if(timer.handle && SetWaitableTimerEx(timer.handle,&interval,0,nullptr,nullptr,nullptr,0)) {
+            const HANDLE waits[]{timer.handle,Simpsons::active->stopEvent};
+            const DWORD result=WaitForMultipleObjectsEx(2,waits,FALSE,INFINITE,alertable);
+            if(result==WAIT_OBJECT_0)status=0;
+            else if(result==WAIT_OBJECT_0+1) {Simpsons::active->checkRunning();status=0;}
+            else if(result==WAIT_IO_COMPLETION)status=LONG(0xc0);
+            else throw Simpsons::Failure("Native guest delay timer failed");
+        } else {
+            static auto wait=service<NtWaitFn>("NtWaitForSingleObject");
+            status=wait(Simpsons::active->stopEvent,alertable,&interval);
+            if(status==0) Simpsons::active->checkRunning();
+            if(status==0x102) status=0; // Normal delay expiry, not an object wait timeout.
+        }
     }
     delayProfile.finish();
     if(uint32_t(status)==0xc0) PPC_RECOMP_FAILURE(ctx,uint32_t(ctx.lr),"Native APC woke a delay without a guest APC delivery bridge");

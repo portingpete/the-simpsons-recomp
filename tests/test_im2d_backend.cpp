@@ -1,4 +1,5 @@
 #include "renderer/im2d_draw.h"
+#include "header/test_graphics_device.h"
 #include "renderer/im2d_layers.h"
 #include "renderer/device_availability.h"
 #include <algorithm>
@@ -164,9 +165,40 @@ void debugMessages(ID3D11Device* device,bool clearOnly=false) {
 }
 
 namespace Simpsons::Graphics {
+struct NativeUiCompositeProbe {
+    struct ColorBacking {
+        ComPtr<ID3D11Texture2D> texture;
+        ComPtr<ID3D11RenderTargetView> view;
+    };
+    struct DepthBacking {
+        ComPtr<ID3D11Texture2D> texture;
+        ComPtr<ID3D11DepthStencilView> view;
+    };
+    static ColorBacking captureColor(const std::shared_ptr<RenderTarget>& owner) {
+        return {owner->texture,owner->view};
+    }
+    static DepthBacking captureDepth(const std::shared_ptr<DepthTarget>& owner) {
+        return {owner->texture,owner->view};
+    }
+    static void replaceColor(const std::shared_ptr<RenderTarget>& owner,const std::shared_ptr<RenderTarget>& replacement) {
+        owner->texture=replacement->texture;owner->view=replacement->view;
+    }
+    static void restoreColor(const std::shared_ptr<RenderTarget>& owner,const ColorBacking& original) {
+        owner->texture=original.texture;owner->view=original.view;
+    }
+    static void replaceDepth(const std::shared_ptr<DepthTarget>& owner,const std::shared_ptr<DepthTarget>& replacement) {
+        owner->texture=replacement->texture;owner->view=replacement->view;
+    }
+    static void restoreDepth(const std::shared_ptr<DepthTarget>& owner,const DepthBacking& original) {
+        owner->texture=original.texture;owner->view=original.view;
+    }
+};
 struct NativeIm2DProbe {
     static ID3D11DeviceContext* context(NativeBackend& b) {return b.context.Get();}
     static ID3D11Device* device(NativeBackend& b) {return b.device.Get();}
+    static void feedbackReceipt(NativeBackend& b,const NativeTemporalSceneOrigins& expected,uint32_t mask) {
+        b.validateTemporalSceneFeedback(expected,mask);
+    }
     static const void* pipeline(NativeBackend& b) {return b.im2dPipeline.get();}
     static std::vector<uint64_t> state(NativeBackend& b) {
         auto* c=b.context.Get();std::vector<uint64_t> out;
@@ -195,6 +227,7 @@ struct NativeIm2DProbe {
         ComPtr<ID3D11SamplerState> sampler;c->PSGetSamplers(0,1,&sampler);pointer(sampler);return out;
     }
     static void debug(NativeBackend& b,bool hardware) {
+        if(testUsesVulkan())return; // D3D11 debug layer: a D3D11-only diagnostic.
         ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;D3D_FEATURE_LEVEL level{};
         const D3D_FEATURE_LEVEL levels[]={D3D_FEATURE_LEVEL_11_1,D3D_FEATURE_LEVEL_11_0};
         const auto hr=D3D11CreateDevice(nullptr,hardware?D3D_DRIVER_TYPE_HARDWARE:D3D_DRIVER_TYPE_WARP,nullptr,
@@ -349,9 +382,92 @@ void batchEquivalence(NativeBackend& b) {
 
 #include "header/test_im2d_layers.h"
 #include "header/test_im2d_color_batches.h"
+void temporalOriginContracts(bool hardware) {
+    NativeBackend b(!hardware);NativeIm2DProbe::debug(b,hardware);
+    auto colorOwner=b.createTarget(32,24,TargetFormat::RGB10A2);
+    auto depthOwner=b.createDepthTarget(32,24);
+    b.registerTemporalWorldTargets(colorOwner,depthOwner);
+    b.bindTargets({colorOwner,nullptr,nullptr,nullptr},depthOwner);b.setViewport({0,0,32,24,0,1});
+    b.clearTarget(colorOwner,{0,0,1,1});b.clearDepthTarget(depthOwner,.5f,93);
+    const auto cleared=b.temporalSceneOrigins();const auto colorBytes=b.readbackTarget(colorOwner);
+    b.requireTemporalSceneOrigin(colorOwner,depthOwner,{});
+    auto packet=quad(32,24);packet.depthTest=packet.depthWrite=true;packet.depthCompare=7;
+    packet.blendWord=0x01000100;packet.colorWriteMask=0;zValue(packet,.25f);
+    const auto calls=b.im2dNativeDrawCount();b.queueIm2D(colorOwner,depthOwner,packet);
+    need(b.im2dNativeDrawCount()==calls,"Queued depth origin fixture unexpectedly submitted before origin capture");
+    const auto written=b.temporalSceneOrigins(); // Must drain frozen-wrapper packet.
+    need(b.im2dNativeDrawCount()==calls+1&&written.components[1].kind==TemporalRasterOriginKind::Grid&&
+         written.components[1].compatible({})&&written.components[1].revision>cleared.components[1].revision&&
+         written.components[0]==cleared.components[0]&&written.components[2]==cleared.components[2],
+         "Origin capture missed pending owned Im2D depth or touched color/stencil receipts");
+    uniformDepth(b.readbackDepthTarget(depthOwner),depth20e4(.25f),93);
+    need(b.readbackTarget(colorOwner)==colorBytes,"Depth origin capture changed preserved packed color");
+    b.requireTemporalSceneOrigin(colorOwner,depthOwner,{});
+    bool stale=false;try{NativeIm2DProbe::feedbackReceipt(b,cleared,2);}catch(const Error&){stale=true;}
+    need(stale,"Feedback accepted a depth receipt changed by an actual queued writer");
+    NativeIm2DProbe::feedbackReceipt(b,cleared,4); // Unchanged stencil remains valid.
+    // Equal-size private owner clears/writes must not block legitimate main UI.
+    auto privateColor=b.createTarget(32,24,TargetFormat::RGB10A2);
+    auto privateDepth=b.createDepthTarget(32,24);
+    b.bindTargets({privateColor,nullptr,nullptr,nullptr},privateDepth);
+    b.clearTarget(privateColor,{1,0,0,1});b.clearDepthTarget(privateDepth,.75f,71);
+    zValue(packet,.125f);b.queueIm2D(privateColor,privateDepth,packet);
+    need(b.temporalSceneOrigins().components==written.components,
+         "Equal-size private queued draw changed registered main origin receipts");
+    b.requireTemporalSceneOrigin(colorOwner,depthOwner,{});
+    // A genuine incoming copy has a different source owner; no fake clear/
+    // zero-jitter inference can make that source's depth/stencil origin known.
+    const auto copied=b.copyDepth(privateDepth,depthOwner);b.waitCopy(copied);
+    uniformDepth(b.readbackDepthTarget(depthOwner),depth20e4(.125f),71);
+    const auto incoming=b.temporalSceneOrigins();
+    need(incoming.components[0]==written.components[0]&&
+         incoming.components[1].kind==TemporalRasterOriginKind::Unknown&&
+         incoming.components[2].kind==TemporalRasterOriginKind::Unknown,
+         "Incoming unqualified owner copy fabricated a known retained DS grid");
+    bool unknown=false;try{b.requireTemporalSceneOrigin(colorOwner,depthOwner,{});}catch(const Error&){unknown=true;}
+    need(unknown,"UI guard ignored genuine incoming unknown depth/stencil content");
+    // Clearing depth alone must preserve unknown stencil and exact stencil bits.
+    b.clearDepthTarget(depthOwner,.5f,0,true,false);
+    const auto partial=b.temporalSceneOrigins();uniformDepth(b.readbackDepthTarget(depthOwner),.5f,71);
+    need(partial.components[0]==incoming.components[0]&&partial.components[1].kind==TemporalRasterOriginKind::Uniform&&
+         partial.components[2]==incoming.components[2],
+         "Depth-only clear relabeled the uncleared color/stencil components");
+    unknown=false;try{b.requireTemporalSceneOrigin(colorOwner,depthOwner,{});}catch(const Error&){unknown=true;}
+    need(unknown,"Depth-only clear improperly qualified still-unknown retained stencil");
+    b.clearDepthTarget(depthOwner,0,87,false,true);
+    b.requireTemporalSceneOrigin(colorOwner,depthOwner,{});
+    uniformDepth(b.readbackDepthTarget(depthOwner),.5f,87);
+    need(b.readbackTarget(colorOwner)==colorBytes,"Component qualification changed uncleared packed color");
+    // Same wrapper and equal descriptors cannot inherit a receipt after public
+    // backing fields are replaced. Real new COM owners remain pinned separately.
+    const auto qualified=b.temporalSceneOrigins();
+    auto replacementColor=b.createTarget(32,24,TargetFormat::RGB10A2);
+    auto replacementDepth=b.createDepthTarget(32,24);
+    const auto originalColorBacking=NativeUiCompositeProbe::captureColor(colorOwner);
+    const auto originalDepthBacking=NativeUiCompositeProbe::captureDepth(depthOwner);
+    const auto replacedRejected=[&] {
+        bool queryRejected=false,registrationRejected=false,feedbackRejected=false;
+        try{b.temporalSceneOrigins();}catch(const Error&){queryRejected=true;}
+        try{b.registerTemporalWorldTargets(colorOwner,depthOwner);}catch(const Error&){registrationRejected=true;}
+        try{NativeIm2DProbe::feedbackReceipt(b,qualified,7);}catch(const Error&){feedbackRejected=true;}
+        need(queryRejected&&registrationRejected&&feedbackRejected,
+            "Same-wrapper replacement inherited frozen actual attachment origins");
+    };
+    NativeUiCompositeProbe::replaceColor(colorOwner,replacementColor);replacedRejected();
+    NativeUiCompositeProbe::restoreColor(colorOwner,originalColorBacking);
+    NativeUiCompositeProbe::replaceDepth(depthOwner,replacementDepth);replacedRejected();
+    NativeUiCompositeProbe::restoreDepth(depthOwner,originalDepthBacking);
+    const auto restored=b.temporalSceneOrigins();
+    need(restored.components==qualified.components,"Rejected owner replacement advanced component revisions");
+    need(b.readbackTarget(colorOwner)==colorBytes,"Rejected backing replacement changed original packed color");
+    uniformDepth(b.readbackDepthTarget(depthOwner),.5f,87);
+    std::printf("AUDIT_TEMPORAL_UI_ORIGINS queued_actual_depth=drained private_owners=ignored copied_unknown_DS=rejected partial_clears=component_exact stale_feedback=rejected stencil_preserved=passed\n");
+}
+
 int main(int argc,char** argv) {try {
     im2dLayerStorageContracts();
     const bool hardware=argc==2 && std::strcmp(argv[1],"--hardware")==0;
+    temporalOriginContracts(hardware);
     NativeBackend b(!hardware);NativeIm2DProbe::debug(b,hardware);
     auto target=b.createTarget(16,12,TargetFormat::RGB10A2);auto depth=b.createDepthTarget(16,12);
     b.bindTargets({target,nullptr,nullptr,nullptr},depth);b.setViewport({0,0,16,12,0,1});

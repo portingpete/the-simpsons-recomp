@@ -62,6 +62,7 @@ bool d3dCallStatsRequested() {
     const char* text=std::getenv("SIMPSONS_D3D_CALL_STATS");
     return text&&*text&&*text!='0';
 }
+bool d3dCallStatsInstalled() {return installed;}
 void installD3DCallStats(ID3D11DeviceContext* context,ID3D11Device* device) {
     if(installed||!context||!device)return;
     installed=true;

@@ -8,6 +8,7 @@
 #include <map>
 #include <optional>
 #include <random>
+#include <set>
 #include <stdexcept>
 using Simpsons::HeapPageIndex;
 namespace {
@@ -32,6 +33,25 @@ void agree(const HeapPageIndex& index,const std::map<uint32_t,uint32_t>& live,ui
     // allocator never produces. Require the same smallest extent and a genuinely containing live allocation.
     need(actual->second==expected->second&&live.contains(actual->first)&&live.at(actual->first)==actual->second&&
          address>=actual->first&&uint64_t(address)<uint64_t(actual->first)+actual->second,why);
+}
+void agreeSpan(const HeapPageIndex& index,const std::map<uint32_t,uint32_t>& live,const std::set<uint32_t>& closing,
+               uint32_t address,uint32_t bytes,bool exact) {
+    std::optional<std::pair<uint32_t,uint32_t>> expected,actual;
+    // Independent full-scan predicate: span extent and closing state are
+    // additional admission checks after finding allocations by the start byte.
+    for(const auto& [start,extent]:live)
+        if(!closing.contains(start)&&(!exact||start==address)&&address>=start&&
+           uint64_t(address)+bytes<=uint64_t(start)+extent&&(!expected||extent<expected->second))
+            expected={start,extent};
+    const auto consider=[&](uint32_t start,uint32_t extent) {
+        if(!closing.contains(start)&&address>=start&&uint64_t(address)+bytes<=uint64_t(start)+extent&&
+           (!actual||extent<actual->second)) actual={start,extent};
+    };
+    if(exact) {if(const auto it=live.find(address);it!=live.end())consider(it->first,it->second);}
+    else if(!bytes) {for(const auto& [start,extent]:live)consider(start,extent);}
+    else index.stab(address,[&](const HeapPageIndex::Ref& ref){consider(ref.start,ref.extent);});
+    need(expected.has_value()==actual.has_value(),"indexed span admission differs from an independent scan");
+    if(expected)need(actual->second==expected->second,"indexed span did not retain the smallest fully containing live owner");
 }
 }
 int main() {
@@ -83,6 +103,23 @@ int main() {
                         agree(index,live,address,"randomized lookup differs from a scan");
                 }
             }
+        }
+        // Interior/full-span admission must skip a closing smallest allocation,
+        // retain an enclosing live owner and reject ends/32-bit overflow. Exact
+        // base queries remain independent of those enclosing allocations.
+        {
+            HeapPageIndex index;std::map<uint32_t,uint32_t> live;
+            const std::set<uint32_t> closing{0x10401000};
+            for(const auto [start,extent]:std::initializer_list<std::pair<uint32_t,uint32_t>>{
+                    {0x10000000,32u<<20},{0x10400000,0x10000},{0x10401000,0x100},{0x10401010,16},
+                    {0x3000,1},{0x3FFF,2},{0xFFFFF000u,0x1000}}) {
+                live[start]=extent;index.add(start,extent);
+            }
+            for(const uint32_t address:{0x2FFFu,0x3000u,0x3001u,0x3FFEu,0x3FFFu,0x4000u,0x4001u,
+                    0x10400000u,0x10401000u,0x1040100Fu,0x10401010u,0x1040101Fu,0x10401020u,0x104010FFu,
+                    0x10401100u,0x1040FFFFu,0x10410000u,0x11FFFFFFu,0x12000000u,0xFFFFF000u,0xFFFFFFFFu})
+                for(const uint32_t bytes:{0u,1u,2u,16u,17u,0x100u,0x10000u,0xFFFFFFFFu})
+                    for(const bool exact:{false,true}) agreeSpan(index,live,closing,address,bytes,exact);
         }
         // Scale: a real hub level tracks hundreds of thousands of live allocations; lookups must not scan them.
         {

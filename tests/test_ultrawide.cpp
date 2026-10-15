@@ -62,10 +62,10 @@ struct NativeUltrawideProbe {
             need(std::abs(backend.renderAspect()-double(extent[0])/extent[1])<1e-12,"Frozen scene aspect differs from internal extent");
             std::printf("Verified WARP ultrawide scene/depth and HUD extent %ux%u\n",extent[0],extent[1]);
         }
-        NativeBackend ssaa(true,false);ssaa.configureRendering(2560,1080,1,Antialiasing::SSAA4x);
-        auto color=ssaa.createTarget(128,72,TargetFormat::RGB10A2,TargetScale::Scene);
-        auto depth=ssaa.createDepthTarget(128,72,TargetScale::Scene);storage(color,depth,512,216);
-        need(std::abs(ssaa.renderAspect()-double(2560)/1080)<1e-12,"SSAA changed frozen camera aspect");
+        NativeBackend scaled(true,false);scaled.configureRendering(2560,1080,1,Antialiasing::Original,200);
+        auto color=scaled.createTarget(128,72,TargetFormat::RGB10A2,TargetScale::Scene);
+        auto depth=scaled.createDepthTarget(128,72,TargetScale::Scene);storage(color,depth,512,216);
+        need(std::abs(scaled.renderAspect()-double(2560)/1080)<1e-12,"Render scale changed frozen camera aspect");
     }
     static void im2d() {
         NativeBackend backend(true,false);backend.configureRendering(2560,1080,1);

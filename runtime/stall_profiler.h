@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 
 #ifndef SIMPSONS_STALL_PROFILER
@@ -16,6 +17,12 @@ struct WaitDetails {
     uint32_t ownerTid{}, ownerCaller{}, waitCaller{}, status{};
     bool captured{};
 };
+
+// Opt-in GPU timestamp attribution (renderer/gpu_timeline.cpp, SIMPSONS_GPU_PROFILE=1).
+// Called at the start and end of every active scope, on every thread; it stays null
+// unless that diagnostic is attached.
+using GpuBoundaryHook = void (*)(const char* function, Section section, bool begin) noexcept;
+inline std::atomic<GpuBoundaryHook> gpuBoundaryHook{nullptr};
 
 #if SIMPSONS_STALL_PROFILER
 // Read once at process startup. The disabled hot path is one predictable branch;
@@ -95,6 +102,9 @@ struct Snapshot {
 };
 void setClock(int64_t (*clock)() noexcept, int64_t frequency) noexcept;
 void setLogSink(void (*sink)(const char*) noexcept) noexcept;
+unsigned parseContributorLimit(const char* value) noexcept;
+// Zero/invalid restores the immutable environment value; never a runtime API.
+void setContributorLimit(unsigned limit) noexcept;
 Snapshot snapshot() noexcept;
 Snapshot completedFrame() noexcept;
 }

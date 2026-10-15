@@ -1,9 +1,11 @@
 #include "runtime/runtime.h"
+#include "runtime/engine_audio_output.h"
 #include "runtime/native_window.h"
 #include "runtime/native_local_players.h"
 #include "runtime/native_controllers.h"
 #include "runtime/native_input_recording.h"
 #include "runtime/audit_stage.h"
+#include "renderer/graphics_api.h"
 #include "stack_sampler.h"
 #include <cstring>
 #include <cstdio>
@@ -11,6 +13,9 @@
 #include <optional>
 #include <array>
 #include <charconv>
+#include <thread>
+#include <fstream>
+#include <iterator>
 
 namespace {
 struct Options {
@@ -29,6 +34,7 @@ struct Options {
     bool uncappedFrameRate=false;
     uint32_t frameRate=0;
     uint64_t inputPlaybackStartScene=0,inputPlaybackExpectedEndScene=0;
+    std::optional<Simpsons::Graphics::GraphicsApi> renderer;
 };
 Options parse(int argc,char** argv) {
     Options out;
@@ -49,6 +55,13 @@ Options parse(int argc,char** argv) {
         else if(arg=="--frame-rate" && !out.frameRate){const auto text=value();uint32_t rate{};const auto parsed=std::from_chars(text.data(),text.data()+text.size(),rate);if(parsed.ec!=std::errc{}||parsed.ptr!=text.data()+text.size()||!rate||!Simpsons::NativeVideoSettings::validFrameRate(rate))throw std::runtime_error("Frame rate must be 30, 60, 90, 120, 144, 165 or 240");out.frameRate=rate;}
         else if(arg=="--uncapped-frame-rate" && !out.uncappedFrameRate) out.uncappedFrameRate=true;
         else if(arg=="--vsync" && !out.vsync) out.vsync=true;
+        else if(arg=="--renderer" && !out.renderer) {
+            Simpsons::Graphics::GraphicsApi api{};
+            if(!Simpsons::Graphics::parseGraphicsApi(value(),api)) throw std::runtime_error("Renderer must be d3d11 or vulkan");
+            if(api==Simpsons::Graphics::GraphicsApi::Vulkan && !Simpsons::Graphics::vulkanAvailable())
+                throw std::runtime_error("This build excludes the Vulkan renderer");
+            out.renderer=api;
+        }
         else if(arg=="--frame-timing" && out.frameTiming.empty()) out.frameTiming=value();
         else if(arg=="--frame-timing-frames-only" && !out.frameTimingFramesOnly) out.frameTimingFramesOnly=true;
         else if(arg=="--controller-input" && out.controllerInput.empty()) out.controllerInput=value();
@@ -118,6 +131,7 @@ Options parse(int argc,char** argv) {
         if(out.uncappedFrameRate)throw std::runtime_error("Uncapped frame rate is a game launch option");
         if(out.vsync)throw std::runtime_error("Vsync is a game launch option");
         if(out.muteAudio)throw std::runtime_error("Audio muting is a game launch option");
+        if(out.renderer)throw std::runtime_error("Renderer selection is a game launch option");
         if((out.create && out.list) || out.store.empty() || !out.image.empty() || !out.content.empty() || !out.captures.empty() || !out.controllerInput.empty() || !out.frameTiming.empty() || out.hold || anyProfile)
             throw std::runtime_error("Profile management requires --profile-store and exactly one create/list operation");
     } else if(out.image.empty()) throw std::runtime_error("A game launch requires --image");
@@ -128,6 +142,12 @@ Options parse(int argc,char** argv) {
 
 int main(int argc,char** argv) {
     SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);
+    // The window thread is per-monitor aware, and the render thread compares
+    // that window's client extent with its swapchain on every presentation.
+    // A DPI-unaware querying thread receives scaled coordinates on any display
+    // above 100% (for example 1280x720 reads as 853x480 at 150%), which failed
+    // startup. Make every thread agree before any window exists.
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     // Batch per-frame diagnostic writes (NATIVE PRESENT, depth copies,
     // billboards, frame-timing summaries). The game logs several lines per
     // presentation to stderr, which is unbuffered by default; each write would
@@ -145,6 +165,7 @@ int main(int argc,char** argv) {
             "       Add --input-playback <inputs.jsonl> with --input-playback-start-scene <count> or --input-playback-from-first-poll.\n"
             "       Add --input-playback-continue-live --input-playback-expected-end-scene <count> for input replay handoff.\n"
             "       Vsync is off by default; add --vsync for DXGI Present(1,0).\n"
+            "       --renderer d3d11 or vulkan selects the native graphics device, overriding SIMPSONS_RENDERER and the saved Video menu Renderer.\n"
             "       --frame-rate supports 30, 60, 90, 120 (default), 144, 165 or 240; --uncapped-frame-rate removes the cap.\n"
             "       Add --render-test-first-mission for a temporary direct Land of Chocolate rendering test.\n"
             "       Add --first-mission-completion to open the original Land of Chocolate completion transition.\n"
@@ -206,6 +227,10 @@ int main(int argc,char** argv) {
             options.image.parent_path().parent_path()/"userdata"/"local-profiles":options.store);
         runtime->controlSettingsPath+=L".controls.cfg";
         runtime->controlSettings=Simpsons::NativeControlSettings::load(runtime->controlSettingsPath);
+        runtime->audioSettingsPath=std::filesystem::absolute(options.store.empty()?
+            options.image.parent_path().parent_path()/"userdata"/"local-profiles":options.store);
+        runtime->audioSettingsPath+=L".audio.cfg";
+        runtime->audioSettings=Simpsons::NativeAudioSettings::load(runtime->audioSettingsPath);
         runtime->videoSettings=Simpsons::NativeVideoSettings::load(runtime->videoSettingsPath);
         if(options.frameRate)runtime->videoSettings.frameRate=options.frameRate;
         if(options.uncappedFrameRate)runtime->videoSettings.frameRate=0;
@@ -213,10 +238,40 @@ int main(int argc,char** argv) {
         runtime->requestedFrameRate=runtime->videoSettings.frameRate;
         runtime->uncappedFrameRate=runtime->videoSettings.frameRate==0;
         runtime->vsyncEnabled=runtime->videoSettings.vsync;
+        // --renderer, then SIMPSONS_RENDERER, then the saved Video menu choice.
+        const char* rendererSource="launch option";
+        if(options.renderer) Simpsons::Graphics::selectGraphicsApi(*options.renderer);
+        else if(const char* text=getenv("SIMPSONS_RENDERER");text&&*text) rendererSource="SIMPSONS_RENDERER";
+        else {
+            rendererSource="video settings";
+            Simpsons::Graphics::selectGraphicsApi(runtime->videoSettings.renderer&&Simpsons::Graphics::vulkanAvailable()?
+                Simpsons::Graphics::GraphicsApi::Vulkan:Simpsons::Graphics::GraphicsApi::D3D11);
+        }
+        fprintf(stderr,"[BOOT] renderer=%s (%s)\n",Simpsons::Graphics::graphicsApiName(Simpsons::Graphics::graphicsApi()),rendererSource);
         wchar_t modulePath[32768]{};
         const DWORD moduleLength=GetModuleFileNameW(nullptr,modulePath,32768);
         if(!moduleLength||moduleLength>=32768)throw std::runtime_error("Native video asset location unavailable");
         runtime->nativeFrontendRoot=std::filesystem::canonical(std::filesystem::path(modulePath).parent_path()/"native-assets");
+        // Video menu "New game episode": move the original SetDefault() to the
+        // chosen episode in a derived copy; the retail script stays unchanged.
+        if(const auto episode=runtime->videoSettings.startEpisode;episode&&episode<Simpsons::NativeVideoSettings::episodeCount) {
+            const auto source=options.image.parent_path().parent_path()/"Simpsons Game, The (USA)"/"simpsons_gameflow.lua";
+            std::ifstream in(source,std::ios::binary);std::string text((std::istreambuf_iterator<char>(in)),std::istreambuf_iterator<char>());
+            const std::string setDefault="\tepisode:SetDefault()\r\n";
+            const std::string target=std::string("episode = NewEpisode( game, \"")+Simpsons::NativeVideoSettings::episodeIds[episode]+"\"";
+            const auto existing=text.find(setDefault);
+            const auto at=text.find(target);
+            if(existing!=std::string::npos&&text.find(setDefault,existing+1)==std::string::npos&&at!=std::string::npos&&text.find("\r\n",at)!=std::string::npos) {
+                text.erase(existing,setDefault.size());
+                const auto line=text.find("\r\n",text.find(target))+2;
+                text.insert(line,setDefault);
+                const auto folder=std::filesystem::path(modulePath).parent_path()/"native-gameflow";
+                std::filesystem::create_directories(folder);
+                std::ofstream out(folder/"simpsons_gameflow.lua",std::ios::binary|std::ios::trunc);out<<text;out.close();
+                if(out){runtime->nativeGameflowRoot=std::filesystem::canonical(folder);
+                    fprintf(stderr,"[BOOT] New Game starts in %s\n",Simpsons::NativeVideoSettings::episodeNames[episode]);}
+            } else fprintf(stderr,"[BOOT] gameflow script differs from the retail layout; New Game keeps its original episode\n");
+        }
         if(options.captureOnRequest)std::filesystem::create_directories(runtime->frameCaptureDirectory);
         if(!options.frameTiming.empty())runtime->frameTimingPath=std::filesystem::absolute(options.frameTiming).lexically_normal();
         runtime->frameTimingFramesOnly=options.frameTimingFramesOnly;
@@ -231,6 +286,11 @@ int main(int argc,char** argv) {
                 slot,options.profiles[slot]->c_str());
         }
         runtime->initialize(ctx);
+        // Endpoint creation took 74-78ms in startup traces. Perform that same
+        // host work before loading presentations, without creating a source or
+        // changing original audio construction/playback ownership.
+        runtime->engineAudioOutput=std::make_shared<Simpsons::EngineAudioOutput>(*runtime);
+        runtime->engineAudioOutput->prepareEndpoint();
         fprintf(stderr,"[BOOT] original entry=0x82432280; audio %s; gameplay coverage remains incomplete\n",options.muteAudio?"muted":"enabled");
         std::set_terminate([]{
             try { if(auto error=std::current_exception()) std::rethrow_exception(error); }
@@ -238,6 +298,18 @@ int main(int argc,char** argv) {
             catch(...) { fprintf(stderr,"[TERMINATE] uncaught non-standard exception\n"); }
             fflush(stderr);std::abort();
         });
+        // Quitting must not hang: ten seconds after a stop request (window close,
+        // Exit Game or a failure) the process ends even if a thread is stuck.
+        if(runtime->stopEvent&&!options.hold) {
+            HANDLE stop{};
+            if(DuplicateHandle(GetCurrentProcess(),runtime->stopEvent,GetCurrentProcess(),&stop,SYNCHRONIZE,FALSE,0))
+                std::thread([stop]{
+                    WaitForSingleObject(stop,INFINITE);
+                    Sleep(10000); // A normal exit ends this thread with the process.
+                    fprintf(stderr,"[STOP] shutdown did not finish within 10 seconds; ending the process\n");fflush(stderr);
+                    TerminateProcess(GetCurrentProcess(),4);
+                }).detach();
+        }
         int status=Simpsons::runOriginal(ctx,runtime->base);
         if(status)runtime->resourceAudit.failure("Original execution stopped with status "+std::to_string(status));
         fprintf(stderr,"[STOP] status=%d; no playable milestone is implied\n",status);

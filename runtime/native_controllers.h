@@ -99,6 +99,9 @@ class NativeKeyboard {
     NativeMenuPointer pointer{};
     NativeMenuPointer pressPosition{};
     uint8_t pointerHeld=0;
+    // Edge-latched presses of actions that are not controller buttons.
+    uint32_t actionPresses=0;
+    void latchActionPress(uint32_t code);
 public:
     static constexpr WORD buttons=XINPUT_GAMEPAD_START|XINPUT_GAMEPAD_BACK|XINPUT_GAMEPAD_A|XINPUT_GAMEPAD_B|
         XINPUT_GAMEPAD_X|XINPUT_GAMEPAD_Y|
@@ -121,6 +124,10 @@ public:
     void pointerMove(int32_t x,int32_t y,uint32_t width,uint32_t height);
     void pointerLeave();
     void pointerWheel(int32_t delta);
+    // Gameplay wheel notches pulse the Wheel up/down bindings for one poll.
+    void wheel(int32_t delta);
+    // One bit per ControlAction pressed since the last call (FreeCamera, PhotoMode).
+    uint32_t takeActionPresses();
     NativeMenuPointer menuPointer();
     XINPUT_STATE sample(bool movie=false,WORD* directionPresses=nullptr,NativeMouseMotion* motion=nullptr,uint64_t* generation=nullptr,WORD* directionHeld=nullptr);
     void discard(bool pointerEvents=true);
@@ -177,7 +184,19 @@ class NativeControllers {
     uint32_t movieOwner=0;
     bool movieSkipPending=false;
     std::array<bool,4> movieArmed{},releaseMovieStart{};
+    // While the free camera is active the slot-zero poll feeds it instead of
+    // the game: buttons are OR-ed between takes so quick taps survive.
+    bool freeCameraActive=false;
+    XINPUT_GAMEPAD freeCameraPad{};
+    WORD freeCameraButtons=0;
+    int64_t freeCameraMouseX=0,freeCameraMouseY=0;
+    WORD lastSlotZeroButtons=0;
 public:
+    struct FreeCameraInput {XINPUT_GAMEPAD pad{};WORD pressedButtons=0;int32_t mouseX=0,mouseY=0;};
+    void setFreeCamera(bool active);
+    // Buttons of the latest live slot-zero poll (free camera toggle detection).
+    WORD slotZeroButtons();
+    FreeCameraInput takeFreeCameraInput();
     void attachKeyboard(const std::shared_ptr<NativeKeyboard>& source);
     void attachCommands(const std::shared_ptr<NativeCommandInput>& source);
     // Opt-in (SIMPSONS_IGNORE_PHYSICAL_CONTROLLERS=1, set by the measurement tools): physical

@@ -81,7 +81,17 @@ void original(const char* image){
     const auto copy=[&](uint32_t c,uint32_t cd,uint32_t zd){const auto clears=d.cameraClearCount();const auto binding=d.cameraBinding();
         cpu.invoke(0x826B08B0,cd,zd,c);require(abi(ctx)==saved,"Original viewport copy changed nonvolatile integer/floating-point ABI");
         const auto after=d.cameraBinding();require(after.camera==binding.camera&&after.viewport==binding.viewport&&after.colorIdentity==binding.colorIdentity&&after.depthIdentity==binding.depthIdentity&&d.cameraClearCount()==clears,"Original copy changed camera binding or cleared it");};
-    cpu.invoke(0x823F1A18,loading);copy(loading,colorCopy,depthCopy);cpu.invoke(0x823F1A08,loading);
+    cpu.invoke(0x823F1A18,loading);
+    rejects([&]{d.sampledColorCopy(colorCopy,loading);});rejects([&]{d.sampledDepthCopy(depthCopy,loading);});
+    copy(loading,colorCopy,depthCopy);
+    bool sampledAlpha{};
+    require(d.sampledColorCopy(colorCopy,loading)==d.color(colorCopy,sampledAlpha)&&d.sampledDepthCopy(depthCopy,loading)==d.depth(depthCopy),
+        "Original shared copy publication returned different actual destination owners");
+    require(d.readbackColor(colorCopy)==d.readbackColor(defaultColor),"Original sampled color publication lacks submitted source pixels");
+    rejects([&]{d.sampledColorCopy(defaultColor,loading);});rejects([&]{d.sampledDepthCopy(defaultDepth,loading);});
+    rejects([&]{d.sampledColorCopy(colorCopy,camera[0]);});rejects([&]{d.sampledDepthCopy(depthCopy,camera[0]);});
+    cpu.invoke(0x823F1A08,loading);
+    rejects([&]{d.sampledColorCopy(colorCopy,loading);});rejects([&]{d.sampledDepthCopy(depthCopy,loading);});
     const auto defaultColorPixels=d.readbackColor(defaultColor),defaultDepthPixels=d.readbackDepth(defaultDepth);
     require(d.readbackColor(colorCopy)==defaultColorPixels,"Loading camera full color copy differs");
     bool alpha{};require(d.color(color[0],alpha)==d.color(defaultColor,alpha)&&d.depth(depth[0])==d.depth(defaultDepth),
@@ -91,9 +101,14 @@ void original(const char* image){
     auto depthEqual=[&](uint32_t a,uint32_t b){const auto x=d.readbackDepth(a),y=d.readbackDepth(b);require(x.size()==y.size(),"Depth role extents differ");
         bool equal=true;for(size_t i=0;i<x.size();i+=8)equal&=!std::memcmp(x.data()+i,y.data()+i,5);require(equal,"Depth/stencil role copy differs");};
     depthEqual(defaultDepth,depthCopy);cpu.invoke(0x823F1A18,camera[0]);
+    rejects([&]{d.sampledColorCopy(colorCopy,camera[0]);});rejects([&]{d.sampledDepthCopy(depthCopy,camera[0]);});
     const auto defaultCopies=d.cameraCopyCount();copy(camera[0],0,depthCopy);depthEqual(depth[0],depthCopy);
+    require(d.sampledDepthCopy(depthCopy,camera[0])==d.depth(depthCopy),"Original depth-only copy did not publish its actual sampled depth owner");
+    rejects([&]{d.sampledColorCopy(colorCopy,camera[0]);});rejects([&]{d.sampledDepthCopy(depthCopy,loading);});
     require(d.readbackColor(colorCopy)==defaultColorPixels&&d.cameraCopyCount()==defaultCopies+1,"Depth-only copy changed color role or counted another operation");
     copy(camera[0],colorCopy,0);require(d.readbackColor(colorCopy)==d.readbackColor(color[0]),"Private full color copy differs");
+    require(d.sampledColorCopy(colorCopy,camera[0])==d.color(colorCopy,sampledAlpha)&&d.sampledDepthCopy(depthCopy,camera[0])==d.depth(depthCopy),
+        "Original independent color/depth publications lost their submitted actual owners");
     copy(camera[0],colorCopy,depthCopy);depthEqual(depth[0],depthCopy);const auto count=d.cameraCopyCount();copy(camera[0],0,0);require(d.cameraCopyCount()==count,"Empty original copy submitted native work");
     const auto savedColor=d.readbackColor(colorCopy),savedDepth=d.readbackDepth(depthCopy);
     auto rejected=[&](auto f){rejects(f);require(d.cameraCopyCount()==count&&d.readbackColor(colorCopy)==savedColor&&d.readbackDepth(depthCopy)==savedDepth,"Rejected engine copy changed destination or count");};

@@ -1,4 +1,5 @@
 #include "engine_driver.h"
+#include "engine_audio.h"
 #include "runtime.h"
 #include "native_window.h"
 #include "native_controllers.h"
@@ -6,6 +7,7 @@
 #include "engine_cpu_calls.h"
 #include "engine_im2d_program.h"
 #include "frame_timing.h"
+#include "pacing_trace.h"
 #include "stall_profiler.h"
 #include "engine_state_bridge.h"
 #include "engine_dynamic_buffers.h"
@@ -42,6 +44,7 @@
 #include <bit>
 #include <cmath>
 #include <fstream>
+#include <sstream>
 #include <atomic>
 #include <cstdio>
 #include <unordered_set>
@@ -195,6 +198,8 @@ struct EngineDriver::State {
     uint32_t effectShadow{},effectStaging{};
     std::array<uint64_t,7> screenEffectDraws{};
     std::array<uint64_t,7> screenEffectSuppressed{};
+    uint64_t worldLookFrame=~0ull,ambientOcclusionFrame=~0ull;
+    bool photoHudStashed=false;
     // Native sampler for a screen-effect stage from the effective state: the
     // original clamp fields must be applied; filters follow the SDK setters.
     D3D11_SAMPLER_DESC screenEffectSampler(const Graphics::EngineState& ef,uint32_t stage) const {
@@ -256,7 +261,7 @@ struct EngineDriver::State {
         uint32_t owner{},definition{},material{},mode{},texture{},raster{},sampling{},texture2{},raster2{},stack{},entry{},row{},camera{};
         uint32_t source{},count{},total{},draws{};
         uint32_t projectionOwner{},projectionIdentity{};
-        bool matrix{},color{},soft{},projectedMatrix{};
+        bool matrix{},color{},soft{},projectedMatrix{},sampledTrace{};
         Graphics::ImmediateDraw draw;
     } billboard;
     struct Beam {
@@ -277,6 +282,7 @@ struct EngineDriver::State {
         std::vector<uint32_t> segments;
         Graphics::ImmediateDraw draw;
     } immediateEffect;
+    bool immediateRejectionDiagnostic{}; // One evidence packet before the first owned-world rejection.
     struct Decal {
         struct Node {uint32_t address{},vtable{},next{},caller{};};
         struct Child {uint32_t node{},stack{},frame{},caller{},source{},count{},triangles{};bool mesh{},matrix{},constant{},projectedMatrix{},finished{};};
@@ -324,9 +330,63 @@ struct EngineDriver::State {
     bool uiDrawing{};
     uint32_t contextId{};
     std::optional<NativeCameraBinding> camera;
+    std::unordered_map<uint32_t,NativeCameraLifetime> cameraLifetimes;
+    std::optional<NativeCameraLifetime> lastCameraRetirement; // Bounded diagnostic, not admission.
+    uint64_t nextCameraBirth{};
+    struct BeamLifeState {
+        NativeBeamLifetime receipt;
+        uint32_t retirementStack{},closingStack{},closingPC{},deleteFlags{};
+        bool recycled{};
+    };
+    struct BeamAllocationObservation {
+        const PPCContext* cpu{};
+        uint32_t context{},stack{},factoryStack{},parent{},record{},index{},result{};
+        uint32_t allocator{},vtable{},allocate{},release{};
+        bool returned{};
+    };
+    std::unordered_map<uint32_t,BeamLifeState> beamLifetimes;
+    std::vector<BeamAllocationObservation> beamAllocations; // Bounded original call nesting only.
+    std::optional<NativeBeamLifetime> lastBeamRetirement; // One diagnostic, no Freed tombstones.
+    uint64_t nextBeamBirth{};
+    mutable bool mainLifetimeDiagnosticEmitted{}; // Failure-only, once per actual State.
+    struct LoadingUiAdmission {
+        uint32_t camera{},context{},colorRaster{},depthRaster{};
+        uint64_t generation{};
+        std::shared_ptr<Graphics::RenderTarget> color;
+        std::shared_ptr<Graphics::DepthTarget> depth;
+    } loadingUiAdmission;
+    // Receipt from the successful main-camera depth clear in this presentation.
+    // It binds the original camera to its observed containing allocation lifetime.
+    enum class MainCameraAuthority {None,Bank,OriginalPool};
+    struct MainCameraPoolWitness {
+        uint32_t engine{},pool{},offset{},stride{},count{},bitmapBytes{},alignment{},flags{};
+        uint32_t block{},firstSlot{},slot{},backingAllocate{},backingRelease{},heapManager{},heapVtable{};
+        bool operator==(const MainCameraPoolWitness&) const=default;
+    };
+    struct MainCameraAdmission {
+        uint32_t camera{},context{},engine{},manager{},colorRaster{},depthRaster{},colorIdentity{},depthIdentity{};
+        uint64_t birthGeneration{};
+        MainCameraAuthority authority=MainCameraAuthority::None;
+        std::optional<EngineAudioOwners::AllocationSpan> bank;
+        MainCameraPoolWitness pool;
+        std::shared_ptr<Graphics::RenderTarget> color;
+        std::shared_ptr<Graphics::DepthTarget> depth;
+    } selectedMainAdmission;
+    // Published only after a real successful main depth-clear submission.
+    // Typed birth keys history; bank/pool authority remains a separate proof.
+    struct TemporalPostOwner {
+        MainCameraAdmission admission;
+        uint32_t clearMask{};
+        uint64_t presentation{};
+        bool prepared{};
+    } temporalPostOwner;
     uint64_t cameraClears{};
     uint64_t cameraCopies{};
     uint32_t sharedColorCopiedCamera{},sharedDepthCopiedCamera{};
+    std::shared_ptr<Graphics::RenderTarget> sharedColorCopiedBacking;
+    std::shared_ptr<Graphics::DepthTarget> sharedDepthCopiedBacking;
+    uint64_t sharedColorCopiedGeneration{},sharedDepthCopiedGeneration{};
+    std::shared_ptr<Graphics::NativeCopySubmission> sharedColorCopySubmission,sharedDepthCopySubmission;
     uint64_t capturedDraws{};
     uint64_t capturedMovieDraws{};
     uint64_t im2dDepthDraws{},capturedIm2DDepthDraws{};
@@ -392,19 +452,36 @@ struct EngineDriver::State {
         if(!rt.window || rt.window->closed || w!=rt.window->width.load(std::memory_order_relaxed) || h!=rt.window->height.load(std::memory_order_relaxed))
             throw Failure("Native engine driver requires its existing window dimensions");
         backend.configureRendering(rt.videoSettings.renderWidth(),rt.videoSettings.renderHeight(),rt.videoSettings.anisotropy(),
-            Graphics::Antialiasing(rt.videoSettings.antialiasing),rt.videoSettings.renderScale);
+            Graphics::Antialiasing(rt.videoSettings.antialiasing),rt.videoSettings.renderScale,
+            Graphics::TextureFilter(rt.videoSettings.textureFiltering),rt.videoSettings.shadowQuality);
+        if(Graphics::temporalAntialiasing(backend.antialiasing())) {
+            const auto output=backend.outputExtent();const auto render=backend.configureTemporalRendering(backend.antialiasing(),output[0],output[1]);
+            backend.configureSceneExtent(render[0],render[1]);
+        }
+        backend.configureSharpening(rt.videoSettings.sharpening);
+        backend.configureFrameLatency(rt.videoSettings.maxFrameLatency);
+        backend.configureCharacterDetail(rt.videoSettings.characterDetail);
+        backend.warmPresentationFilters();
         const auto sceneExtent=backend.sceneExtent();
-        std::fprintf(stderr,"[NATIVE RENDER SETTINGS] internal=%ux%u scene=%ux%u aa=%u anisotropy=%u render_scale=%u; frozen until restart\n",
+        std::fprintf(stderr,"[NATIVE RENDER SETTINGS] internal=%ux%u scene=%ux%u aa=%u anisotropy=%u render_scale=%u; Video menu changes apply live\n",
             rt.videoSettings.renderWidth(),rt.videoSettings.renderHeight(),
             sceneExtent[0],sceneExtent[1],
             rt.videoSettings.antialiasing,rt.videoSettings.anisotropy(),rt.videoSettings.renderScale);
+        {StallProfiler::Scope resourcesProfile(StallProfiler::Section::Rendering,"Startup.resources.initialize",nullptr);
         resources.initialize(backend,w,h);
+        backend.registerTemporalWorldTargets(resources.resources().defaultColor,resources.resources().defaultDepth);
+        if(Graphics::temporalAntialiasing(backend.antialiasing()))
+            backend.registerUiCompositeCopyRoles(resources.resources().colorCopy,resources.resources().depthCopy);
+        }
         scratch=std::make_unique<EngineScratchResources>(resources.resources().scratchIndex);
         renderState=std::make_unique<EngineRenderState>();
         materials=std::make_unique<EngineMaterials>(backend);
         effects=std::make_unique<EngineEffects>(rt,backend);
         pipeline=std::make_unique<EnginePipelineResources>(backend);
+        {StallProfiler::Scope attachProfile(StallProfiler::Section::Rendering,"Startup.attachWindow",nullptr);
         backend.attachWindow(rt.window->handle(),w,h);
+        backend.enableGpuTimeline();
+        }
         contextId=contextIdentity(rt);
         shadowTextures=std::make_unique<EngineShadowTextures>(rt,backend,contextId);
         reflectionTextures=std::make_unique<EngineReflectionTextures>(rt,backend,contextId);
@@ -415,6 +492,68 @@ struct EngineDriver::State {
         sceneCopies=std::make_unique<EngineSceneCopies>(rt,backend,contextId);
         particles=std::make_unique<EngineParticles>(rt,backend);
         recording=std::make_unique<EngineRecordingOwners>(rt,backend);
+    }
+    // Colour look over the finished world image, once per presented frame,
+    // before the HUD (or at presentation when a frame draws no HUD).
+    void applyWorldLook(const std::shared_ptr<Graphics::RenderTarget>& color) {
+        const auto& video=runtime.videoSettings;
+        if(!video.colorLook||worldLookFrame==frontCopies||!color)return;
+        worldLookFrame=frontCopies;
+        struct Look {int32_t vibrance,saturation,contrast,exposure;};
+        constexpr std::array<Look,4> presets{{{40,10,5,0},{15,20,20,-3},{-10,-20,-15,4},{0,0,0,0}}};
+        const Look look=video.colorLook==4?Look{video.vibrance,video.saturation,video.contrast,video.exposure}:presets[video.colorLook-1];
+        backend.applyWorldLook(color,{1.0f+float(look.exposure)/100.0f,1.0f+float(look.saturation)/100.0f,
+            float(look.vibrance)/100.0f,1.0f+float(look.contrast)/100.0f});
+    }
+    void configureInk() {
+        const auto& video=runtime.videoSettings;
+        const auto& rgb=NativeVideoSettings::outlineColors[video.outlineColor<NativeVideoSettings::outlineColorCount?video.outlineColor:0];
+        const float fade=video.inkOutlines==2?1.0f:video.inkOutlines==1?1.0f-float(video.outlineStrength)/100.0f:0.0f;
+        backend.configureInk({rgb[0]/255.0f,rgb[1]/255.0f,rgb[2]/255.0f},fade);
+        backend.configureCleanEyes(video.eyeShading==1);
+    }
+    // Video menu render resolution, scale, AA and filtering. Compared every
+    // presentation, so Cancel's restore and repeated steps converge on the
+    // latest choice. A change rejected before mutation keeps the active one.
+    void applyLiveRendering() {
+        auto& video=runtime.videoSettings;
+        const auto aa=Graphics::Antialiasing(video.antialiasing);
+        const auto filter=Graphics::TextureFilter(video.textureFiltering);
+        if(backend.renderingMatches(video.renderWidth(),video.renderHeight(),video.anisotropy(),aa,video.renderScale,filter,video.shadowQuality))return;
+        const auto before=backend.sceneExtent();const auto beforeAA=backend.antialiasing();
+        const auto beforeFiltering=backend.anisotropy();
+        const auto started=std::chrono::steady_clock::now();
+        bool applied=false;
+        try {
+            applied=backend.reconfigureRendering(video.renderWidth(),video.renderHeight(),video.anisotropy(),aa,video.renderScale,filter,video.shadowQuality);
+        } catch(const Graphics::Error& error) {
+            // A failure after publication (re-recording) cannot be rolled back;
+            // fail stop instead of rendering with partly updated state.
+            if(backend.renderingMatches(video.renderWidth(),video.renderHeight(),video.anisotropy(),aa,video.renderScale,filter,video.shadowQuality))throw;
+            const auto base=backend.renderBaseExtent();
+            if(video.renderWidth()!=base[0]||video.renderHeight()!=base[1])
+                for(uint32_t index=0;index<NativeVideoSettings::renderResolutionCount;++index) {
+                    NativeVideoSettings probe;probe.renderResolution=index;
+                    if(probe.renderWidth()==base[0]&&probe.renderHeight()==base[1])video.renderResolution=index;
+                }
+            const auto filtering=backend.anisotropy();
+            video.anisotropicFiltering=filtering;video.textureFiltering=uint32_t(backend.textureFilter());
+            video.shadowQuality=backend.shadowQuality();
+            video.antialiasing=uint32_t(backend.antialiasing());video.renderScale=backend.renderScale();
+            std::fprintf(stderr,"[NATIVE VIDEO] live rendering change rejected (%s); kept internal=%ux%u aa=%u anisotropy=%u render_scale=%u\n",
+                error.what(),base[0],base[1],video.antialiasing,filtering,video.renderScale);
+            if(runtime.controllerCommands)std::fflush(stderr);
+            return;
+        }
+        if(!applied)return; // A recording session is open; retry at the next presentation.
+        // The change itself is one long frame; do not carry it as pacing debt.
+        runtime.framePacer.reset();
+        const auto after=backend.sceneExtent();const auto receipt=backend.lastLiveRendering();
+        std::fprintf(stderr,"[NATIVE VIDEO] live rendering scene=%ux%u->%ux%u aa=%u->%u anisotropy=%u->%u render=%ux%u render_scale=%u re-backed=%u color/%u depth re-recorded=%u ms=%.3f\n",
+            before[0],before[1],after[0],after[1],uint32_t(beforeAA),video.antialiasing,beforeFiltering,video.anisotropy(),
+            video.renderWidth(),video.renderHeight(),video.renderScale,receipt.colors,receipt.depths,receipt.payloads,
+            std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count());
+        if(runtime.controllerCommands)std::fflush(stderr);
     }
     void requireCaller(uint8_t* base) const {
         if(active!=&runtime || base!=runtime.base || thread!=GetCurrentThreadId())
@@ -464,8 +603,16 @@ struct EngineDriver::State {
                 throw Failure("Original target role changed outside its native owner");
         }
     }
-    NativeCameraBinding validateCamera(uint8_t* base,uint32_t c) const {
+    NativeCameraBinding validateCamera(uint8_t* base,uint32_t c,bool selecting=false) const {
         requireCaller(base);
+        if(Graphics::temporalAntialiasing(backend.antialiasing())) {
+            // Only explicit select may capture a newer genuine birth. Clear,
+            // reset, pass, copy and draw validation retain the selected birth.
+            if(!selecting&&selectedMainAdmission.camera&&selectedMainAdmission.camera==c)
+                requireMainAdmissionBirth(selectedMainAdmission); // Remembered main before C/raster reads, even while private is bound.
+            if(!selecting&&camera&&camera->camera==c)requireSelectedMainCameraLifetime();
+            if(isMainRowZero(c))(void)requireMainCameraBirth(c);
+        }
         const bool loading=c&&c==PPC_LOAD_U32(0x82E07248);
         const bool shadow=!loading && shadowTextures && shadowTextures->ownsCamera(c);
         uint32_t slot=4;
@@ -590,13 +737,294 @@ struct EngineDriver::State {
             throw Failure("Original shared pixel shader header/code bytes differ from their source record");
         return source;
     }
-    std::shared_ptr<Graphics::RenderTarget> cameraColor(const NativeCameraBinding& binding) const {
+    std::shared_ptr<Graphics::RenderTarget> cameraOriginalColor(const NativeCameraBinding& binding) const {
         auto target=binding.colorIdentity==targetIds[0]?resources.resources().defaultColor:rasters->ownedColor(binding.colorIdentity);
         if(!target)throw Failure("Native selected camera color owner expired");return target;
     }
-    std::shared_ptr<Graphics::DepthTarget> cameraDepth(const NativeCameraBinding& binding) const {
+    std::shared_ptr<Graphics::DepthTarget> cameraOriginalDepth(const NativeCameraBinding& binding) const {
         auto target=binding.depthIdentity==targetIds[1]?resources.resources().defaultDepth:rasters->ownedDepth(binding.depthIdentity);
         if(!target)throw Failure("Native selected camera depth owner expired");return target;
+    }
+    std::shared_ptr<Graphics::RenderTarget> cameraColor(const NativeCameraBinding& binding) const {return backend.routeColor(cameraOriginalColor(binding));}
+    std::shared_ptr<Graphics::DepthTarget> cameraDepth(const NativeCameraBinding& binding) const {return backend.routeDepth(cameraOriginalDepth(binding));}
+    bool isMainRowZero(uint32_t c) const {
+        auto* base=runtime.base;
+        if(!c||c==PPC_LOAD_U32(0x82E07248))return false;
+        const uint32_t manager=PPC_LOAD_U32(0x82D08B10);
+        if(!manager)return false;
+        runtime.pointer(manager,0x140,false);
+        if(PPC_LOAD_U32(manager)!=0x820B6DEC||PPC_LOAD_U32(manager+8)!=0x820B6DE8||PPC_LOAD_U32(manager+0x128)!=4)
+            throw Failure("Temporal main camera lost its original viewport manager");
+        return PPC_LOAD_U32(manager+0x14)==c;
+    }
+    void reportMainCameraLifetimeRejection(const char* site,const char* predicate,uint32_t candidate,
+                                          const MainCameraAdmission* captured=nullptr) const noexcept {
+        if(mainLifetimeDiagnosticEmitted)return;
+        mainLifetimeDiagnosticEmitted=true;
+        // Host receipts only: never dereference candidate camera/raster bytes.
+        const auto* cpu=currentContext;
+        std::fprintf(stderr,"[NATIVE TEMPORAL CAMERA LIFETIME REJECTION] site=%s predicate=%s guard_camera=%08X ctx_r3=%08X bound=%08X context=%08X engine=%08X next_birth=%llu presentation=%llu pc=%08X lr=%08X post_presentation=%llu post_prepared=%u\n",
+            site,predicate,candidate,cpu?cpu->r3.u32:0,camera?camera->camera:0,contextId,engine,
+            static_cast<unsigned long long>(nextCameraBirth),static_cast<unsigned long long>(frontCopies),
+            cpu?cpu->lastFunction:0,cpu?uint32_t(cpu->lr):0,
+            static_cast<unsigned long long>(temporalPostOwner.presentation),unsigned(temporalPostOwner.prepared));
+        auto admission=[&](const char* label,const MainCameraAdmission* value) noexcept {
+            std::fprintf(stderr,"[NATIVE TEMPORAL CAMERA ADMISSION] label=%s present=%u camera=%08X birth=%llu context=%08X engine=%08X manager=%08X authority=%u color_raster=%08X depth_raster=%08X color_id=%08X depth_id=%08X bank_present=%u bank_address=%08X bank_extent=%u bank_generation=%llu\n",
+                label,unsigned(value!=nullptr),value?value->camera:0,
+                static_cast<unsigned long long>(value?value->birthGeneration:0),value?value->context:0,
+                value?value->engine:0,value?value->manager:0,value?unsigned(value->authority):0,
+                value?value->colorRaster:0,value?value->depthRaster:0,value?value->colorIdentity:0,value?value->depthIdentity:0,
+                unsigned(value&&bool(value->bank)),value&&value->bank?value->bank->address:0,
+                value&&value->bank?value->bank->extent:0,
+                static_cast<unsigned long long>(value&&value->bank?value->bank->generation:0));
+        };
+        admission("captured",captured);admission("selected",&selectedMainAdmission);admission("post",&temporalPostOwner.admission);
+        auto activeBirth=[&](const char* label,uint32_t address) noexcept {
+            const auto found=cameraLifetimes.find(address);
+            const bool present=found!=cameraLifetimes.end();
+            std::fprintf(stderr,"[NATIVE TEMPORAL CAMERA ACTIVE BIRTH] label=%s camera=%08X map_present=%u phase=%u generation=%llu context=%08X\n",
+                label,address,unsigned(present),present?unsigned(found->second.phase):0,
+                static_cast<unsigned long long>(present?found->second.generation:0),present?found->second.context:0);
+        };
+        activeBirth("guard_camera",candidate);activeBirth("ctx_r3",cpu?cpu->r3.u32:0);
+        activeBirth("bound",camera?camera->camera:0);
+        activeBirth("captured",captured?captured->camera:0);activeBirth("selected",selectedMainAdmission.camera);
+        activeBirth("post",temporalPostOwner.admission.camera);
+        std::fprintf(stderr,"[NATIVE TEMPORAL CAMERA LAST RETIREMENT] present=%u camera=%08X phase=%u generation=%llu context=%08X diagnostic_only=1\n",
+            unsigned(bool(lastCameraRetirement)),lastCameraRetirement?lastCameraRetirement->camera:0,
+            lastCameraRetirement?unsigned(lastCameraRetirement->phase):0,
+            static_cast<unsigned long long>(lastCameraRetirement?lastCameraRetirement->generation:0),
+            lastCameraRetirement?lastCameraRetirement->context:0);
+    }
+    const NativeCameraLifetime& requireMainCameraBirth(uint32_t c) const {
+        const auto found=cameraLifetimes.find(c);
+        if(found==cameraLifetimes.end()||found->second.phase!=NativeCameraLifetimePhase::Constructed||
+            !found->second.generation||found->second.context!=contextId) {
+            const char* predicate=found==cameraLifetimes.end()?"active_map_absent":
+                found->second.phase!=NativeCameraLifetimePhase::Constructed?"active_phase_not_constructed":
+                !found->second.generation?"active_generation_zero":"active_context_mismatch";
+            reportMainCameraLifetimeRejection("requireMainCameraBirth",predicate,c);
+            throw Failure("Temporal selected main camera lost its original construction lifetime");
+        }
+        return found->second;
+    }
+    void requireMainAdmissionBirth(const MainCameraAdmission& admission) const {
+        if(!admission.camera||!admission.birthGeneration||admission.context!=contextId||admission.engine!=engine) {
+            const char* predicate=!admission.camera?"captured_camera_zero":!admission.birthGeneration?"captured_birth_zero":
+                admission.context!=contextId?"captured_context_mismatch":"captured_engine_mismatch";
+            reportMainCameraLifetimeRejection("requireMainAdmissionBirth.capture",predicate,admission.camera,&admission);
+            throw Failure("Temporal selected main camera lost its original construction lifetime");
+        }
+        const auto& birth=requireMainCameraBirth(admission.camera);
+        if(birth.generation!=admission.birthGeneration||birth.context!=admission.context) {
+            reportMainCameraLifetimeRejection("requireMainAdmissionBirth.match",
+                birth.generation!=admission.birthGeneration?"captured_current_birth_mismatch":"captured_current_context_mismatch",
+                admission.camera,&admission);
+            throw Failure("Temporal selected main camera lost its original construction lifetime");
+        }
+    }
+    void requireSelectedMainCameraLifetime() const {
+        if(!Graphics::temporalAntialiasing(backend.antialiasing())||!camera)return;
+        if(camera->camera!=selectedMainAdmission.camera&&!isMainRowZero(camera->camera))return;
+        requireMainAdmissionBirth(selectedMainAdmission); // Before selected camera/raster bytes.
+        if(camera->camera!=selectedMainAdmission.camera||camera->colorRaster!=selectedMainAdmission.colorRaster||
+            camera->depthRaster!=selectedMainAdmission.depthRaster||selectedMainAdmission.color!=resources.resources().defaultColor||
+            selectedMainAdmission.depth!=resources.resources().defaultDepth)
+            throw Failure("Temporal selected main camera changed its selected original owner pair");
+    }
+    static bool sameMainBank(const std::optional<EngineAudioOwners::AllocationSpan>& a,
+                             const std::optional<EngineAudioOwners::AllocationSpan>& b) {
+        return bool(a)==bool(b)&&(!a||(a->address==b->address&&a->extent==b->extent&&a->generation==b->generation));
+    }
+    static bool sameMainAdmission(const MainCameraAdmission& a,const MainCameraAdmission& b) {
+        return a.camera==b.camera&&a.context==b.context&&a.engine==b.engine&&a.manager==b.manager&&
+            a.colorRaster==b.colorRaster&&a.depthRaster==b.depthRaster&&a.colorIdentity==b.colorIdentity&&
+            a.depthIdentity==b.depthIdentity&&a.birthGeneration==b.birthGeneration&&a.authority==b.authority&&
+            sameMainBank(a.bank,b.bank)&&a.pool==b.pool&&a.color==b.color&&a.depth==b.depth;
+    }
+    MainCameraPoolWitness mainCameraPoolWitness(uint32_t c) const {
+        auto* base=runtime.base;
+        auto need=[](bool value,const char* why){if(!value)throw Failure(why);};
+        MainCameraPoolWitness result;result.engine=engine;result.offset=PPC_LOAD_U32(0x82D0CFC0);
+        need(result.offset>=0x100&&result.offset<=0x1000&&uint64_t(engine)+result.offset+4<=0x100000000ull,
+            "Temporal main camera has invalid original pool owner/offset");
+        runtime.pointer(engine,0x140,false);
+        result.backingAllocate=PPC_LOAD_U32(engine+264);result.backingRelease=PPC_LOAD_U32(engine+268);
+        need(PPC_LOAD_U32(engine+312)==0x823FB768&&PPC_LOAD_U32(engine+316)==0x823FB920&&
+            result.backingAllocate==0x8268EB88&&result.backingRelease==0x8268EBD8,
+            "Temporal absent-span main camera has an unqualified original pool callback route");
+        runtime.pointer(engine+result.offset,4,false);result.pool=PPC_LOAD_U32(engine+result.offset);
+        need(result.pool==0x82D0CF9C,"Temporal main camera lost its original camera pool header");
+        runtime.pointer(result.pool,36,false);
+        result.stride=PPC_LOAD_U32(result.pool);result.count=PPC_LOAD_U32(result.pool+4);
+        result.bitmapBytes=PPC_LOAD_U32(result.pool+8);result.alignment=PPC_LOAD_U32(result.pool+12);
+        result.flags=PPC_LOAD_U32(result.pool+24);
+        const uint32_t cameraBytes=PPC_LOAD_U32(0x82CD1B30);
+        need(result.count==4&&result.bitmapBytes==1&&result.alignment==16&&result.flags==3&&
+            cameraBytes>=0x8C&&cameraBytes<=0x10000&&result.stride>=0x8C&&result.stride<=0x10000&&
+            result.stride==((uint64_t(cameraBytes)+15)&~uint64_t(15)),
+            "Temporal absent-span main camera has an unqualified original pool profile");
+        const uint64_t extent=uint64_t(result.count)*result.stride+result.alignment+result.bitmapBytes+7;
+        need(extent<=0x100000,"Temporal main camera pool read exceeds its finite extent");
+        std::array<uint32_t,32> visited{};uint32_t visits=0;
+        const uint32_t sentinel=result.pool+16;uint32_t previous=sentinel;bool found=false;
+        for(uint32_t node=PPC_LOAD_U32(sentinel);node!=sentinel;node=PPC_LOAD_U32(node)) {
+            need(node&&!(node&3)&&visits<visited.size()&&uint64_t(node)+extent<=0x100000000ull,
+                "Temporal main camera pool chain exceeds its finite address/count bound");
+            need(std::find(visited.begin(),visited.begin()+visits,node)==visited.begin()+visits,
+                "Temporal main camera pool chain repeats a block");
+            visited[visits++]=node;runtime.pointer(node,uint32_t(extent),false);
+            need(PPC_LOAD_U32(node+4)==previous,"Temporal main camera pool reciprocal link changed");
+            const uint64_t first=(uint64_t(node)+result.alignment+result.bitmapBytes+7)&~uint64_t(result.alignment-1);
+            need(first>=uint64_t(node)+8+result.bitmapBytes&&first-(uint64_t(node)+8+result.bitmapBytes)<result.stride&&
+                first+uint64_t(result.count)*result.stride<=uint64_t(node)+extent,
+                "Temporal main camera pool aligned slots exceed their real block");
+            const uint32_t bitmap=PPC_LOAD_U8(node+8);
+            need(!(bitmap&0x0F),"Temporal main camera pool padding bits are occupied");
+            if(uint64_t(c)>=first&&uint64_t(c)<first+uint64_t(result.count)*result.stride) {
+                need(!found&&(uint64_t(c)-first)%result.stride==0,"Temporal main camera is not one unique aligned pool slot");
+                const uint32_t slot=uint32_t((uint64_t(c)-first)/result.stride);
+                need((uint64_t(c)-(uint64_t(node)+8+result.bitmapBytes))/result.stride==slot&&
+                    (bitmap&(0x80u>>slot))&&uint64_t(c)+0x8C<=first+uint64_t(slot+1)*result.stride,
+                    "Temporal main camera lacks a full live original pool slot");
+                result.block=node;result.firstSlot=uint32_t(first);result.slot=slot;found=true;
+            }
+            previous=node;
+        }
+        need(visits&&PPC_LOAD_U32(result.pool+20)==previous&&found,
+            "Temporal main camera is absent from its live original pool chain");
+        result.heapManager=PPC_LOAD_U32(0x82D57244);
+        need(result.heapManager,"Temporal absent-span main camera has no original heap manager");
+        runtime.pointer(result.heapManager,4,false);result.heapVtable=PPC_LOAD_U32(result.heapManager);
+        runtime.pointer(result.heapVtable,24,false);
+        need(result.heapManager==0x82D5724C&&result.heapVtable==0x820B60B8&&
+            PPC_LOAD_U32(result.heapVtable)==0x8268DDA0&&PPC_LOAD_U32(result.heapVtable+20)==0x8268E858,
+            "Temporal absent-span main camera changed its genuine direct heap callback route");
+        return result;
+    }
+    MainCameraAdmission captureMainCameraAdmission(const NativeCameraBinding& binding) const {
+        MainCameraAdmission result;
+        if(!Graphics::temporalAntialiasing(backend.antialiasing())||!isMainRowZero(binding.camera))return result;
+        const auto& birth=requireMainCameraBirth(binding.camera);
+        if(binding.viewport!=std::array<uint32_t,6>{0,0,1280,720,0x3F800000,0}||!binding.depthRaster||
+            cameraOriginalColor(binding)!=resources.resources().defaultColor||cameraOriginalDepth(binding)!=resources.resources().defaultDepth)
+            throw Failure("Temporal main selection lacks the original full-size default owner pair");
+        result.camera=binding.camera;result.context=contextId;result.engine=engine;
+        auto* base=runtime.base;result.manager=PPC_LOAD_U32(0x82D08B10);
+        result.colorRaster=binding.colorRaster;result.depthRaster=binding.depthRaster;
+        result.colorIdentity=binding.colorIdentity;result.depthIdentity=binding.depthIdentity;
+        result.birthGeneration=birth.generation;result.color=cameraOriginalColor(binding);result.depth=cameraOriginalDepth(binding);
+        if(!runtime.engineAudio)throw Failure("Temporal main camera has no live original allocation observer");
+        result.bank=runtime.engineAudio->allocationSpan(binding.camera); // Closing/query errors propagate.
+        if(result.bank) {
+            if(!result.bank->generation||binding.camera<result.bank->address||
+                uint64_t(binding.camera)+0x8C>uint64_t(result.bank->address)+result.bank->extent)
+                throw Failure("Temporal main camera lacks a live original allocation generation/span");
+            result.authority=MainCameraAuthority::Bank;
+        } else {
+            result.pool=mainCameraPoolWitness(binding.camera);
+            result.authority=MainCameraAuthority::OriginalPool;
+        }
+        return result;
+    }
+    void requireMainCameraAdmission(const MainCameraAdmission& admission) const {
+        requireMainAdmissionBirth(admission); // Captured birth before C/raster fields.
+        if(!isMainRowZero(admission.camera))throw Failure("Temporal main camera changed its original row-zero role");
+        auto* base=runtime.base;
+        if(PPC_LOAD_U32(0x82D08B10)!=admission.manager||admission.color!=resources.resources().defaultColor||
+            admission.depth!=resources.resources().defaultDepth||!rasters)
+            throw Failure("Temporal main camera changed its original context/default owner pair");
+        runtime.pointer(admission.camera,0x8C,false);
+        if(PPC_LOAD_U32(admission.camera+0x60)!=admission.colorRaster||PPC_LOAD_U32(admission.camera+0x64)!=admission.depthRaster)
+            throw Failure("Temporal main camera changed its captured live raster pair");
+        const auto pair=rasters->cameraSurfaces(base,admission.colorRaster,5,admission.depthRaster);
+        if(pair[0].identity!=admission.colorIdentity||pair[1].identity!=admission.depthIdentity||
+            !pair[0].color||!pair[1].depth||rasters->ownedColor(admission.colorIdentity)!=admission.color||
+            rasters->ownedDepth(admission.depthIdentity)!=admission.depth)
+            throw Failure("Temporal main camera lost its actual strong original working owners");
+        if(!runtime.engineAudio)throw Failure("Temporal main camera has no live original allocation observer");
+        const auto bank=runtime.engineAudio->allocationSpan(admission.camera); // Exceptions are not nullopt.
+        if(!sameMainBank(bank,admission.bank))throw Failure("Temporal main camera changed its captured allocation authority/provenance");
+        if(admission.authority==MainCameraAuthority::Bank) {
+            if(!bank||!bank->generation||admission.camera<bank->address||
+                uint64_t(admission.camera)+0x8C>uint64_t(bank->address)+bank->extent)
+                throw Failure("Temporal main camera lacks a live original allocation generation/span");
+        } else if(admission.authority==MainCameraAuthority::OriginalPool) {
+            if(bank||mainCameraPoolWitness(admission.camera)!=admission.pool)
+                throw Failure("Temporal main camera changed its captured original pool authority");
+        } else throw Failure("Temporal main camera has no qualified original allocation authority");
+    }
+    void requireTemporalMainBoundary() const {
+        requireSelectedMainCameraLifetime();
+        if(camera&&(camera->camera==selectedMainAdmission.camera||isMainRowZero(camera->camera)))
+            requireMainCameraAdmission(selectedMainAdmission);
+        // Later presentation selects loading; its independent successful main
+        // clear receipt must keep the original birth/authority, not recapture it.
+        if(temporalPostOwner.admission.camera) {
+            if(temporalPostOwner.presentation!=frontCopies)
+                throw Failure("Temporal post output lost its current presentation clear receipt");
+            requireMainCameraAdmission(temporalPostOwner.admission);
+        }
+    }
+    void requireTemporalLoadingUiLifetime() const {
+        auto* base=runtime.base;
+        if(!camera)return;
+        const auto loading=PPC_LOAD_U32(0x82E07248);
+        if(!loadingUiAdmission.camera&&camera->camera!=loading)return;
+        if(!loadingUiAdmission.camera||camera->camera!=loadingUiAdmission.camera||camera->camera!=loading)
+            throw Failure("UI-only temporal loading camera changed its selected original role");
+        // Typed base construction precedes raster assignment: prove both lifetimes.
+        const auto found=cameraLifetimes.find(camera->camera);const auto& admission=loadingUiAdmission;
+        if(found==cameraLifetimes.end()||found->second.phase!=NativeCameraLifetimePhase::Constructed||
+            !admission.generation||found->second.generation!=admission.generation||
+            found->second.context!=contextId||admission.context!=contextId||
+            admission.camera!=camera->camera||admission.colorRaster!=camera->colorRaster||
+            admission.depthRaster!=camera->depthRaster||admission.color!=resources.resources().defaultColor||
+            admission.depth!=resources.resources().defaultDepth)
+            throw Failure("UI-only temporal loading camera lost its selected original construction lifetime");
+        // Revalidate type2/1 records independently of base birth. This proof is
+        // valid while UI scissor/viewport state differs from camera begin.
+        runtime.pointer(camera->camera,0x8C,false);
+        const auto colorRaster=PPC_LOAD_U32(camera->camera+0x60),depthRaster=PPC_LOAD_U32(camera->camera+0x64);
+        if(!rasters||!depthRaster||colorRaster!=admission.colorRaster||depthRaster!=admission.depthRaster)
+            throw Failure("UI-only temporal loading camera lost its live original raster/default owner pair");
+        const auto pair=rasters->cameraSurfaces(base,colorRaster,2,depthRaster);
+        if(pair[0].identity!=targetIds[0]||pair[1].identity!=targetIds[1]||pair[0].color||pair[0].depth||
+            pair[1].color||pair[1].depth||cameraOriginalColor(*camera)!=admission.color||
+            cameraOriginalDepth(*camera)!=admission.depth)
+            throw Failure("UI-only temporal loading camera lost its live original raster/default owner pair");
+    }
+    std::array<float,2> requireTemporalUiOrigins() {
+        requireSelectedMainCameraLifetime();
+        auto* base=runtime.base;
+        if(!camera||cameraOriginalColor(*camera)!=resources.resources().defaultColor||
+            cameraOriginalDepth(*camera)!=resources.resources().defaultDepth)
+            throw Failure("UI-only temporal background has no selected original main/loading owner pair");
+        requireTemporalLoadingUiLifetime();
+        if(camera->camera!=PPC_LOAD_U32(0x82E07248))requireMainCameraAdmission(selectedMainAdmission);
+        // Drain pending actual Im2D writes and capture one proven common grid.
+        // Partial clears leave invariant Uniform components beside retained Grid
+        // components; Unknown or differing grids still reject the whole bundle.
+        const auto sourceJitter=backend.temporalSceneOriginGrid(resources.resources().defaultColor,
+            resources.resources().defaultDepth);
+        // Preserve existing temporal coverage rejection when a scene is active.
+        // Between-frame Grid-zero menu/loading owners keep their original path.
+        if(backend.temporalSceneActive())(void)backend.temporalSceneJitter();
+        return sourceJitter;
+    }
+    void prepareTemporalUiOnlyOutput() {
+        if(!Graphics::temporalAntialiasing(backend.antialiasing()))return;
+        const auto& original=resources.resources();
+        requireTemporalMainBoundary(); // Includes already-promoted main Output.
+        requireTemporalLoadingUiLifetime(); // Also validates already-promoted loading Output.
+        if(backend.routeColor(original.defaultColor)!=original.defaultColor)return;
+        if(backend.temporalSceneHasGeometry())throw Failure("Temporal world reached UI/present before its qualified pre-post reconstruction boundary");
+        const auto sourceJitter=requireTemporalUiOrigins();
+        const auto viewport=backend.viewport();const auto scissor=backend.scissor();
+        const auto output=backend.prepareTemporalUiBackground(original.defaultColor,original.defaultDepth,sourceJitter);
+        backend.promoteUiComposite(original.defaultColor,original.defaultDepth,output,sourceJitter);
+        if(camera)backend.bindTargets({cameraColor(*camera),nullptr,nullptr,nullptr},cameraDepth(*camera));
+        if(viewport)backend.setViewport(*viewport);if(scissor)backend.setScissor(*scissor);
     }
     void bindCamera(uint8_t* base,const NativeCameraBinding& binding) {
         // Actual native attachment selection is verified by OMGetRenderTargets.
@@ -606,6 +1034,15 @@ struct EngineDriver::State {
         if(PPC_LOAD_U32(0x82D0CF5C)!=binding.colorIdentity) PPC_STORE_U32(0x82D0CF5C,binding.colorIdentity);
         if(PPC_LOAD_U32(0x82D0CF58)!=binding.depthIdentity) PPC_STORE_U32(0x82D0CF58,binding.depthIdentity);
         camera=binding;
+        // Private/loading binds do not retire the last explicitly selected main admission.
+        loadingUiAdmission={};
+        if(binding.camera==PPC_LOAD_U32(0x82E07248)) {
+            loadingUiAdmission={binding.camera,contextId,binding.colorRaster,binding.depthRaster,0,
+                cameraOriginalColor(binding),cameraOriginalDepth(binding)};
+            const auto found=cameraLifetimes.find(binding.camera);
+            if(found!=cameraLifetimes.end()&&found->second.phase==NativeCameraLifetimePhase::Constructed&&
+                found->second.context==contextId)loadingUiAdmission.generation=found->second.generation;
+        }
     }
     void releaseBindingPool(EngineCpuCalls& cpu,uint8_t* base) {
         if(!bindingEntered) return;
@@ -652,7 +1089,10 @@ struct EngineDriver::State {
             const uint32_t value=PPC_LOAD_U32(alias);runtime.pointer(alias,4,true);
             if(value && value!=contextId) throw Failure("Native integration alias belongs to a different owner");
         }
-        ready=false;sharedColorCopiedCamera=0;sharedDepthCopiedCamera=0;PPC_STORE_U32(0x82D0CB08,0);
+        ready=false;sharedColorCopiedCamera=0;sharedDepthCopiedCamera=0;
+        sharedColorCopiedBacking.reset();sharedDepthCopiedBacking.reset();sharedColorCopiedGeneration=sharedDepthCopiedGeneration=0;
+        sharedColorCopySubmission.reset();sharedDepthCopySubmission.reset();
+        PPC_STORE_U32(0x82D0CB08,0);
         if(submissionReady) {
             // Normal application shutdown clears these first. Direct driver
             // retirement also invalidates its borrowed native identities.
@@ -729,6 +1169,347 @@ EngineDriver::~EngineDriver() {
         fprintf(stderr,"[NATIVE ENGINE] terminal shutdown releases host driver backing; original guest cleanup was not completed\n");
 }
 bool EngineDriver::started() const {state->requireCaller(state->runtime.base);return state->ready;}
+void EngineDriver::observeCameraLifetime(const PPCContext& c,uint8_t* base,uint32_t pc) {
+    auto& s=*state;s.requireCaller(base);
+    if(!s.ready)return; // An object outside this completed driver cannot authorize its UI.
+    const bool birth=pc==0x823F1EAC;
+    // lastFunction records the most recent callee, not the returning caller.
+    // Return-site LR proves the constructor/free callback continuation instead.
+    if((pc!=0x823F1EAC&&pc!=0x823F1D48&&pc!=0x823F1D98)||
+        (pc==0x823F1D48?c.lastFunction!=pc:uint32_t(c.lr)!=pc))
+        throw Failure("Original camera lifetime boundary/function mismatch");
+    const uint32_t camera=birth||pc==0x823F1D98?c.r31.u32:c.r3.u32;
+    if(!camera||(camera&3))throw Failure("Original camera lifetime has an invalid object address");
+    if(birth) {
+        // r3 is the plugin traversal result BEFORE mr r3,r31. The original
+        // caller ignores rollback; its returned object is never Constructed.
+        const auto old=s.cameraLifetimes.find(camera);
+        if(old!=s.cameraLifetimes.end())
+            throw Failure("Original camera constructor reused an unfreed typed object");
+        s.runtime.pointer(camera,0x8C,false);
+        if(c.r3.u32!=0x82CD1B30) {
+            s.cameraLifetimes[camera]={camera,s.contextId,0,NativeCameraLifetimePhase::PluginRollback};return;
+        }
+        if(PPC_LOAD_U8(camera)!=4||s.nextCameraBirth==UINT64_MAX)
+            throw Failure("Successful original camera construction has an invalid base type/generation");
+        s.cameraLifetimes[camera]={camera,s.contextId,++s.nextCameraBirth,NativeCameraLifetimePhase::Constructed};
+        return;
+    }
+    const auto found=s.cameraLifetimes.find(camera);
+    if(found==s.cameraLifetimes.end())return; // No receipt: no loading admission can exist.
+    if(found->second.context!=s.contextId)
+        throw Failure("Original camera destructor changed its native driver context");
+    if(pc==0x823F1D48) {
+        if(found->second.phase!=NativeCameraLifetimePhase::Constructed&&
+            found->second.phase!=NativeCameraLifetimePhase::PluginRollback)
+            throw Failure("Original camera destruction repeated or bypassed construction");
+        found->second.phase=NativeCameraLifetimePhase::Closing;
+    } else {
+        if(found->second.phase!=NativeCameraLifetimePhase::Closing)
+            throw Failure("Original camera free completion lacks its closing boundary");
+        // Free has returned. Do not read any freed camera bytes.
+        found->second.phase=NativeCameraLifetimePhase::Freed;
+        s.lastCameraRetirement=found->second;
+        s.cameraLifetimes.erase(found); // No accumulating Freed tombstones.
+    }
+}
+void EngineDriver::observeBeamLifetime(const PPCContext& c,uint8_t* base,uint32_t pc) {
+    auto& s=*state;s.requireCaller(base);
+    // These observations cannot authorize Original/spatial draws or motion.
+    if(!s.ready||!Graphics::temporalAntialiasing(s.backend.antialiasing()))return;
+    const auto need=[](bool v,const char* reason){if(!v)throw Failure(reason);};
+    need(currentContext==&c,"Original Beam event changed its owning CPU context");
+    const auto span=[&](uint32_t address,uint32_t bytes) {
+        need(address&&s.runtime.engineAudio,"Original Beam storage lacks its allocation observer");
+        const auto value=s.runtime.engineAudio->allocationSpan(address); // Query/Closing exceptions propagate.
+        need(value&&value->generation&&address>=value->address&&
+             uint64_t(address)+bytes<=uint64_t(value->address)+value->extent,
+             "Original Beam storage lacks a live complete observed bank span");
+        return NativeBeamStorageSpan{value->address,value->extent,value->generation};
+    };
+    const auto factory=[&] {
+        s.runtime.pointer(0x82CF26C4,40,false);s.runtime.pointer(0x8215866C,20,false);
+        need(PPC_LOAD_U32(0x82CF26C4)==0x8215866C&&PPC_LOAD_U32(0x82CF26C8)==0x821586A0&&
+             PPC_LOAD_U32(0x82CF26CC)==0x2E62656D&&PPC_LOAD_U32(0x82CF26D4)==2&&
+             PPC_LOAD_U32(0x82158674)==0x82775E68&&PPC_LOAD_U32(0x82158678)==0x82775E20&&
+             PPC_LOAD_U32(0x8215867C)==0x82775E40,
+             "Original Beam factory size/type/placement callbacks changed");
+    };
+    const auto frame=[&](uint32_t sp,uint32_t bytes) {
+        need(sp>=bytes&&!(sp&15)&&uint64_t(sp)+bytes<=UINT32_MAX,
+             "Original Beam event has an invalid original stack frame");
+        s.runtime.pointer(sp,bytes,false);
+        need(PPC_LOAD_U32(sp)==sp+bytes,"Original Beam event lost its original stack backchain");
+    };
+    const auto pending=[&](uint32_t factoryStack) {
+        return std::find_if(s.beamAllocations.begin(),s.beamAllocations.end(),[&](const auto& v){
+            return v.cpu==&c&&v.context==s.contextId&&v.factoryStack==factoryStack;
+        });
+    };
+    if(pc==0x8274D570) {
+        if(c.r31.u32!=0x82CF26C4)return; // Other original factories retain their execution.
+        factory();frame(c.r1.u32,0x70);const uint32_t outer=c.r1.u32+0x70;frame(outer,0xB0);
+        need(c.lastFunction==0x8274D530&&uint32_t(c.lr)==0x827744A4&&
+             PPC_LOAD_U32(c.r1.u32+0x68)==0x827744A4&&c.r4.u32==208&&c.r5.u32==c.r1.u32+0x50&&
+             PPC_LOAD_U32(c.r5.u32)==2&&PPC_LOAD_U32(c.r5.u32+4)==16&&!PPC_LOAD_U32(c.r5.u32+8)&&
+             (PPC_LOAD_U32(outer+0xA8)==0x8275971C||PPC_LOAD_U32(outer+0xA8)==0x8275828C),
+             "Original Beam allocation lacks its actual208/16 factory call");
+        const uint32_t allocator=c.r3.u32;s.runtime.pointer(allocator,4,false);
+        const uint32_t vtable=PPC_LOAD_U32(allocator);s.runtime.pointer(vtable,8,false);
+        const uint32_t allocate=PPC_LOAD_U32(vtable),release=PPC_LOAD_U32(vtable+4);
+        need(allocator==PPC_LOAD_U32(0x82DFE328)&&vtable==c.r10.u32&&allocate==c.r11.u32&&
+             allocate==c.ctr.u32&&allocate&&release&&!(allocate&3)&&!(release&3)&&
+             PPC_LOOKUP_FUNC(base,allocate)&&PPC_LOOKUP_FUNC(base,release),
+             "Original Beam allocation changed its actual provider callbacks");
+        need(pending(outer)==s.beamAllocations.end()&&s.beamAllocations.size()<32,
+             "Original Beam allocation overlaps or exceeds bounded genuine call nesting");
+        s.beamAllocations.push_back({&c,s.contextId,c.r1.u32,outer,c.r29.u32,c.r26.u32,c.r28.u32,0,
+                                    allocator,vtable,allocate,release,false});return;
+    }
+    if(pc==0x8274D574) {
+        const auto it=pending(c.r1.u32+0x70);if(it==s.beamAllocations.end())return;
+        frame(c.r1.u32,0x70);
+        need(c.r1.u32==it->stack&&uint32_t(c.lr)==pc&&!it->returned&&
+             c.r31.u32==0x82CF26C4&&c.r26.u32==it->record&&c.r28.u32==it->index&&c.r29.u32==it->parent,
+             "Original Beam allocation return lost its captured provider call");
+        it->result=c.r3.u32;it->returned=true;return;
+    }
+    if(pc==0x82774554) {
+        // Early capacity/definition failures have no allocator-call receipt.
+        // The actual null provider return branches here, bypassing74504.
+        const auto it=pending(c.r1.u32);if(it==s.beamAllocations.end())return;
+        frame(c.r1.u32,0xB0);factory();
+        need(c.r31.u32==0x82CF26C4&&it->returned&&!it->result&&!c.r3.u32&&!c.r30.u32&&
+             uint32_t(c.lr)==0x827744A4&&c.r26.u32==it->record&&c.r28.u32==it->index&&c.r29.u32==it->parent,
+             "Original Beam null-allocation exit lost its captured actual provider return");
+        s.beamAllocations.erase(it);return;
+    }
+    if(pc==0x82774504||pc==0x8277454C) {
+        if(c.r31.u32!=0x82CF26C4)return;
+        factory();frame(c.r1.u32,0xB0);const auto it=pending(c.r1.u32);
+        if(pc==0x82774504) {
+            need(!c.r29.u32,"Original Beam rejected factory path unexpectedly returned an object");
+            if(it!=s.beamAllocations.end()) {
+                need(it->returned&&it->result==c.r30.u32&&(!c.r30.u32||uint32_t(c.lr)==pc),
+                     "Original Beam rejected factory path lost its actual storage return/free");
+                s.beamAllocations.erase(it);
+            }
+            return; // Non-null constructor failure never receives a typed birth.
+        }
+        need(it!=s.beamAllocations.end()&&it->returned&&it->result&&c.r3.u32==c.r29.u32&&
+             c.r3.u32==c.r30.u32&&c.r3.u32==it->result&&!(c.r3.u32&15)&&uint32_t(c.lr)==0x827744E0&&
+             c.r26.u32==it->record&&c.r28.u32==it->index&&PPC_LOAD_U32(c.r1.u32+0x60)==it->parent&&
+             PPC_LOAD_U32(c.r1.u32+0x64)==it->record&&PPC_LOAD_U32(c.r1.u32+0x68)==it->index&&
+             !PPC_LOAD_U8(c.r1.u32+0x6C)&&PPC_LOAD_U32(c.r1.u32+0xA8)!=0,
+             "Original Beam completed factory lacks its genuine successful creation record");
+        NativeBeamLifetime value;value.owner=c.r3.u32;value.context=s.contextId;
+        value.parent=it->parent;value.record=it->record;value.index=it->index;value.factory=c.r31.u32;
+        value.allocator=it->allocator;value.allocatorVtable=it->vtable;
+        value.allocateCallback=it->allocate;value.freeCallback=it->release;
+        value.creationCaller=PPC_LOAD_U32(c.r1.u32+0xA8);
+        need((value.creationCaller==0x8275971C||value.creationCaller==0x8275828C)&&
+             !s.beamLifetimes.contains(value.owner)&&s.nextBeamBirth!=UINT64_MAX,
+             "Original Beam birth reused an unretired typed object or changed its source caller");
+        value.storage=span(value.owner,208);s.runtime.pointer(value.owner,208,false);
+        value.parentStorage=span(value.parent,0xD0);s.runtime.pointer(value.parent,0xD0,false);
+        const int32_t count=int16_t(PPC_LOAD_U16(value.parent+0x70));
+        need(count>0&&value.index<uint32_t(count)&&value.index<=UINT16_MAX&&
+             uint64_t(value.parent)+0xD0+20ull*value.index+20<=UINT32_MAX&&
+             value.record==value.parent+0xD0+20*value.index,
+             "Original Beam birth lost its exact parent definition-record slot");
+        value.recordStorage=span(value.record,20);s.runtime.pointer(value.record,20,false);
+        value.parentData=PPC_LOAD_U32(value.parent+8);value.definition=PPC_LOAD_U32(value.record+12);
+        need(value.parentData&&PPC_LOAD_U32(value.record+8)==value.factory&&
+             PPC_LOAD_U32(value.owner)==0x821586A8&&PPC_LOAD_U32(value.owner+0x14)==value.parent&&
+             PPC_LOAD_U16(value.owner+0x1E)==value.index&&PPC_LOAD_U32(value.owner+0xA0)==value.definition,
+             "Original Beam birth changed its completed type/parent/index/definition");
+        value.definitionStorage=span(value.definition,104);
+        std::memcpy(value.definitionBytes.data(),s.runtime.pointer(value.definition,104,false),104);
+        value.texture=PPC_LOAD_U32(value.owner+0xA4);
+        if(value.texture) {
+            value.textureStorage=span(value.texture,0x54);s.runtime.pointer(value.texture,0x54,false);
+            value.raster=PPC_LOAD_U32(value.texture);value.sampling=PPC_LOAD_U32(value.texture+0x50);
+            need(value.raster,"Original Beam constructed texture has no original raster");
+        } else {
+            need(std::all_of(value.definitionBytes.begin(),value.definitionBytes.begin()+16,[](uint8_t v){return !v;}),
+                 "Original Beam success has a missing required non-null definition texture");
+        }
+        s.runtime.pointer(value.allocator,4,false);s.runtime.pointer(value.allocatorVtable,8,false);
+        need(PPC_LOAD_U32(0x82DFE328)==value.allocator&&PPC_LOAD_U32(value.allocator)==value.allocatorVtable&&
+             PPC_LOAD_U32(value.allocatorVtable)==value.allocateCallback&&PPC_LOAD_U32(value.allocatorVtable+4)==value.freeCallback,
+             "Original Beam provider changed between its actual allocation and completion");
+        value.generation=++s.nextBeamBirth;value.phase=NativeBeamLifetimePhase::Constructed;
+        s.beamLifetimes.emplace(value.owner,State::BeamLifeState{value});s.beamAllocations.erase(it);
+        if(value.generation<=16||(value.generation&(value.generation-1))==0)
+            std::fprintf(stderr,"[NATIVE BEAM BIRTH] owner=%08X birth=%llu context=%08X parent=%08X record=%08X index=%u definition=%08X texture=%08X provider=%08X/%08X callbacks=%08X/%08X bank=%08X/%08X/%llu caller=%08X motion_admitted=0\n",
+                value.owner,static_cast<unsigned long long>(value.generation),value.context,value.parent,value.record,value.index,
+                value.definition,value.texture,value.allocator,value.allocatorVtable,value.allocateCallback,value.freeCallback,
+                value.storage.address,value.storage.extent,static_cast<unsigned long long>(value.storage.generation),value.creationCaller);
+        return;
+    }
+    const bool entry=pc==0x8275A978||pc==0x82775CA8||pc==0x82775EC0;
+    const uint32_t owner=pc==0x8275A978?c.r4.u32:entry?c.r3.u32:c.r31.u32;
+    const auto found=s.beamLifetimes.find(owner);if(found==s.beamLifetimes.end())return; // Never adopt an unknown address.
+    auto& life=found->second;
+    need(life.receipt.context==s.contextId,"Original Beam retirement changed its driver context");
+    if(entry) {
+        need(c.lastFunction==pc,"Original Beam retirement lost its actual original entry");
+        if(pc==0x8275A978) {
+            need(life.receipt.phase==NativeBeamLifetimePhase::Constructed&&c.r3.u32==life.receipt.factory,
+                 "Original Beam retirement repeated or changed its factory");
+            need(span(owner,208)==life.receipt.storage,"Original Beam retirement changed its live storage");
+            s.runtime.pointer(owner,208,false);life.recycled=(PPC_LOAD_U32(owner+0x10)&0x80000000)!=0;
+            life.retirementStack=c.r1.u32;life.receipt.phase=NativeBeamLifetimePhase::Retired;return;
+        }
+        need(life.receipt.phase==NativeBeamLifetimePhase::Constructed||life.receipt.phase==NativeBeamLifetimePhase::Retired,
+             "Original Beam destructor repeated or bypassed its genuine typed construction");
+        need(span(owner,208)==life.receipt.storage,"Original Beam destructor changed its live storage");
+        life.closingStack=c.r1.u32;life.closingPC=pc;life.deleteFlags=pc==0x82775EC0?c.r4.u32:0;
+        life.receipt.phase=NativeBeamLifetimePhase::Closing;return;
+    }
+    if(pc==0x8275A9B0) {
+        need(life.recycled&&life.retirementStack==c.r1.u32+0x60&&
+             life.receipt.phase==NativeBeamLifetimePhase::Retired,
+             "Original Beam recycle completion lacks its genuine logical retirement");
+        frame(c.r1.u32,0x60);s.lastBeamRetirement=life.receipt;s.beamLifetimes.erase(found);return;
+    }
+    if(pc==0x82775CF0||pc==0x82775F28) {
+        const uint32_t bytes=pc==0x82775CF0?0x60:0x70;
+        need(life.receipt.phase==NativeBeamLifetimePhase::Closing&&life.closingStack==c.r1.u32+bytes&&
+             life.closingPC==(pc==0x82775CF0?0x82775CA8:0x82775EC0)&&
+             uint32_t(c.lr)==(pc==0x82775CF0?0x82775CE4:0x82775F04)&&
+             (pc==0x82775CF0||(!(life.deleteFlags&1)&&c.r30.u32==life.deleteFlags)),
+             "Original Beam logical-close return lacks its authenticated destructor branch");
+        frame(c.r1.u32,bytes);life.receipt.phase=NativeBeamLifetimePhase::Closed;
+        if(!life.retirementStack){s.lastBeamRetirement=life.receipt;s.beamLifetimes.erase(found);}return;
+    }
+    if(pc==0x82775F24||pc==0x8275A9E0) {
+        const bool deleting=pc==0x82775F24;const uint32_t bytes=deleting?0x70:0x60;
+        need(uint32_t(c.lr)==pc&&
+             (deleting?(life.receipt.phase==NativeBeamLifetimePhase::Closing&&life.closingPC==0x82775EC0&&
+                        life.closingStack==c.r1.u32+bytes&&(life.deleteFlags&1)&&c.r30.u32==life.deleteFlags):
+                       (life.receipt.phase==NativeBeamLifetimePhase::Closed&&!life.recycled&&
+                        life.retirementStack==c.r1.u32+bytes)),
+             "Original Beam free completion lacks its actual typed closing/call branch");
+        frame(c.r1.u32,bytes); // Stack is live; owner storage is not read after free.
+        life.receipt.phase=NativeBeamLifetimePhase::Freed;s.lastBeamRetirement=life.receipt;
+        s.beamLifetimes.erase(found);return;
+    }
+    throw Failure("Unknown original Beam lifecycle instruction boundary");
+}
+std::optional<NativeBeamLifetime> EngineDriver::observedBeamLifetime(uint32_t owner) const {
+    state->requireCaller(state->runtime.base);const auto it=state->beamLifetimes.find(owner);
+    if(it!=state->beamLifetimes.end())return it->second.receipt;
+    if(state->lastBeamRetirement&&state->lastBeamRetirement->owner==owner)return state->lastBeamRetirement;
+    return std::nullopt;
+}
+NativeBeamLifetime EngineDriver::requireBeamLifetime(const NativeBeamLifetime& expected) const {
+    auto& s=*state;s.requireCaller(s.runtime.base);auto* base=s.runtime.base;
+    const auto need=[](bool v,const char* reason){if(!v)throw Failure(reason);};
+    const auto it=s.beamLifetimes.find(expected.owner);
+    // Sticky typed receipt comparison precedes every owner/parent/record read.
+    need(s.ready&&expected.generation&&expected.phase==NativeBeamLifetimePhase::Constructed&&
+         expected.context==s.contextId&&it!=s.beamLifetimes.end()&&it->second.receipt==expected,
+         "Original Beam lost its genuine captured typed construction lifetime");
+    const auto span=[&](uint32_t address,uint32_t bytes,const NativeBeamStorageSpan& stored) {
+        need(bool(s.runtime.engineAudio),"Original Beam storage observer disappeared");
+        const auto now=s.runtime.engineAudio->allocationSpan(address); // Errors/Closing are rejection, never nullopt authority.
+        need(now&&now->generation&&address>=now->address&&uint64_t(address)+bytes<=uint64_t(now->address)+now->extent&&
+             NativeBeamStorageSpan{now->address,now->extent,now->generation}==stored,
+             "Original Beam captured bank provenance changed or ceased to cover its full storage");
+    };
+    span(expected.owner,208,expected.storage);span(expected.parent,0xD0,expected.parentStorage);
+    span(expected.record,20,expected.recordStorage);span(expected.definition,104,expected.definitionStorage);
+    s.runtime.pointer(expected.owner,208,false);s.runtime.pointer(expected.parent,0xD0,false);s.runtime.pointer(expected.record,20,false);
+    const int32_t count=int16_t(PPC_LOAD_U16(expected.parent+0x70));
+    need(count>0&&expected.index<uint32_t(count)&&
+         uint64_t(expected.parent)+0xD0+20ull*expected.index+20<=UINT32_MAX&&
+         expected.record==expected.parent+0xD0+20*expected.index&&PPC_LOAD_U32(expected.parent+8)==expected.parentData&&
+         PPC_LOAD_U32(expected.record+4)==expected.owner&&PPC_LOAD_U32(expected.record+8)==expected.factory&&
+         PPC_LOAD_U32(expected.record+12)==expected.definition&&PPC_LOAD_U32(expected.owner)==0x821586A8&&
+         PPC_LOAD_U32(expected.owner+0x14)==expected.parent&&PPC_LOAD_U16(expected.owner+0x1E)==expected.index&&
+         PPC_LOAD_U32(expected.owner+0xA0)==expected.definition&&PPC_LOAD_U32(expected.owner+0xA4)==expected.texture,
+         "Original Beam changed its live parent/record/type/definition/texture association");
+    need(!std::memcmp(s.runtime.pointer(expected.definition,104,false),expected.definitionBytes.data(),104),
+         "Original Beam immutable definition changed during its typed producer birth");
+    if(expected.texture) {
+        span(expected.texture,0x54,expected.textureStorage);s.runtime.pointer(expected.texture,0x54,false);
+        need(PPC_LOAD_U32(expected.texture)==expected.raster&&PPC_LOAD_U32(expected.texture+0x50)==expected.sampling,
+             "Original Beam immutable texture/raster/sampler profile changed during its typed producer birth");
+    }
+    need(PPC_LOAD_U32(0x82DFE328)==expected.allocator,"Original Beam allocator registration changed during its typed birth");
+    s.runtime.pointer(expected.allocator,4,false);s.runtime.pointer(expected.allocatorVtable,8,false);
+    need(PPC_LOAD_U32(expected.allocator)==expected.allocatorVtable&&
+         PPC_LOAD_U32(expected.allocatorVtable)==expected.allocateCallback&&
+         PPC_LOAD_U32(expected.allocatorVtable+4)==expected.freeCallback,
+         "Original Beam allocator callbacks changed during its typed birth");
+    return expected; // Read-only receipt; no geometry/history/frame admission.
+}
+void EngineDriver::observeMainCameraPublication(const PPCContext& c,uint8_t* base) {
+    auto& s=*state;s.requireCaller(base);
+    if(!s.ready||!Graphics::temporalAntialiasing(s.backend.antialiasing())||c.r30.u32!=0)return;
+    const uint32_t sp=c.r1.u32,manager=c.r31.u32;
+    if(currentContext!=&c||uint32_t(c.lr)!=0x8269D76C||sp<0xF0||(sp&15)||sp>UINT32_MAX-0xF0||
+        !manager||(manager&3)||!s.submissionReady||!s.rasters)
+        throw Failure("Original main camera publication lacks its completed row-zero frame");
+    s.runtime.pointer(sp,0xF0,false);
+    if(PPC_LOAD_U32(sp)!=sp+0xF0||PPC_LOAD_U32(sp+0xE8)!=0x823B6610||
+        PPC_LOAD_U32(0x82D08B10)!=manager)
+        throw Failure("Original main camera publication lost its manager/reset caller");
+    s.runtime.pointer(manager,0x140,false);
+    if(PPC_LOAD_U32(manager)!=0x820B6DEC||PPC_LOAD_U32(manager+8)!=0x820B6DE8||
+        PPC_LOAD_U32(manager+0x128)!=4||c.r11.u32!=0xE4||c.r3.u32!=0x820B67B8||
+        PPC_LOAD_U32(manager+0xE4)!=c.r3.u32||c.r27.u32!=1280||c.r28.u32!=720)
+        throw Failure("Original main camera publication lacks its final full-size row/query metadata");
+    const uint32_t camera=PPC_LOAD_U32(manager+0x14);
+    // Genuine typed birth is checked BEFORE any camera or associated raster bytes.
+    const auto& birth=s.requireMainCameraBirth(camera);
+    if(!camera||(camera&3)||camera==PPC_LOAD_U32(0x82E07248)||
+        PPC_LOAD_U32(manager+0x18)==camera||PPC_LOAD_U32(manager+0x1C)==camera)
+        throw Failure("Original main camera publication lacks its unique non-loading row-zero owner");
+    if(s.temporalPostOwner.admission.camera||s.backend.temporalSceneActive()||
+        (s.camera&&(s.camera->camera==camera||s.camera->camera==s.selectedMainAdmission.camera)))
+        throw Failure("Original main camera publication conflicts with an existing bound/frame authority");
+    s.validateTargets(base);
+    const uint32_t left=PPC_LOAD_U32(manager+0x24),top=PPC_LOAD_U32(manager+0x28),
+        right=PPC_LOAD_U32(manager+0x2C),bottom=PPC_LOAD_U32(manager+0x30);
+    if(left||top||right<left||bottom<top||right-left!=c.r27.u32||bottom-top!=c.r28.u32||
+        s.width!=1280||s.height!=720)
+        throw Failure("Original main camera publication has an unqualified actual full-size row rectangle");
+    s.runtime.pointer(camera,0x8C,false);
+    if(PPC_LOAD_U8(camera)!=4)
+        throw Failure("Original main camera publication changed its constructed camera type");
+    const uint32_t colorRaster=PPC_LOAD_U32(camera+0x60),depthRaster=PPC_LOAD_U32(camera+0x64);
+    const auto pair=s.rasters->cameraSurfaces(base,colorRaster,5,depthRaster);
+    if(!colorRaster||!depthRaster||PPC_LOAD_U32(colorRaster+0xC)!=right-left||
+        PPC_LOAD_U32(colorRaster+0x10)!=bottom-top||PPC_LOAD_U32(depthRaster+0xC)!=right-left||
+        PPC_LOAD_U32(depthRaster+0x10)!=bottom-top||!pair[0].color||!pair[1].depth||
+        s.rasters->ownedColor(pair[0].identity)!=s.resources.resources().defaultColor||
+        s.rasters->ownedDepth(pair[1].identity)!=s.resources.resources().defaultDepth)
+        throw Failure("Original main camera publication lost its registered full-size default owner pair");
+    // XY/extent are the actual original row rectangle and raster fields. The
+    // original native camera API uses the fixed logical reversed-depth 1->0.
+    const NativeCameraBinding binding{camera,colorRaster,depthRaster,pair[0].identity,pair[1].identity,
+        {left,top,right-left,bottom-top,0x3F800000,0}};
+    const auto admission=s.captureMainCameraAdmission(binding); // Bank errors reject; only nullopt permits the real occupied pool.
+    if(!admission.camera||admission.birthGeneration!=birth.generation)
+        throw Failure("Original main camera publication lost its actual completed construction receipt");
+    const uint64_t previousBirth=s.selectedMainAdmission.birthGeneration;
+    const uint32_t previousCamera=s.selectedMainAdmission.camera;
+    s.selectedMainAdmission=admission; // Owner-ready publication only; no binding, clear, frame or history receipt.
+    std::fprintf(stderr,"[NATIVE MAIN CAMERA PUBLICATION] site=8269D778 camera=%08X birth=%llu old_camera=%08X old_birth=%llu context=%08X engine=%08X manager=%08X color=%08X depth=%08X row=0 rect=%u,%u,%u,%u query=%08X authority=%u post_empty=1 scene_inactive=1 bound=%08X presentation=%llu\n",
+        camera,static_cast<unsigned long long>(admission.birthGeneration),previousCamera,
+        static_cast<unsigned long long>(previousBirth),s.contextId,s.engine,manager,admission.colorIdentity,admission.depthIdentity,
+        left,top,right,bottom,c.r3.u32,unsigned(admission.authority),s.camera?s.camera->camera:0,
+        static_cast<unsigned long long>(s.frontCopies));
+}
+std::optional<NativeCameraLifetime> EngineDriver::observedCameraLifetime(uint32_t camera) const {
+    state->requireCaller(state->runtime.base);
+    const auto found=state->cameraLifetimes.find(camera);
+    if(found!=state->cameraLifetimes.end())return found->second;
+    if(state->lastCameraRetirement&&state->lastCameraRetirement->camera==camera)return state->lastCameraRetirement;
+    return std::nullopt;
+}
 EngineViewportSurfaces& EngineDriver::viewportSurfaces() {state->requireCaller(state->runtime.base);return *state->viewportSurfaces;}
 EngineSceneCopies& EngineDriver::sceneCopies() {state->requireCaller(state->runtime.base);return *state->sceneCopies;}
 EngineEffects& EngineDriver::effects() {
@@ -1015,6 +1796,25 @@ uint32_t EngineDriver::applicationSampler(uint8_t* base,uint32_t application,uin
     requireStateContext(PPC_LOAD_U32(0x82D6D890));
     return s.renderState->applicationSampler(base,application,stage,selector,value,apply);
 }
+namespace {
+// Diagnostic (SIMPSONS_DRAW_CALLERS=1): distinct guest return-address chains
+// of each 2D draw path, to attribute HUD and world draws to original callers.
+void traceDrawCallers(const char* kind,const PPCContext& c,uint8_t* base,bool ui) {
+    static const bool enabled=[]{const char* t=std::getenv("SIMPSONS_DRAW_CALLERS");return t&&*t=='1';}();
+    if(!enabled)return;
+    std::array<uint32_t,10> chain{};uint32_t sp=c.r1.u32;chain[0]=uint32_t(c.lr);
+    for(size_t i=1;i<chain.size();++i) {
+        const uint32_t next=PPC_LOAD_U32(sp);if(!next||next<=sp||next-sp>0x10000)break;
+        chain[i]=PPC_LOAD_U32(next-8);sp=next;
+    }
+    static std::vector<std::pair<std::string,std::array<uint32_t,10>>> seen;
+    const std::pair<std::string,std::array<uint32_t,10>> key{kind,chain};
+    if(std::find(seen.begin(),seen.end(),key)!=seen.end()||seen.size()>=256)return;
+    seen.push_back(key);
+    std::fprintf(stderr,"[DRAW CALLERS] kind=%s ui=%u chain=%08X %08X %08X %08X %08X %08X %08X %08X %08X %08X\n",kind,unsigned(ui),
+        chain[0],chain[1],chain[2],chain[3],chain[4],chain[5],chain[6],chain[7],chain[8],chain[9]);
+}
+}
 void EngineDriver::directSpriteBatch(PPCContext& c,uint8_t* base,bool begin,bool clearTextures,uint32_t endpoint){
     auto& s=*state;s.requireCaller(base);
     if(s.directSprite.active||!s.ready||!s.submissionReady||currentContext!=&c)
@@ -1163,12 +1963,15 @@ void EngineDriver::immediateBufferLifecycle(PPCContext& c,uint8_t* base,bool rel
 }
 void EngineDriver::bindImmediateBuffer(uint8_t* base) {
     auto& s=*state;s.requireCaller(base);const auto row=PPC_LOAD_U32(0x82DFEB20);
+    StallProfiler::Scope bindingProfile(StallProfiler::Section::Rendering,"Immediate.bindStorage",currentContext,row+8);
     auto buffer=s.immediateBuffer(base,row+8);if(!buffer)throw Failure("Unknown original immediate vertex row");
     const auto start=PPC_LOAD_U32(row+4),cursor=PPC_LOAD_U32(row);
     if(cursor<start||cursor-start>0x100000||((cursor-start)&31))throw Failure("Original immediate vertex cursor exceeds its allocation");
-    // Snapshot the current CPU storage. Any future draw must upload its final
-    // range at that engine boundary; the unported general draw rejects there.
-    s.backend.writeBuffer(buffer,0,{s.runtime.pointer(start,0x100000,false),0x100000});
+    // Every qualified consumer uploads its final range after the original CPU
+    // fill loop. Preserve full allocation validation and ordered pending Im2D
+    // draining, without transferring unused setup bytes; general draws reject.
+    {StallProfiler::Scope storageProfile(StallProfiler::Section::Rendering,"Immediate.prepareStorage",currentContext,row+8);
+    s.runtime.pointer(start,0x100000,false);s.backend.writeBuffer(buffer,0,{});}
     s.backend.bindEngineVertexStorage(buffer,cursor-start,32);
     PPC_STORE_U32(0x82D0CAB0,row+8);PPC_STORE_U32(0x82D0CAB4,cursor-start);PPC_STORE_U32(0x82D0CAB8,32);
 }
@@ -1218,7 +2021,8 @@ void EngineDriver::immediateGeometryState(PPCContext& c,uint8_t* base,bool begin
     if(begin){
         if(decalMode)decalOperation(c,base,0x82751B74);
         const uint32_t pixelSlot=(mode&4)?((mode&2)?24u:23u):(mode&2)?17u:9u;
-        s.screenMaterial(base,(mode&4)?22:8);s.screenMaterial(base,pixelSlot);
+        {StallProfiler::Scope materialsProfile(StallProfiler::Section::Rendering,"Immediate.setupMaterials",&c,c.r3.u32);
+        s.screenMaterial(base,(mode&4)?22:8);s.screenMaterial(base,pixelSlot);}
         bindImmediateBuffer(base);next.setScalar(S::Cull,0);next.setPackedBlend(0,0x10706);s.backend.clearEngineTexture(0);
         PPC_STORE_U32(0x82CD1A6C,PPC_LOAD_U32((mode&4)?0x82CF1FC8:0x82CF1FBC));
         PPC_STORE_U32(0x82CD1A70,PPC_LOAD_U32((mode&4)?((mode&2)?0x82CF1FB0:0x82CF1FA4):(mode&2)?0x82CF1F98:0x82CF1F8C));
@@ -1234,7 +2038,8 @@ void EngineDriver::immediateGeometryState(PPCContext& c,uint8_t* base,bool begin
                PPC_LOAD_U32(b.entry+4)!=b.mode||b.count||b.matrix||b.color||b.soft||b.projectedMatrix||
                PPC_LOAD_U32(b.entry)!=b.total||b.total!=4*b.draws)
                 throw Failure("Billboard cleanup precedes original particle-loop completion");
-            std::fprintf(stderr,"[NATIVE BILLBOARD END] owner=%08X draws=%u vertices=%u\n",b.owner,b.draws,b.total);
+            if(b.sampledTrace)
+                std::fprintf(stderr,"[NATIVE BILLBOARD END] owner=%08X draws=%u vertices=%u\n",b.owner,b.draws,b.total);
             s.billboard={};
         }
         if(s.trail.owner){
@@ -1245,7 +2050,9 @@ void EngineDriver::immediateGeometryState(PPCContext& c,uint8_t* base,bool begin
     }
     // Qualified immediate modes are realized by their native trail/billboard
     // draws after the original CPU fill loops.
-    s.renderState->publishScreenState(next);
+    {StallProfiler::Scope publishProfile(StallProfiler::Section::Rendering,
+        begin?"Immediate.begin.publishState":"Immediate.end.publishState",&c,c.r3.u32);
+    s.renderState->publishScreenState(next);}
 }
 void EngineDriver::immediateDeclaration(PPCContext& c,uint8_t* base,bool release) {
     auto& s=*state;s.requireCaller(base);
@@ -1390,6 +2197,7 @@ void EngineDriver::finishTrailBatch(PPCContext& c,uint8_t* base) {
         std::memcpy(&draw.vertices[i],values.data(),32);}
     s.backend.writeBuffer(buffer,t.source-PPC_LOAD_U32(t.row+4),{reinterpret_cast<const uint8_t*>(draw.vertices.data()),32*t.count});
     const auto camera=cameraBinding();bool alphaOne=false;
+    if(draw.colorMask&7)s.backend.rejectUntrackedTemporalWorldDraw(color(camera.colorIdentity,alphaOne),depth(camera.depthIdentity),"immediate geometry");
     s.backend.drawImmediate(color(camera.colorIdentity,alphaOne),depth(camera.depthIdentity),draw);
     static unsigned traced=0;if(traced++<5)std::fprintf(stderr,"[NATIVE TRAIL DRAW] owner=%08X vertices=%u original_cpu_vertices=true\n",t.owner,t.count);
     t.count=t.source=0;draw.vertices.clear();
@@ -1476,8 +2284,13 @@ void EngineDriver::billboardOperation(PPCContext& c,uint8_t* base,uint32_t site)
         if(mode&2)s.backend.bindEngineTexture(1,next.draw.texture2);else s.backend.clearEngineTexture(1);
         s.renderState->publishScreenState(post);b=std::move(next);
         c.r26.s64=int64_t(int32_t(0x82D10000));c.r30.u64=post.scalar(S::AlphaReference);c.lr=0x8275F2F8;
-        std::fprintf(stderr,"[NATIVE BILLBOARD BEGIN] owner=%08X texture=%08X raster=%08X mode=%u blend=%08X depth=%u/%u alpha=%u\n",
-            b.owner,b.texture,b.raster,b.mode,blend,post.scalar(S::DepthEnable),post.scalar(S::DepthWrite),post.scalar(S::AlphaReference));
+        // Sample once per completed Begin so the matching successful End uses
+        // the same decision. Validation, publication and cleanup stay unconditional.
+        static thread_local uint32_t billboardTraceSample{};
+        b.sampledTrace=sampleHotLog(billboardTraceSample);
+        if(b.sampledTrace)
+            std::fprintf(stderr,"[NATIVE BILLBOARD BEGIN] owner=%08X texture=%08X raster=%08X mode=%u blend=%08X depth=%u/%u alpha=%u\n",
+                b.owner,b.texture,b.raster,b.mode,blend,post.scalar(S::DepthEnable),post.scalar(S::DepthWrite),post.scalar(S::AlphaReference));
         return;
     }
     need(b.owner&&b.cpu==&c&&PPC_LOAD_U32(b.stack)==b.stack+0x1F0&&PPC_LOAD_U32(0x82DFEB20)==b.row&&
@@ -1560,6 +2373,7 @@ void EngineDriver::billboardOperation(PPCContext& c,uint8_t* base,uint32_t site)
     auto buffer=s.immediateBuffer(base,b.row+8);s.backend.writeBuffer(buffer,b.source-PPC_LOAD_U32(b.row+4),
         {reinterpret_cast<const uint8_t*>(draw.vertices.data()),128});
     bool alphaOne=false;const auto target=color(camera.colorIdentity,alphaOne);need(!alphaOne,"Billboard target requires unqualified alpha synthesis");
+    if(draw.colorMask&7)s.backend.rejectUntrackedTemporalWorldDraw(target,depth(camera.depthIdentity),"immediate geometry");
     s.backend.drawImmediate(target,depth(camera.depthIdentity),draw);++b.draws;
     if(!s.runtime.frameCaptureDirectory.empty()&&b.draws==1) {
         const auto directory=s.runtime.frameCaptureDirectory/"billboard-native";std::filesystem::create_directories(directory);
@@ -1574,6 +2388,7 @@ void EngineDriver::billboardOperation(PPCContext& c,uint8_t* base,uint32_t site)
     b.source=b.count=0;b.matrix=b.color=b.soft=b.projectedMatrix=false;draw.vertices.clear();
 }
 uint64_t EngineDriver::immediateDrawCount() const {return state->backend.immediateDrawCount();}
+uint64_t EngineDriver::nativeBufferUploadCount() const {return state->backend.bufferUploadCount();}
 // 8277B230 transforms the source polyline to view space; 8277B040 computes
 // its perpendicular widths and fills each quad. Only GPU setup and submission
 // are replaced here, after those original calculations have completed.
@@ -1726,6 +2541,7 @@ void EngineDriver::beamOperation(PPCContext& c,uint8_t* base,uint32_t site) {
     auto buffer=s.immediateBuffer(base,b.row+8);s.backend.writeBuffer(buffer,b.source-PPC_LOAD_U32(b.row+4),
         {reinterpret_cast<const uint8_t*>(draw.vertices.data()),128});
     bool alphaOne=false;const auto target=color(camera.colorIdentity,alphaOne);need(!alphaOne,"Beam target requires unqualified alpha synthesis");
+    if(draw.colorMask&7)s.backend.rejectUntrackedTemporalWorldDraw(target,depth(camera.depthIdentity),"immediate geometry");
     s.backend.drawImmediate(target,depth(camera.depthIdentity),draw);++b.draws;
     {static thread_local uint32_t beamDrawSample{};if(sampleHotLog(beamDrawSample))
         std::fprintf(stderr,"[NATIVE BEAM DRAW] owner=%08X item=%08X segment=%u endpoint=%u vertices=4 original_cpu_vertices=true\n",b.owner,b.item,b.draws,b.endpoint);}
@@ -1752,6 +2568,116 @@ void EngineDriver::submitImmediateVertices(uint8_t* base,Graphics::ImmediateDraw
         {reinterpret_cast<const uint8_t*>(draw.vertices.data()),32*count});
     bool alphaOne=false;const auto target=color(camera.colorIdentity,alphaOne);
     if(alphaOne)throw Failure("Immediate effect target requires unqualified alpha synthesis");
+    // Failure-only evidence: these are the same RGB/active/owned-pair conditions
+    // under which the existing guard below rejects. No history admission follows.
+    if((draw.colorMask&7)&&!s.immediateRejectionDiagnostic) {
+        try {
+            const auto diagnosticDepth=depth(camera.depthIdentity);
+            if(s.backend.temporalSceneActive()&&s.backend.temporalSceneOwnsTargets(target,diagnosticDepth)) {
+                s.immediateRejectionDiagnostic=true;
+                std::ostringstream info;info<<std::hex;
+                const auto& e=s.immediateEffect;const bool effect=&draw==&e.draw;
+                const auto* cpu=currentContext;
+                info<<"[NATIVE UNTRACKED IMMEDIATE DIAGNOSTIC] before_original_rejection=1 history_admitted=0 numeric_base=hex_except_jitter_and_byte_counts\n"
+                    <<"effect_scope="<<effect<<" kind="<<(effect?e.kind:0)<<" owner="<<(effect?e.owner:0)
+                    <<" definition="<<(effect?e.definition:0)<<" texture="<<(effect?e.texture:0)
+                    <<" raster="<<(effect?e.raster:0)<<" sampling="<<(effect?e.sampling:0)<<"\n"
+                    <<"context="<<s.contextId<<" engine="<<s.engine<<" cpu_matches_effect="<<(effect&&cpu==e.cpu)
+                    <<" camera="<<camera.camera<<" color_id="<<camera.colorIdentity<<" depth_id="<<camera.depthIdentity
+                    <<" selected_main="<<s.selectedMainAdmission.camera<<" selected_birth="<<s.selectedMainAdmission.birthGeneration
+                    <<" post_camera="<<s.temporalPostOwner.admission.camera<<" post_birth="<<s.temporalPostOwner.admission.birthGeneration
+                    <<" post_clear_mask="<<s.temporalPostOwner.clearMask<<" post_presentation="<<s.temporalPostOwner.presentation
+                    <<" presentation="<<s.frontCopies<<" clear_count="<<s.cameraClears<<"\n"
+                    <<"row="<<row<<" source="<<source<<" vertices="<<count<<" primitive="<<draw.primitive
+                    <<" matrix="<<(effect&&e.matrix)<<" color="<<(effect&&e.color)<<" original_draws="<<(effect?e.draws:0)
+                    <<" stack="<<(effect?e.stack:0)<<" frame_bytes="<<(effect?e.frame:0)<<" entry="<<(effect?e.entry:0)<<"\n"
+                    <<"color_logical="<<target->width<<"x"<<target->height<<" color_storage="<<target->pixelWidth()<<"x"<<target->pixelHeight()
+                    <<" depth_logical="<<diagnosticDepth->pixelWidth()<<"x"<<diagnosticDepth->pixelHeight()
+                    <<" depth_storage="<<diagnosticDepth->storageWidth()<<"x"<<diagnosticDepth->storageHeight()<<"\n"
+                    <<"color_mask="<<draw.colorMask<<" depth_enable="<<draw.depthEnable<<" depth_write="<<draw.depthWrite
+                    <<" depth_compare="<<draw.depthCompare<<" blend="<<draw.blendWord<<" alpha_test="<<draw.alphaTest
+                    <<" alpha_reference="<<draw.alphaReference<<" null_texture="<<draw.nullTexture<<"\n";
+                if(cpu) {
+                    info<<"cpu_last_function="<<cpu->lastFunction<<" cpu_lr="<<uint32_t(cpu->lr)<<" cpu_sp="<<cpu->r1.u32<<" cpu_r3="<<cpu->r3.u32
+                        <<" cpu_r11="<<cpu->r11.u32<<" cpu_r31="<<cpu->r31.u32<<"\n";
+                    const std::array<uint64_t,13> fpr={cpu->f19.u64,cpu->f20.u64,cpu->f21.u64,cpu->f22.u64,cpu->f23.u64,
+                        cpu->f24.u64,cpu->f25.u64,cpu->f26.u64,cpu->f27.u64,cpu->f28.u64,cpu->f29.u64,cpu->f30.u64,cpu->f31.u64};
+                    for(unsigned i=0;i<fpr.size();++i)info<<"cpu_f"<<std::dec<<i+19<<std::hex<<"_bits="<<fpr[i]<<"\n";
+                }
+                const auto attempt=[&](const char* name,auto&& action) {
+                    try {action();}catch(const std::exception& error){info<<name<<"_query_error="<<error.what()<<"\n";}
+                    catch(...){info<<name<<"_query_error=unknown\n";}
+                };
+                attempt("scene",[&]{const auto jitter=s.backend.temporalSceneJitter();info<<std::dec
+                    <<"source_jitter="<<jitter[0]<<","<<jitter[1]<<" has_geometry="<<s.backend.temporalSceneHasGeometry()<<std::hex<<"\n";});
+                const auto output=s.backend.outputExtent();info<<"aa_mode="<<uint32_t(s.backend.antialiasing())
+                    <<" output_extent="<<output[0]<<"x"<<output[1]<<"\n";
+                const auto span=[&](const char* name,uint32_t address,uint32_t bytes) {
+                    attempt(name,[&]{info<<name<<"_address="<<address<<" requested_bytes="<<bytes;
+                        if(!s.runtime.engineAudio){info<<" span_status=observer_unavailable\n";return;}
+                        const auto actual=s.runtime.engineAudio->allocationSpan(address);
+                        if(!actual){info<<" span_status=nullopt\n";return;}
+                        info<<" span_status=present span_address="<<actual->address<<" span_extent="<<actual->extent
+                            <<" span_generation="<<actual->generation<<" full_containment="
+                            <<(address>=actual->address&&uint64_t(address)+bytes<=uint64_t(actual->address)+actual->extent)<<"\n";
+                    });
+                };
+                if(effect){span("owner",e.owner,e.kind==2?208:0);span("definition",e.definition,e.kind==2?104:0);
+                    if(e.texture)span("texture",e.texture,0x54);}
+                if(effect&&e.kind==2)attempt("producer",[&]{s.runtime.pointer(e.owner,208,false);
+                    s.runtime.pointer(e.stack,e.frame,false);const auto parent=PPC_LOAD_U32(e.owner+20);
+                    info<<"owner_vtable="<<PPC_LOAD_U32(e.owner)<<" declared_parent="<<parent
+                        <<" definition_current="<<PPC_LOAD_U32(e.owner+0xA0)<<" texture_current="<<PPC_LOAD_U32(e.owner+0xA4)
+                        <<" owner_age_bits="<<PPC_LOAD_U32(e.owner+0xB4)<<" owner_scale_bits="<<PPC_LOAD_U32(e.owner+0xB8)
+                        <<" owner_alpha_bits="<<PPC_LOAD_U32(e.owner+0xBC)
+                        <<" original_draw_caller="<<PPC_LOAD_U32(e.stack+e.frame-8)<<"\n";
+                    attempt("beam_lifetime",[&]{const auto typed=observedBeamLifetime(e.owner);
+                        info<<"beam_receipt_present="<<bool(typed)<<" beam_phase="<<(typed?uint32_t(typed->phase):UINT32_MAX)
+                            <<" beam_birth="<<(typed?typed->generation:0)<<" beam_context="<<(typed?typed->context:0)<<"\n";
+                        if(typed){const auto verified=requireBeamLifetime(*typed);
+                            info<<"beam_current_association_verified=1 beam_record="<<verified.record
+                                <<" beam_parent_data="<<verified.parentData<<" beam_creation_caller="<<verified.creationCaller
+                                <<" beam_provider="<<verified.allocator<<" beam_allocate="<<verified.allocateCallback
+                                <<" beam_release="<<verified.freeCallback<<" motion_admitted=0\n";}});
+                    span("declared_parent",parent,0);});
+                span("vertices",source,32*count);
+                std::filesystem::path directory;
+                attempt("directory",[&]{if(s.runtime.frameCaptureDirectory.empty()){info<<"capture_directory=unset\n";return;}
+                    const auto candidate=s.runtime.frameCaptureDirectory/"untracked-immediate-first";
+                    if(!std::filesystem::create_directory(candidate))throw Failure("Immediate diagnostic destination already exists");
+                    directory=candidate;});
+                const auto dump=[&](const char* name,const void* bytes,size_t size) {
+                    if(directory.empty())return;
+                    std::ofstream file(directory/name,std::ios::binary);file.write(static_cast<const char*>(bytes),std::streamsize(size));
+                    if(!file)throw Failure("Cannot save immediate diagnostic payload");info<<name<<"_bytes="<<std::dec<<size<<std::hex<<"\n";
+                };
+                const auto guest=[&](const char* name,uint32_t address,uint32_t bytes) {
+                    attempt(name,[&]{if(!directory.empty())dump(name,s.runtime.pointer(address,bytes,false),bytes);});
+                };
+                attempt("vertices.bin",[&]{dump("vertices.bin",draw.vertices.data(),draw.vertices.size()*sizeof(Graphics::ImmediateVertex));});
+                attempt("constants.bin",[&]{dump("constants.bin",draw.constants.data(),sizeof(draw.constants));});
+                attempt("sampler.bin",[&]{dump("sampler.bin",&draw.sampler,sizeof(draw.sampler));});
+                guest("original-vertices.bin",source,32*count);guest("original-ring.bin",row,40);
+                if(effect) {
+                    guest("original-frame.bin",e.stack,e.frame);guest("original-entry.bin",e.entry,8);
+                    if(e.kind==2){guest("original-owner.bin",e.owner,208);guest("original-definition.bin",e.definition,104);}
+                    if(e.texture)guest("original-texture.bin",e.texture,0x54);
+                    if(e.raster)guest("original-raster-prefix.bin",e.raster,0x38);
+                }
+                attempt("declaration",[&]{info<<"declaration_id="<<s.immediateDeclarationId
+                    <<" declaration_global="<<PPC_LOAD_U32(0x82DFE350)<<" vertex_handle="<<PPC_LOAD_U32(0x82CF1FBC)
+                    <<" pixel_handle="<<PPC_LOAD_U32(0x82CF1F8C)<<" shader_pair="<<PPC_LOAD_U32(0x82CD1A6C)<<","<<PPC_LOAD_U32(0x82CD1A70)<<"\n";
+                    guest("original-shader-pair.bin",0x82CD1A68,12);
+                    guest("original-vertex-shader-prefix.bin",PPC_LOAD_U32(0x82CF1FBC),0x28);
+                    guest("original-pixel-shader-prefix.bin",PPC_LOAD_U32(0x82CF1F8C),0x28);});
+                const auto message=info.str();std::fwrite(message.data(),1,message.size(),stderr);
+                if(!directory.empty()){std::ofstream metadata(directory/"state.txt",std::ios::binary);
+                    metadata.write(message.data(),std::streamsize(message.size()));if(!metadata)throw Failure("Cannot save immediate diagnostic metadata");}
+            }
+        }catch(const std::exception& error){std::fprintf(stderr,"[NATIVE UNTRACKED IMMEDIATE DIAGNOSTIC ERROR] %s\n",error.what());}
+        catch(...){std::fprintf(stderr,"[NATIVE UNTRACKED IMMEDIATE DIAGNOSTIC ERROR] unknown\n");}
+    }
+    if(draw.colorMask&7)s.backend.rejectUntrackedTemporalWorldDraw(target,depth(camera.depthIdentity),"immediate geometry");
     s.backend.drawImmediate(target,depth(camera.depthIdentity),draw);draw.vertices.clear();
 }
 void EngineDriver::immediateEffectOperation(PPCContext& c,uint8_t* base,uint32_t site) {
@@ -2468,11 +3394,14 @@ void EngineDriver::radialOperation(PPCContext& c,uint8_t* base,uint32_t operatio
         v.position={std::bit_cast<float>(PPC_LOAD_U32(at+4)),std::bit_cast<float>(PPC_LOAD_U32(at+8)),0};
         for(unsigned j=0;j<4;++j)v.uv[j]=float((color>>(8*j))&255)/255.0f;
     }
-    const auto camera=cameraBinding();bool alpha=false;s.backend.drawImmediate(color(camera.colorIdentity,alpha),depth(camera.depthIdentity),d);
+    const auto camera=cameraBinding();bool alpha=false;
+    if(d.colorMask&7)s.backend.rejectUntrackedTemporalWorldDraw(color(camera.colorIdentity,alpha),depth(camera.depthIdentity),"immediate geometry");
+    s.backend.drawImmediate(color(camera.colorIdentity,alpha),depth(camera.depthIdentity),d);
     static unsigned traced=0;if(traced++<5)std::fprintf(stderr,"[NATIVE RADIAL DRAW] vertices=%u query=%u original_cpu_vertices=true\n",r.count,unsigned(bool(d.query)));
     r={};c.lr=0x8276BE94;
 }
 bool EngineDriver::beginDirectSprite(PPCContext& c,uint8_t* base) {
+    traceDrawCallers("sprite",c,base,state->uiDrawing);
     auto& s=*state;s.requireCaller(base);auto& sprite=s.directSprite;
     if(sprite.active||c.r3.u32||c.r4.u32||c.r6.u64!=0x80000000ull||!c.r5.u32)
         throw Failure("Direct sprite entry ABI differs");
@@ -2744,8 +3673,8 @@ void EngineDriver::resetBindings(PPCContext& incoming,uint8_t* base) {
         // The full-size gameplay viewport and default targets have distinct
         // logical IDs but share the same native storage. Resetting those IDs
         // performs no format conversion or draw, even after an alpha pass.
-        const bool sameBacking=s.cameraColor(*s.camera)==s.resources.resources().defaultColor&&
-            s.cameraDepth(*s.camera)==s.resources.resources().defaultDepth;
+        const bool sameBacking=s.cameraColor(*s.camera)==s.backend.routeColor(s.resources.resources().defaultColor)&&
+            s.cameraDepth(*s.camera)==s.backend.routeDepth(s.resources.resources().defaultDepth);
         if(!sameBacking)for(uint32_t id:{0x134u,0x138u,0x13Cu,0x140u})
             if(s.renderState->effective().scalar(id))throw Failure("Expanded interpretation on a changed reset target is unqualified");
     } else if(s.camera->depthIdentity!=s.targetIds[1]) throw Failure("Native default color reset has a foreign depth attachment");
@@ -2829,7 +3758,7 @@ void EngineDriver::resetBindings(PPCContext& incoming,uint8_t* base) {
         rebuilt=true;
         if(s.resetTextureStages!=0xFF) throw Failure("Original state rebuild did not request all eight native null texture bindings");
         nativeCommit=true;
-        const auto reset=s.backend.resetEngineBindings(s.resources.resources().defaultColor,s.resources.resources().defaultDepth,targetChanged);
+        const auto reset=s.backend.resetEngineBindings(s.backend.routeColor(s.resources.resources().defaultColor),s.backend.routeDepth(s.resources.resources().defaultDepth),targetChanged);
         if(s.effects)s.effects->completeBindingReset(incoming,base,reset);
         s.im2dInput={};s.im2dDeclaration.reset();s.im2dStream.reset();
         s.camera->colorIdentity=s.targetIds[0];s.camera->depthIdentity=s.targetIds[1];
@@ -2857,6 +3786,9 @@ void EngineDriver::present(PPCContext& incoming,uint8_t* base,uint32_t raster) {
     if(!s.ready || !s.submissionReady || s.presenting || s.bindingReset || !s.camera)
         throw Failure("Native presentation requires a live nonnested submission owner");
     requireContext(PPC_LOAD_U32(0x82D6D890));
+    if(Graphics::temporalAntialiasing(s.backend.antialiasing())) {
+        s.requireTemporalMainBoundary();s.requireTemporalLoadingUiLifetime();
+    }
     const auto camera=s.validateCamera(base,s.camera->camera);
     if(camera.camera!=PPC_LOAD_U32(0x82E07248) || raster!=camera.colorRaster || camera.colorRaster!=s.camera->colorRaster ||
        PPC_LOAD_U32(s.engine) || PPC_LOAD_U32(0x82E3DD60) || PPC_LOAD_U32(0x82D0CB1C) ||
@@ -2897,10 +3829,16 @@ void EngineDriver::present(PPCContext& incoming,uint8_t* base,uint32_t raster) {
             throw Failure("Original presentation history has no completed native owner");
     }
     bool alphaOne=false;
-    const auto source=s.resources.resources().defaultColor,front=color(oldFront,alphaOne);
+    s.prepareTemporalUiOnlyOutput();
+    const auto source=s.backend.routeColor(s.resources.resources().defaultColor),front=color(oldFront,alphaOne);
     if(!alphaOne) throw Failure("Native presentation destination is not an owned front");
     applyNativeVideoSettings(s.runtime);
+    s.backend.configurePresentationExtras(s.runtime.videoSettings.fpsCounter,s.runtime.videoSettings.upscaling);
     s.backend.configureVideoPresentation(s.runtime.vsyncEnabled,s.runtime.window->presentationWidth.load(),s.runtime.window->presentationHeight.load());
+    s.backend.configureSharpening(s.runtime.videoSettings.sharpening);
+    s.backend.configureFrameLatency(s.runtime.videoSettings.maxFrameLatency);
+    s.configureInk();
+    if(source==s.resources.resources().defaultColor)s.applyWorldLook(source);
     s.backend.validateFrontCopy(source,front);
     s.backend.validateFrontPresentation(front);
     EngineCpuCalls cpu(incoming,base); // Validate callback stack before any GPU/role publication.
@@ -2912,7 +3850,7 @@ void EngineDriver::present(PPCContext& incoming,uint8_t* base,uint32_t raster) {
     // The native limiter holds this present until its even-cadence release time and
     // is not part of any timing bucket: the completed presentation interval is the
     // performance measure, so the wait is included in the frame interval itself.
-    if(s.runtime.requestedFrameRate&&s.runtime.requestedFrameRate!=60)SimpsonsNativeFramePace(s.runtime);
+    SimpsonsNativeFramePace(s.runtime);
     if(s.runtime.requestedFrameRate || s.runtime.uncappedFrameRate)s.runtime.nativePresentationTimebase=PPCQueryTimebase();
     // Once-per-frame full recording validation (deferred from 58 per-mutation
     // validations per frame). Catches any LRU/free/topology/payload/accounting
@@ -2929,6 +3867,10 @@ void EngineDriver::present(PPCContext& incoming,uint8_t* base,uint32_t raster) {
         auto copyTimer=s.timing.measure(FrameTiming::PresentCopy);
         s.submittedCopy=s.backend.copyFront(source,front);
         record.submitted=true;++s.frontCopies;
+        // Capture this actual raw Output copy before queued presentation filters
+        // operate on the distinct front. Metadata and source owners stay pinned.
+        const auto feedback=Graphics::temporalAntialiasing(s.backend.antialiasing())?
+            s.backend.captureSceneFeedback(s.frontCopies,s.submittedCopy):nullptr;
         PPC_STORE_U32(0x82D0CF98,previous);PPC_STORE_U32(0x82D0CF94,receipt);
         copyTimer.finish(); // Scene->front submission is queued; its actual wait follows display submission below.
         ++s.presentAttempts;
@@ -2937,10 +3879,21 @@ void EngineDriver::present(PPCContext& incoming,uint8_t* base,uint32_t raster) {
             auto displayTimer=s.timing.measure(FrameTiming::PresentDisplay);bool accepted=false;
             transfer=s.backend.presentFrontQueued(front,accepted);record.displayAccepted=accepted;
         }
+        // Flip statistics feed the refresh-locked limiter (and the opt-in trace).
+        if(record.displayAccepted && (s.runtime.framePacer.locked() || PacingTrace::instance().enabled())) {
+            const auto flip=s.backend.flipStatistics();
+            SimpsonsNativeFramePresented(s.runtime,flip.present,flip.valid,flip.displayedPresent,flip.syncQpc);
+        }
+        PacingTrace::instance().presented(PPCQueryTimebase());
         if(record.displayAccepted && s.runtime.window) s.runtime.window->recordPresentedFrame();
         // copyCompleted/displayTransferred stay false until the queued transfer
         // really completes (next presentation, capture, idle or receipt query).
         s.pendingPresentation=State::PendingPresentation{receipt,s.submittedCopy,transfer};
+        // A successful queuedPresent call (including occlusion) precedes this
+        // ordered raw Output -> original Scene transport. No completion wait.
+        // It must precede original CPU reset/capture and clearUiComposite.
+        if(feedback)s.backend.commitSceneFeedback(feedback);
+        if(Graphics::temporalAntialiasing(s.backend.antialiasing()))s.backend.finishTemporalFrame();
         // Native uploads snapshot guest bytes into GPU-ordered copies before
         // returning, so resetting the original CPU cursors cannot race queued GPU
         // reads. Every earlier presentation's GPU work has completed (checked above).
@@ -3045,6 +3998,19 @@ void EngineDriver::present(PPCContext& incoming,uint8_t* base,uint32_t raster) {
             }
             std::ofstream raw(stem.string()+".rgb10a2",std::ios::binary);raw.write(reinterpret_cast<const char*>(bytes.data()),std::streamsize(bytes.size()));
             if(!raw)throw Failure("Native frame capture could not write packed pixels");
+            // The displayed image when it differs from the presented front:
+            // edge-adaptive upscaling to the window and the frame-rate counter.
+            if(const auto displayed=s.backend.displayedImage();displayed&&displayed!=presented) {
+                const auto shown=s.backend.readbackTarget(displayed);
+                char displayName[80];std::snprintf(displayName,sizeof(displayName),"native-display-%04llu",static_cast<unsigned long long>(draws));
+                const auto displayStem=s.runtime.frameCaptureDirectory/displayName;
+                std::ofstream displayRaw(displayStem.string()+".rgb10a2",std::ios::binary);
+                displayRaw.write(reinterpret_cast<const char*>(shown.data()),std::streamsize(shown.size()));
+                std::ofstream displayMetadata(displayStem.string()+".json");
+                displayMetadata<<"{\"width\":"<<displayed->pixelWidth()<<",\"height\":"<<displayed->pixelHeight()
+                    <<",\"format\":\"R10G10B10A2_UNORM_LE\",\"source\":\"displayed_presentation_canvas\"}\n";
+                if(!displayRaw||!displayMetadata)throw Failure("Native frame capture could not write the displayed image");
+            }
             std::ofstream metadata(stem.string()+".json");
             const auto commits=s.renderState?s.renderState->commitCounts():EngineRenderState::CommitCounts{};
             metadata<<"{\"width\":"<<presented->pixelWidth()<<",\"height\":"<<presented->pixelHeight()
@@ -3092,6 +4058,11 @@ void EngineDriver::present(PPCContext& incoming,uint8_t* base,uint32_t raster) {
                 s.menuFrameReady.notify_one();
             }
         }
+        if(Graphics::temporalAntialiasing(s.backend.antialiasing())) {
+            s.backend.clearUiComposite();s.temporalPostOwner={};
+        }
+        // Between presentations: the next frame renders into the new storage.
+        s.applyLiveRendering();
         presentTimer.finish();s.timing.frame(s.frontCopies,record.displayAccepted);
     } catch(...) {
         if(s.menuFrameRequested.load(std::memory_order_acquire)) {
@@ -3105,7 +4076,123 @@ void EngineDriver::present(PPCContext& incoming,uint8_t* base,uint32_t raster) {
 }
 uint64_t EngineDriver::presentationCount() const {state->requireCaller(state->runtime.base);return state->backend.presentationCount();}
 double EngineDriver::renderAspect() const {state->requireCaller(state->runtime.base);return state->backend.renderAspect();}
-void EngineDriver::setUiDrawing(bool drawing) {state->requireCaller(state->runtime.base);state->uiDrawing=drawing;}
+namespace {
+using TemporalMatrix=std::array<double,16>;
+TemporalMatrix temporalMultiply(const TemporalMatrix& a,const TemporalMatrix& b) {
+    TemporalMatrix result{};
+    for(int row=0;row<4;++row)for(int column=0;column<4;++column) {
+        double value=0;for(int k=0;k<4;++k)value+=a[row*4+k]*b[k*4+column];
+        result[row*4+column]=value;
+    }
+    return result;
+}
+bool temporalInvert(const TemporalMatrix& m,TemporalMatrix& out) {
+    TemporalMatrix inv{};
+    inv[0]=m[5]*m[10]*m[15]-m[5]*m[11]*m[14]-m[9]*m[6]*m[15]+m[9]*m[7]*m[14]+m[13]*m[6]*m[11]-m[13]*m[7]*m[10];
+    inv[4]=-m[4]*m[10]*m[15]+m[4]*m[11]*m[14]+m[8]*m[6]*m[15]-m[8]*m[7]*m[14]-m[12]*m[6]*m[11]+m[12]*m[7]*m[10];
+    inv[8]=m[4]*m[9]*m[15]-m[4]*m[11]*m[13]-m[8]*m[5]*m[15]+m[8]*m[7]*m[13]+m[12]*m[5]*m[11]-m[12]*m[7]*m[9];
+    inv[12]=-m[4]*m[9]*m[14]+m[4]*m[10]*m[13]+m[8]*m[5]*m[14]-m[8]*m[6]*m[13]-m[12]*m[5]*m[10]+m[12]*m[6]*m[9];
+    inv[1]=-m[1]*m[10]*m[15]+m[1]*m[11]*m[14]+m[9]*m[2]*m[15]-m[9]*m[3]*m[14]-m[13]*m[2]*m[11]+m[13]*m[3]*m[10];
+    inv[5]=m[0]*m[10]*m[15]-m[0]*m[11]*m[14]-m[8]*m[2]*m[15]+m[8]*m[3]*m[14]+m[12]*m[2]*m[11]-m[12]*m[3]*m[10];
+    inv[9]=-m[0]*m[9]*m[15]+m[0]*m[11]*m[13]+m[8]*m[1]*m[15]-m[8]*m[3]*m[13]-m[12]*m[1]*m[11]+m[12]*m[3]*m[9];
+    inv[13]=m[0]*m[9]*m[14]-m[0]*m[10]*m[13]-m[8]*m[1]*m[14]+m[8]*m[2]*m[13]+m[12]*m[1]*m[10]-m[12]*m[2]*m[9];
+    inv[2]=m[1]*m[6]*m[15]-m[1]*m[7]*m[14]-m[5]*m[2]*m[15]+m[5]*m[3]*m[14]+m[13]*m[2]*m[7]-m[13]*m[3]*m[6];
+    inv[6]=-m[0]*m[6]*m[15]+m[0]*m[7]*m[14]+m[4]*m[2]*m[15]-m[4]*m[3]*m[14]-m[12]*m[2]*m[7]+m[12]*m[3]*m[6];
+    inv[10]=m[0]*m[5]*m[15]-m[0]*m[7]*m[13]-m[4]*m[1]*m[15]+m[4]*m[3]*m[13]+m[12]*m[1]*m[7]-m[12]*m[3]*m[5];
+    inv[14]=-m[0]*m[5]*m[14]+m[0]*m[6]*m[13]+m[4]*m[1]*m[14]-m[4]*m[2]*m[13]-m[12]*m[1]*m[6]+m[12]*m[2]*m[5];
+    inv[3]=-m[1]*m[6]*m[11]+m[1]*m[7]*m[10]+m[5]*m[2]*m[11]-m[5]*m[3]*m[10]-m[9]*m[2]*m[7]+m[9]*m[3]*m[6];
+    inv[7]=m[0]*m[6]*m[11]-m[0]*m[7]*m[10]-m[4]*m[2]*m[11]+m[4]*m[3]*m[10]+m[8]*m[2]*m[7]-m[8]*m[3]*m[6];
+    inv[11]=-m[0]*m[5]*m[11]+m[0]*m[7]*m[9]+m[4]*m[1]*m[11]-m[4]*m[3]*m[9]-m[8]*m[1]*m[7]+m[8]*m[3]*m[5];
+    inv[15]=m[0]*m[5]*m[10]-m[0]*m[6]*m[9]-m[4]*m[1]*m[10]+m[4]*m[2]*m[9]+m[8]*m[1]*m[6]-m[8]*m[2]*m[5];
+    const double determinant=m[0]*inv[0]+m[1]*inv[4]+m[2]*inv[8]+m[3]*inv[12];
+    if(!std::isfinite(determinant)||std::abs(determinant)<1e-30)return false;
+    for(auto& value:inv)value/=determinant;
+    out=inv;return true;
+}
+}
+std::array<uint32_t,2> EngineDriver::nativeTemporalJitterExtent() const {
+    auto& s=*state;s.requireCaller(s.runtime.base);
+    if(!Graphics::nativeTemporalAntialiasing(s.backend.antialiasing()))return {0,0};
+    return s.backend.sceneExtent();
+}
+uint64_t EngineDriver::presentationSerial() const {state->requireCaller(state->runtime.base);return state->frontCopies;}
+void EngineDriver::photoHud(bool begin) {
+    auto& s=*state;s.requireCaller(s.runtime.base);
+    const auto color=s.backend.routeColor(s.resources.resources().defaultColor);
+    if(begin){s.photoHudStashed=false;if(s.runtime.freeCamera.photo){s.backend.stashColor(color);s.photoHudStashed=true;}return;}
+    if(s.photoHudStashed){s.photoHudStashed=false;(void)s.backend.restoreStashedColor(color);}
+}
+void EngineDriver::applyNativeAmbientOcclusion() {
+    auto& s=*state;s.requireCaller(s.runtime.base);
+    const auto quality=s.runtime.videoSettings.ambientOcclusion;
+    if(!quality)return;
+    auto& t=s.runtime.nativeTemporalCamera;
+    const auto binding=cameraBinding();
+    if(s.cameraOriginalColor(binding)!=s.resources.resources().defaultColor||
+       s.cameraOriginalDepth(binding)!=s.resources.resources().defaultDepth)return;
+    const uint64_t frame=s.frontCopies;
+    // Exactly the matrices of this frame's main world begin, once per frame.
+    if(!t.currentValid||t.frame!=frame||t.camera!=binding.camera||s.ambientOcclusionFrame==frame)return;
+    s.ambientOcclusionFrame=frame;
+    Graphics::NativeBackend::AmbientOcclusionFrame ao;
+    ao.projection={float(t.projection[0]),float(t.projection[5]),float(t.projection[10]),float(t.projection[14])};
+    ao.offsets={float(t.projection[8]),float(t.projection[9])};
+    ao.quality=quality;ao.frame=frame;
+    s.backend.applyAmbientOcclusion(s.cameraColor(binding),s.cameraDepth(binding),ao);
+}
+void EngineDriver::resolveNativeTemporal() {
+    auto& s=*state;s.requireCaller(s.runtime.base);
+    auto& t=s.runtime.nativeTemporalCamera;
+    if(!Graphics::nativeTemporalAntialiasing(s.backend.antialiasing())){t.previousValid=false;return;}
+    const auto binding=cameraBinding();
+    // Only the full-size main world pair; private, loading and UI cameras keep their image.
+    if(s.cameraOriginalColor(binding)!=s.resources.resources().defaultColor||
+       s.cameraOriginalDepth(binding)!=s.resources.resources().defaultDepth)return;
+    const uint64_t frame=s.frontCopies;
+    if(t.resolvedFrame==frame)return; // A second post snapshot in this frame is already resolved.
+    t.resolvedFrame=frame;
+    Graphics::NativeBackend::NativeTemporalFrame resolve;
+    bool cut=false;
+    if(t.currentValid&&t.frame==frame&&t.camera==binding.camera) {
+        auto jittered=t.projection;jittered[8]+=t.jitterNdc[0];jittered[9]+=t.jitterNdc[1];
+        const auto current=temporalMultiply(t.view,t.projection);
+        TemporalMatrix inverse{};
+        if(temporalInvert(temporalMultiply(t.view,jittered),inverse)&&t.previousValid&&
+           t.previousCamera==t.camera&&t.previousFrame+1==frame) {
+            // Row-vector form: previous clip = current NDC * inverse(jittered) * previous.
+            const auto reprojection=temporalMultiply(inverse,t.previousViewProjection);
+            for(int row=0;row<4;++row)for(int column=0;column<4;++column)
+                resolve.reprojection[size_t(row)][size_t(column)]=float(reprojection[size_t(column)*4+size_t(row)]);
+            resolve.historyJitter={float(t.jitterNdc[0]*0.5),float(-t.jitterNdc[1]*0.5)};
+            // A camera cut moves the view centre far off the previous image.
+            const double z=0.95;
+            const double x=reprojection[8]*z+reprojection[12],y=reprojection[9]*z+reprojection[13];
+            const double w=reprojection[11]*z+reprojection[15];
+            cut=!(w>0)||std::abs(x/w)>1.5||std::abs(y/w)>1.5;
+            resolve.historyValid=!cut;
+        }
+        t.previousViewProjection=current;t.previousValid=true;t.previousCamera=t.camera;t.previousFrame=frame;
+    } else t.previousValid=false;
+    if(!resolve.historyValid)++t.resets;
+    s.backend.resolveNativeTemporal(s.cameraColor(binding),s.cameraDepth(binding),resolve);
+    const auto resolves=s.backend.nativeTemporalResolveCount();
+    if(resolves<=4||!(resolves%1024)||(cut&&t.resets<=16))
+        std::fprintf(stderr,"[NATIVE TAA] resolve=%llu frame=%llu camera=%08X history=%u cut=%u jitter=%.4f,%.4f jittered_begins=%llu resets=%llu\n",
+            static_cast<unsigned long long>(resolves),static_cast<unsigned long long>(frame),binding.camera,unsigned(resolve.historyValid),
+            unsigned(cut),t.jitterNdc[0],t.jitterNdc[1],static_cast<unsigned long long>(t.jitteredBegins),static_cast<unsigned long long>(t.resets));
+}
+void EngineDriver::setUiDrawing(bool drawing) {
+    auto& s=*state;s.requireCaller(s.runtime.base);
+    if(drawing&&Graphics::temporalAntialiasing(s.backend.antialiasing())) {
+        s.requireTemporalMainBoundary();s.requireTemporalLoadingUiLifetime();
+    }
+    if(drawing&&!s.uiDrawing&&s.camera&&
+        s.cameraOriginalColor(*s.camera)==s.resources.resources().defaultColor&&s.cameraOriginalDepth(*s.camera)==s.resources.resources().defaultDepth) {
+        s.prepareTemporalUiOnlyOutput();
+        s.applyWorldLook(s.cameraColor(*s.camera));
+    }
+    s.uiDrawing=drawing;
+}
 uint64_t EngineDriver::presentationAttemptCount() const {state->requireCaller(state->runtime.base);return state->presentAttempts;}
 uint64_t EngineDriver::frontCopyCount() const {state->requireCaller(state->runtime.base);return state->frontCopies;}
 std::vector<uint8_t> EngineDriver::readbackMenuFrame(uint32_t& width,uint32_t& height) {
@@ -3174,7 +4261,10 @@ uint32_t EngineDriver::pipelineResetField(uint8_t* base,uint32_t index,bool appl
     return s.renderState->pipelineResetField(base,index,apply);
 }
 void EngineDriver::selectCamera(uint8_t* base,uint32_t c) {
-    auto& s=*state;const auto binding=s.validateCamera(base,c);const bool changed=!s.camera||s.camera->camera!=c;s.bindCamera(base,binding);
+    auto& s=*state;const auto binding=s.validateCamera(base,c,true);
+    const auto mainAdmission=s.captureMainCameraAdmission(binding); // Select-only capture before native binding.
+    const bool changed=!s.camera||s.camera->camera!=c;s.bindCamera(base,binding);
+    if(mainAdmission.camera)s.selectedMainAdmission=mainAdmission; // Only an explicit main select captures/renews its birth.
     if(changed){static thread_local uint32_t selectedCameraSample{};
     if(sampleHotLog(selectedCameraSample))
         std::fprintf(stderr,"[NATIVE CAMERA] selected camera=%08X color=%08X depth=%08X viewport=%ux%u; original target roles, no draw\n",
@@ -3191,6 +4281,8 @@ void EngineDriver::preflightCameraPass(uint8_t* base,uint32_t c,bool begin) cons
 void EngineDriver::clearCamera(uint8_t* base,uint32_t c,uint32_t rgba,uint32_t selector) {
     auto& s=*state;
     const auto binding=s.validateCamera(base,c);
+    if(Graphics::temporalAntialiasing(s.backend.antialiasing())&&s.selectedMainAdmission.camera==c)
+        s.requireMainCameraAdmission(s.selectedMainAdmission); // Selector zero cannot renew stale selection.
     if(selector>7) throw Failure("Original camera clear selector is outside 0..7");
     if(s.renderState->effective().scalar(Graphics::ScalarState::ScissorEnable))
         throw Failure("Native camera clear requires the original pre-scissor full-target request");
@@ -3214,14 +4306,84 @@ void EngineDriver::clearCamera(uint8_t* base,uint32_t c,uint32_t rgba,uint32_t s
         if(s.renderState->effective().scalar(id)) throw Failure("Expanded target interpretation is unverified for native camera clear");
     // Every unsupported argument/ownership/region check precedes native binding
     // or pixel mutation. A device failure during submission remains terminal.
+    uint64_t temporalCameraGeneration=0;
+    State::MainCameraAdmission temporalCameraAdmission;
+    const bool beginTemporal=Graphics::temporalAntialiasing(s.backend.antialiasing())&&!s.uiDrawing&&(mask&0x10)&&c!=PPC_LOAD_U32(0x82E07248)&&
+        s.cameraOriginalColor(binding)==s.resources.resources().defaultColor&&s.cameraOriginalDepth(binding)==s.resources.resources().defaultDepth;
+    if(beginTemporal) {
+        s.requireMainCameraAdmission(s.selectedMainAdmission);
+        temporalCameraAdmission=s.selectedMainAdmission;
+        if(s.temporalPostOwner.admission.camera&&s.temporalPostOwner.presentation==s.frontCopies&&
+            !State::sameMainAdmission(s.temporalPostOwner.admission,temporalCameraAdmission))
+            throw Failure("Temporal main clear changed its current-frame selected camera authority");
+        temporalCameraGeneration=temporalCameraAdmission.birthGeneration;s.backend.clearUiComposite();
+    }
     s.bindCamera(base,binding);
+    if(beginTemporal) {
+        s.backend.beginTemporalScene(s.cameraOriginalColor(binding),s.cameraOriginalDepth(binding),c,temporalCameraGeneration);
+        const uint32_t preserveMask=((mask&0xF)?0u:1u)|((mask&0x10)?0u:2u)|((mask&0x20)?0u:4u);
+        // begin assigned the actual owning frame jitter; retain only components
+        // the original selector will not clear, before the next Scene read.
+        s.backend.alignSceneFeedback(s.cameraOriginalColor(binding),s.cameraOriginalDepth(binding),s.backend.temporalSceneJitter(),preserveMask);
+    }
     if(mask&0xF) s.backend.clearTarget(s.cameraColor(binding),color);
     if(mask&0x30) s.backend.clearDepthTarget(s.cameraDepth(binding),0.0f,uint8_t(stencil),bool(mask&0x10),bool(mask&0x20));
     ++s.cameraClears;
+    if(beginTemporal)s.temporalPostOwner={temporalCameraAdmission,mask,s.frontCopies,false};
     {static thread_local uint32_t clearCameraSample{};
     if(sampleHotLog(clearCameraSample))
         fprintf(stderr,"[NATIVE CAMERA] clear camera=%08X selector=%u mask=%02X RGBA=%02X%02X%02X%02X depth=0 stencil=%X region=%ux%u; no draw or present\n",
             c,selector,mask,bytes[0],bytes[1],bytes[2],bytes[3],stencil,binding.viewport[2],binding.viewport[3]);}
+}
+void EngineDriver::prepareTemporalPostOutput() {
+    auto& s=*state;s.requireCaller(s.runtime.base);
+    if(!Graphics::temporalAntialiasing(s.backend.antialiasing()))return;
+    if(!currentContext||currentContext->lastFunction!=0x82751700||s.uiDrawing)
+        throw Failure("Temporal post output requires the original world post depth-copy phase");
+    auto* base=s.runtime.base;const auto binding=cameraBinding();
+    const auto& original=s.resources.resources();
+    const auto sceneColor=s.cameraOriginalColor(binding);const auto sceneDepth=s.cameraOriginalDepth(binding);
+    const uint32_t manager=PPC_LOAD_U32(0x82D08B10);
+    if(!manager)throw Failure("Temporal post output lost its original viewport manager");
+    s.runtime.pointer(manager,0x140,false);
+    if(PPC_LOAD_U32(manager)!=0x820B6DEC||PPC_LOAD_U32(manager+8)!=0x820B6DE8||PPC_LOAD_U32(manager+0x128)!=4||
+       PPC_LOAD_U32(manager+0x14)!=binding.camera||binding.camera==PPC_LOAD_U32(0x82E07248)||
+       sceneColor!=original.defaultColor||sceneDepth!=original.defaultDepth||
+       !s.camera||s.camera->camera!=binding.camera||PPC_LOAD_U32(s.engine)!=binding.camera||
+       PPC_LOAD_U32(0x82E3DD60)!=binding.camera||PPC_LOAD_U32(0x82D0CB1C)!=1||
+       PPC_LOAD_U32(0x82D0CF5C)!=binding.colorIdentity||PPC_LOAD_U32(0x82D0CF58)!=binding.depthIdentity||
+       binding.viewport!=std::array<uint32_t,6>{0,0,1280,720,0x3F800000,0})
+        throw Failure("Temporal post output requires the selected original row-zero main camera and world owners");
+    auto& owner=s.temporalPostOwner;
+    s.requireMainCameraAdmission(s.selectedMainAdmission);
+    if(!owner.admission.camera||!State::sameMainAdmission(owner.admission,s.selectedMainAdmission)||owner.presentation!=s.frontCopies)
+        throw Failure("Temporal post output lost its current-frame camera clear/allocation authority receipt");
+    s.requireMainCameraAdmission(owner.admission);
+    const bool promotedColor=s.backend.routeColor(sceneColor)!=sceneColor;
+    const bool promotedDepth=s.backend.routeDepth(sceneDepth)!=sceneDepth;
+    if(promotedColor!=promotedDepth)throw Failure("Temporal post output has a partial routed owner pair");
+    if(owner.prepared) {
+        if(!promotedColor)throw Failure("Temporal post output receipt lost its promoted owner pair");
+        return; // Another original snapshot may copy the same already-promoted depth.
+    }
+    if(promotedColor||!s.backend.temporalSceneActive()||!s.backend.temporalSceneOwnsTargets(sceneColor,sceneDepth))
+        throw Failure("Temporal post output has no unreconstructed owning world clear");
+    // Capture the actual render-pixel sample before evaluation or UI-only reset.
+    // frame() also rejects unqualified temporal coverage. Actual per-component
+    // origins cover depth-only producers and retained components independently.
+    const auto frameJitter=s.backend.temporalSceneJitter();
+    const bool world=s.backend.temporalSceneHasGeometry();
+    const auto sourceJitter=world?frameJitter:s.backend.temporalSceneOriginGrid(sceneColor,sceneDepth);
+    s.backend.requireTemporalSceneOrigin(sceneColor,sceneDepth,sourceJitter);
+    const auto viewport=s.backend.viewport();const auto scissor=s.backend.scissor();
+    const auto output=world?s.backend.reconstructTemporalScene(sceneColor,sceneDepth):
+        s.backend.prepareTemporalUiBackground(sceneColor,sceneDepth,sourceJitter);
+    s.backend.promoteUiComposite(sceneColor,sceneDepth,output,sourceJitter);
+    s.backend.bindTargets({s.cameraColor(binding),nullptr,nullptr,nullptr},s.cameraDepth(binding));
+    // Promotion preserves physical state. Reapply saved logical state only after
+    // the full Output owners are selected so native_viewport scales it correctly.
+    if(viewport)s.backend.setViewport(*viewport);if(scissor)s.backend.setScissor(*scissor);
+    owner.prepared=true;
 }
 NativeCameraBinding EngineDriver::cameraBinding() const {
     cameraBindingCalls.note(__builtin_return_address(0));
@@ -3233,6 +4395,9 @@ NativeCameraBinding EngineDriver::cameraBinding() const {
     return *s.camera;
 }
 uint64_t EngineDriver::cameraClearCount() const {state->requireCaller(state->runtime.base);return state->cameraClears;}
+Graphics::NativeTemporalSceneOrigins EngineDriver::temporalSceneOrigins() {
+    auto& s=*state;s.requireCaller(s.runtime.base);return s.backend.temporalSceneOrigins();
+}
 void EngineDriver::copyCameraTargets(const PPCContext& incoming,uint8_t* base,uint32_t colorDestination,uint32_t depthDestination,uint32_t c) {
     auto& s=*state;const auto binding=s.validateCamera(base,c);requireContext(PPC_LOAD_U32(0x82D5DA74));
     if(!s.camera || s.camera->camera!=c || s.camera->colorIdentity!=binding.colorIdentity || s.camera->depthIdentity!=binding.depthIdentity ||
@@ -3253,7 +4418,7 @@ void EngineDriver::copyCameraTargets(const PPCContext& incoming,uint8_t* base,ui
     // These are separate original texture roles. A color/depth mix-up or any
     // unqualified destination fails before either native GPU operation.
     std::shared_ptr<Graphics::RenderTarget> colorTarget;
-    if(colorDestination==s.targetIds[5]) colorTarget=s.resources.resources().colorCopy;
+    if(colorDestination==s.targetIds[5]) colorTarget=s.backend.routeColor(s.resources.resources().colorCopy);
     else if(colorDestination&&s.sceneCopies->owns(colorDestination)) {
         if(depthDestination)throw Failure("Original scene color copy unexpectedly requests a depth destination");
         colorTarget=s.sceneCopies->destination(incoming,colorDestination,c);
@@ -3261,17 +4426,19 @@ void EngineDriver::copyCameraTargets(const PPCContext& incoming,uint8_t* base,ui
     if((colorDestination&&!colorTarget) || (depthDestination&&depthDestination!=s.targetIds[2]))
         throw Failure("Native viewport copy destination is not the original shared color/depth copy role");
     const auto colorSource=s.cameraColor(binding);const auto depthSource=s.cameraDepth(binding);
-    const auto& targets=s.resources.resources();
+    const auto depthTarget=depthDestination?s.backend.routeDepth(s.resources.resources().depthCopy):std::shared_ptr<Graphics::DepthTarget>{};
     if(colorDestination)s.backend.validateFrontCopy(colorSource,colorTarget);
-    if(depthDestination)s.backend.validateDepthCopy(depthSource,targets.depthCopy);
+    if(depthDestination)s.backend.validateDepthCopy(depthSource,depthTarget);
+    const uint64_t copyGeneration=s.backend.uiCompositeCopyGeneration();
     // The backend retains the owned resources until its GPU event completes,
     // including when the caller discards the token or the device later fails.
     if(colorDestination){
-        s.backend.copyFront(colorSource,colorTarget);++s.cameraCopies;
-        if(s.sceneCopies->owns(colorDestination))s.sceneCopies->copied(colorDestination,c);
-        else s.sharedColorCopiedCamera=c;
+        const auto actualCopy=s.backend.copyFront(colorSource,colorTarget);++s.cameraCopies;
+        if(s.sceneCopies->owns(colorDestination))s.sceneCopies->copied(colorDestination,c,actualCopy);
+        else {s.sharedColorCopiedCamera=c;s.sharedColorCopiedBacking=colorTarget;s.sharedColorCopiedGeneration=copyGeneration;s.sharedColorCopySubmission=actualCopy;}
     }
-    if(depthDestination){s.backend.copyDepth(depthSource,targets.depthCopy);++s.cameraCopies;s.sharedDepthCopiedCamera=c;}
+    if(depthDestination){s.sharedDepthCopySubmission=s.backend.copyDepth(depthSource,depthTarget);++s.cameraCopies;
+        s.sharedDepthCopiedCamera=c;s.sharedDepthCopiedBacking=depthTarget;s.sharedDepthCopiedGeneration=copyGeneration;}
     {static thread_local uint32_t viewportCopySample{};
     if(sampleHotLog(viewportCopySample))
         std::fprintf(stderr,"[NATIVE VIEWPORT COPY] camera=%08X source_color=%08X source_depth=%08X destination_color=%08X destination_depth=%08X rect=0,0,1280,720; native resource copy, no clear/draw/present\n",
@@ -3279,16 +4446,24 @@ void EngineDriver::copyCameraTargets(const PPCContext& incoming,uint8_t* base,ui
 }
 uint64_t EngineDriver::cameraCopyCount() const {state->requireCaller(state->runtime.base);return state->cameraCopies;}
 std::shared_ptr<Graphics::RenderTarget> EngineDriver::sampledColorCopy(uint32_t id,uint32_t camera) const {
-    auto& s=*state;s.requireCaller(s.runtime.base);
-    if(!s.ready || id!=s.targetIds[5] || !camera || s.sharedColorCopiedCamera!=camera || cameraBinding().camera!=camera)
+    auto& s=*state;auto* base=s.runtime.base;s.requireCaller(base);
+    if(!s.ready || id!=s.targetIds[5] || !camera || s.sharedColorCopiedCamera!=camera || cameraBinding().camera!=camera ||
+       PPC_LOAD_U32(s.engine)!=camera || PPC_LOAD_U32(0x82E3DD60)!=camera || PPC_LOAD_U32(0x82D0CB1C)!=1)
         throw Failure("Shared color sampling lacks its original copy/camera ownership");
-    return s.resources.resources().colorCopy;
+    const auto target=s.backend.routeColor(s.resources.resources().colorCopy);
+    if(s.sharedColorCopiedBacking!=target||s.sharedColorCopiedGeneration!=s.backend.uiCompositeCopyGeneration())
+        throw Failure("Shared color sampling lacks its actual copied backing/role generation");
+    return target;
 }
 std::shared_ptr<Graphics::DepthTarget> EngineDriver::sampledDepthCopy(uint32_t id,uint32_t camera) const {
-    auto& s=*state;s.requireCaller(s.runtime.base);
-    if(!s.ready || id!=s.targetIds[2] || !camera || s.sharedDepthCopiedCamera!=camera || cameraBinding().camera!=camera)
+    auto& s=*state;auto* base=s.runtime.base;s.requireCaller(base);
+    if(!s.ready || id!=s.targetIds[2] || !camera || s.sharedDepthCopiedCamera!=camera || cameraBinding().camera!=camera ||
+       PPC_LOAD_U32(s.engine)!=camera || PPC_LOAD_U32(0x82E3DD60)!=camera || PPC_LOAD_U32(0x82D0CB1C)!=1)
         throw Failure("Shared depth sampling lacks its original copy/camera ownership");
-    return s.resources.resources().depthCopy;
+    const auto target=s.backend.routeDepth(s.resources.resources().depthCopy);
+    if(s.sharedDepthCopiedBacking!=target||s.sharedDepthCopiedGeneration!=s.backend.uiCompositeCopyGeneration())
+        throw Failure("Shared depth sampling lacks its actual copied backing/role generation");
+    return target;
 }
 void EngineDriver::screenDeclaration(PPCContext& ctx,uint8_t* base,uint32_t index,bool release) {
     auto& s=*state;s.requireCaller(base);requireContext(PPC_LOAD_U32(0x82D5DA74));
@@ -3330,6 +4505,7 @@ void EngineDriver::preflightIm2DUpload(PPCContext& c,uint8_t* base,bool triangle
     auto& s=*state;auto preflightTimer=s.timing.measure(FrameTiming::Im2DPreflight);s.requireCaller(base);requireContext(PPC_LOAD_U32(0x82D5DA74));
     if(s.im2d.active || s.im2d.staging)throw Failure("Nested or unfinished original Im2D upload");
     const auto camera=cameraBinding();
+    traceDrawCallers("im2d",c,base,s.uiDrawing);
     // 824090A8 selects three vertices from r3 using r5/r6/r7. Its original
     // scalar loads, raster-offset additions and stores remain in the AOT body.
     const uint32_t source=triangle?c.r3.u32:c.r4.u32,count=triangle?3u:c.r5.u32;
@@ -3997,6 +5173,14 @@ void EngineDriver::ballEffectOperation(PPCContext& c,uint8_t* base,uint32_t site
     d.sampler.MaxAnisotropy=1;d.sampler.ComparisonFunc=D3D11_COMPARISON_NEVER;
     d.sampler.MinLOD=float(e.sampler(0,T::MinimumMip));d.sampler.MaxLOD=e.sampler(0,T::MipFilter)?float(e.sampler(0,T::MaximumMip)):0;
     s.backend.requireEngineTexture(0,d.texture);
+    if(s.backend.temporalSceneOwnsTargets(s.cameraColor(camera),s.cameraDepth(camera))) {
+        const auto allocation=s.runtime.engineAudio?s.runtime.engineAudio->allocationSpan(b.owner):std::nullopt;
+        if(!allocation||!allocation->generation) {
+            s.backend.resetTemporalHistory();throw Failure("Temporal ball effect lacks a live original allocation generation");
+        }
+        d.temporalObject=b.owner;d.temporalGeneration=allocation->generation;
+        d.temporalGeometry=0x82156548;d.temporalSubmesh=0x82771A18;
+    }
     s.backend.drawBallEffect(s.cameraColor(camera),s.cameraDepth(camera),d);++s.ballEffectDraws;
     if(s.ballEffectDraws<=8)std::fprintf(stderr,"[NATIVE BALL EFFECT DRAW] owner=%08X draw=%llu blend=%08X original_cpu_vertices=true\n",
         b.owner,static_cast<unsigned long long>(s.ballEffectDraws),d.blendWord);
@@ -4314,6 +5498,7 @@ uint64_t EngineDriver::screenEffectDrawCount(uint32_t pass) const {
     return state->screenEffectDraws[pass];
 }
 void EngineDriver::drawScreen(PPCContext& ctx,uint8_t* base) {
+    traceDrawCallers("screen",ctx,base,state->uiDrawing);
     auto& s=*state;s.requireCaller(base);requireContext(PPC_LOAD_U32(0x82D5DA74));
     if(ctx.r29.u32!=0x82DFEA20 || ctx.r31.u32!=0x82D10000 || ctx.r3.u32 || ctx.r4.u32 || ctx.r27.u32>3)
         throw Failure("Original screen draw midpoint ABI differs");
@@ -4437,7 +5622,13 @@ void EngineDriver::drawGameplayOverlay(PPCContext& ctx,uint8_t* base) {
         d.pixelConstants[1]={std::bit_cast<float>(PPC_LOAD_U32(ctx.r1.u32+0x54)),std::bit_cast<float>(PPC_LOAD_U32(ctx.r1.u32+0x50)),0,0};
         s.screenEffectDrawState(d,during);
         s.backend.requireSelectedTargets({s.cameraColor(binding),nullptr,nullptr,nullptr},s.cameraDepth(binding));
-        s.backend.drawPostFilter(s.cameraColor(binding),d);fx={};++s.screenEffectDraws[6];
+        // Lens flare: the sun-visibility-modulated overlay (sun glare).
+        const bool flare=s.runtime.videoSettings.lensFlare;
+        s.backend.drawPostFilter(s.cameraColor(binding),d,flare);fx={};
+        if(flare)++s.screenEffectDraws[6];
+        else if(const auto suppressed=++s.screenEffectSuppressed[6];suppressed<=4)
+            std::fprintf(stderr,"[NATIVE SCREEN EFFECT SUPPRESSED] pass=lensflare ps=82152318 camera=%08X count=%llu original_cpu_state=true\n",
+                binding.camera,static_cast<unsigned long long>(suppressed));
     } else s.backend.drawOriginalScreen(s.cameraColor(binding),s.cameraDepth(binding),draw,checked.retainedDepthWrite,checked.retainedDepthCompare);
     s.im2dInput={};s.im2dDeclaration.reset();s.im2dStream.reset();s.renderState->publishScreenState(after);
     PPC_STORE_U32(0x82CD1A68,declaration);PPC_STORE_U32(0x82CD1A6C,PPC_LOAD_U32(0x82CF231C));PPC_STORE_U32(0x82CD1A70,PPC_LOAD_U32(modulated?0x82CF2304:0x82CF2310));
@@ -4517,20 +5708,20 @@ std::shared_ptr<Graphics::RenderTarget> EngineDriver::color(uint32_t id,bool& sa
     const auto& r=s.resources.resources();
     for(size_t i:{size_t(0),size_t(3),size_t(4),size_t(5)}) if(id==s.targetIds[i]) {
         sampledAlphaOne=i==3||i==4;
-        if(i==0) return r.defaultColor;
+        if(i==0) return s.backend.routeColor(r.defaultColor);
         if(i==3) return r.frontColor0;
         if(i==4) return r.frontColor1;
-        return r.colorCopy;
+        return s.backend.routeColor(r.colorCopy);
     }
-    if(s.rasters) if(auto owned=s.rasters->ownedColor(id)) {sampledAlphaOne=false;return owned;}
+    if(s.rasters) if(auto owned=s.rasters->ownedColor(id)) {sampledAlphaOne=false;return s.backend.routeColor(owned);}
     throw Failure("Unknown, stale or depth-only native color target ID");
 }
 std::shared_ptr<Graphics::DepthTarget> EngineDriver::depth(uint32_t id) const {
     auto& s=*state;s.requireCaller(s.runtime.base);
     if(!s.ready || !id) throw Failure("Native depth lookup outside a started driver");
-    if(id==s.targetIds[1]) return s.resources.resources().defaultDepth;
-    if(id==s.targetIds[2]) return s.resources.resources().depthCopy;
-    if(s.rasters) if(auto owned=s.rasters->ownedDepth(id)) return owned;
+    if(id==s.targetIds[1]) return s.backend.routeDepth(s.resources.resources().defaultDepth);
+    if(id==s.targetIds[2]) return s.backend.routeDepth(s.resources.resources().depthCopy);
+    if(s.rasters) if(auto owned=s.rasters->ownedDepth(id)) return s.backend.routeDepth(owned);
     if(s.submissionReady && s.shadowTextures) if(auto owned=s.shadowTextures->depth(id)) return owned;
     throw Failure("Unknown, stale or color-only native depth target ID");
 }
@@ -5384,6 +6575,43 @@ void SimpsonsNativePipelineResetApply(PPCContext& ctx,uint8_t* base) {
         throw Simpsons::Failure("Native pipeline reset callsite ABI changed");
     const uint32_t setter=Simpsons::active->engineDriver->pipelineResetField(base,ctx.r31.u32,true);
     ctx.r11.u64=setter;ctx.ctr.u64=setter;ctx.lr=0x823F4658;
+}
+namespace {
+void observeNativeCameraLifetime(PPCContext& ctx,uint8_t* base,uint32_t pc) {
+    if(!Simpsons::active||base!=Simpsons::active->base)
+        throw Simpsons::Failure("Original camera event has no owning runtime");
+    if(Simpsons::active->engineDriver)
+        Simpsons::active->engineDriver->observeCameraLifetime(ctx,base,pc);
+}
+}
+void SimpsonsNativeCameraConstructed(PPCContext& ctx,uint8_t* base) {observeNativeCameraLifetime(ctx,base,0x823F1EAC);}
+void SimpsonsNativeCameraClosing(PPCContext& ctx,uint8_t* base) {observeNativeCameraLifetime(ctx,base,0x823F1D48);}
+void SimpsonsNativeCameraFreed(PPCContext& ctx,uint8_t* base) {observeNativeCameraLifetime(ctx,base,0x823F1D98);}
+namespace {
+void observeNativeBeamLifetime(PPCContext& c,uint8_t* base,uint32_t pc) {
+    if(!Simpsons::active||base!=Simpsons::active->base)
+        throw Simpsons::Failure("Original Beam event has no owning runtime");
+    if(Simpsons::active->engineDriver)Simpsons::active->engineDriver->observeBeamLifetime(c,base,pc);
+}
+}
+void SimpsonsNativeBeamAllocationCall(PPCContext& c,uint8_t* b){observeNativeBeamLifetime(c,b,0x8274D570);}
+void SimpsonsNativeBeamAllocationReturn(PPCContext& c,uint8_t* b){observeNativeBeamLifetime(c,b,0x8274D574);}
+void SimpsonsNativeBeamFactoryRejected(PPCContext& c,uint8_t* b){observeNativeBeamLifetime(c,b,0x82774504);}
+void SimpsonsNativeBeamConstructed(PPCContext& c,uint8_t* b){observeNativeBeamLifetime(c,b,0x8277454C);}
+void SimpsonsNativeBeamAllocationFailed(PPCContext& c,uint8_t* b){observeNativeBeamLifetime(c,b,0x82774554);}
+void SimpsonsNativeBeamRetired(PPCContext& c,uint8_t* b){observeNativeBeamLifetime(c,b,0x8275A978);}
+void SimpsonsNativeBeamRecycled(PPCContext& c,uint8_t* b){observeNativeBeamLifetime(c,b,0x8275A9B0);}
+void SimpsonsNativeBeamNondeletingClosing(PPCContext& c,uint8_t* b){observeNativeBeamLifetime(c,b,0x82775CA8);}
+void SimpsonsNativeBeamNondeletingClosed(PPCContext& c,uint8_t* b){observeNativeBeamLifetime(c,b,0x82775CF0);}
+void SimpsonsNativeBeamDeletingClosing(PPCContext& c,uint8_t* b){observeNativeBeamLifetime(c,b,0x82775EC0);}
+void SimpsonsNativeBeamDeletingFreed(PPCContext& c,uint8_t* b){observeNativeBeamLifetime(c,b,0x82775F24);}
+void SimpsonsNativeBeamDeletingClosed(PPCContext& c,uint8_t* b){observeNativeBeamLifetime(c,b,0x82775F28);}
+void SimpsonsNativeBeamGenericFreed(PPCContext& c,uint8_t* b){observeNativeBeamLifetime(c,b,0x8275A9E0);}
+void SimpsonsNativeMainCameraPublished(PPCContext& ctx,uint8_t* base) {
+    if(!Simpsons::active||base!=Simpsons::active->base)
+        throw Simpsons::Failure("Original main camera publication has no owning runtime");
+    if(Simpsons::active->engineDriver)
+        Simpsons::active->engineDriver->observeMainCameraPublication(ctx,base);
 }
 void SimpsonsNativeCameraPassPreflight(PPCContext& ctx,uint8_t* base) {
     if(!Simpsons::active || base!=Simpsons::active->base || !Simpsons::active->engineDriver ||

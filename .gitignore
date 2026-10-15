@@ -4,6 +4,7 @@
 /checkpoints/
 /userdata/
 /saves/
+/save-backups/
 /saved-replays/*
 /handoff-gpt6.zip
 /.pytest_cache/

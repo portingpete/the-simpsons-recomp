@@ -55,6 +55,19 @@ struct EngineRasters::State {
         bool videoPublished{},videoLocked{},videoInitialized{},videoHasLock{};
     };
     std::unordered_map<uint32_t,Record> records;
+    // Native surface identity -> raster hint for ownedColor/ownedDepth, which every camera
+    // validation reaches. A hint is used only after the record it names still carries that
+    // identity and backing; otherwise the full scan answers and refreshes the hint.
+    std::unordered_map<uint32_t,uint32_t> surfaceHints;
+    template<class Owned> const std::pair<const uint32_t,Record>* findSurface(uint32_t id,Owned owned) {
+        if(const auto hint=surfaceHints.find(id);hint!=surfaceHints.end())
+            if(const auto it=records.find(hint->second);it!=records.end() && it->second.surfaceId==id && owned(it->second))
+                return &*it;
+        for(const auto& entry:records) if(entry.second.surfaceId==id && owned(entry.second)) {
+            surfaceHints[id]=entry.first;return &entry;
+        }
+        return nullptr;
+    }
     struct Snapshot {uint32_t owner,stack,width,height,raster;uint32_t videoFrame{},videoIndex{};};
     std::optional<Snapshot> snapshot;
     struct PlaneAccess {uint32_t raster,stack,caller;bool unlock;uint32_t presenter{};};
@@ -400,11 +413,15 @@ void EngineRasters::create(const PPCContext& incoming,uint8_t* base,uint32_t r,u
             // single-sample 182801B6 surface: pitch1280, tiles[0,720).
             // Retain separate logical IDs/list nodes while sharing working pixels.
             // Front/color-copy textures are separate resolve destinations.
+            // The two 1024-square private surfaces are the original shadows
+            // cameras; their storage follows the shadow quality setting.
+            const auto role=height==720?Graphics::TargetScale::Scene:
+                width==1024&&height==1024?Graphics::TargetScale::Shadow:Graphics::TargetScale::Fixed;
             if(flags==5) it->second.ownedColor=fullSizeWorkingView(width,height)?s.color:
-                s.backend.createTarget(width,height,Graphics::TargetFormat::RGB10A2,height==720?Graphics::TargetScale::Scene:Graphics::TargetScale::Fixed);
+                s.backend.createTarget(width,height,Graphics::TargetFormat::RGB10A2,role);
             // The matching 1A220197 depth views both use tiles[720,1440).
             else it->second.ownedDepth=fullSizeWorkingView(width,height)?s.depth:
-                s.backend.createDepthTarget(width,height,height==720?Graphics::TargetScale::Scene:Graphics::TargetScale::Fixed);
+                s.backend.createDepthTarget(width,height,role);
             it->second.surfaceId=s.runtime.engineDriver->allocateTargetIdentity();
         }
         PPC_STORE_U32(r+4,0);PPC_STORE_U32(r+8,0);PPC_STORE_U8(r+0x20,uint8_t(flags&7));PPC_STORE_U8(r+0x21,uint8_t(flags&0xF8));
@@ -601,15 +618,15 @@ uint32_t EngineRasters::rasterByPlugin(uint8_t* base,uint32_t identity) const {
 }
 std::shared_ptr<Graphics::RenderTarget> EngineRasters::ownedColor(uint32_t id) const {
     auto& s=*state;s.requireOwner(s.runtime.base);
-    for(const auto& [r,record]:s.records) if(record.surfaceId==id && record.ownedColor) {
-        s.validateMetadata(s.runtime.base,r,record);return record.ownedColor;
+    if(const auto* entry=s.findSurface(id,[](const State::Record& record){return bool(record.ownedColor);})) {
+        s.validateMetadata(s.runtime.base,entry->first,entry->second);return entry->second.ownedColor;
     }
     return {};
 }
 std::shared_ptr<Graphics::DepthTarget> EngineRasters::ownedDepth(uint32_t id) const {
     auto& s=*state;s.requireOwner(s.runtime.base);
-    for(const auto& [r,record]:s.records) if(record.surfaceId==id && record.ownedDepth) {
-        s.validateMetadata(s.runtime.base,r,record);return record.ownedDepth;
+    if(const auto* entry=s.findSurface(id,[](const State::Record& record){return bool(record.ownedDepth);})) {
+        s.validateMetadata(s.runtime.base,entry->first,entry->second);return entry->second.ownedDepth;
     }
     return {};
 }

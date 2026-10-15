@@ -29,6 +29,9 @@ struct ShadowMeshDraw {
     uint32_t primitiveReset{},primitiveResetIndex{},viewportEnable{},clipPlaneEnable{};
     uint32_t multisampleAntialias{},multisampleMask{},alphaToMask{};
     uint32_t depthBiasBits{},slopeBiasBits{};
+    // Native-only temporal metadata: original instance allocation lifetime, never guest writes.
+    uint64_t temporalObject{},temporalGeneration{},temporalGeometry{},temporalSubmesh{};
+    uint32_t temporalBlendEnable{},temporalBlendWord{};
     ShadowMeshDepthPolicy depthPolicy{ShadowMeshDepthPolicy::Unqualified};
 };
 

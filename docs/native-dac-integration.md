@@ -15,6 +15,16 @@ The native boundary replaces SDK engine/voice operations. It owns a real MTA,
 XAudio2 engine/master/source and `Audio::DacProcessor`; it creates no console
 SDK singleton, hardware voice layout or success-only source object.
 
+The application now prepares its Windows endpoint before original execution
+and the first loading presentation. This opens only the host engine/mastering
+graph, without a source voice, PCM, original owner or SDK publication. The
+validated original acquisition consumes that same prepared generation; direct
+runtime fixtures can still acquire lazily. Repeated preparation reuses the graph,
+and shutdown before original construction destroys it before balancing its
+main-thread COM reference. The original source/worker/root lifecycle is retained.
+This moves initialization out of a loading frame, while retaining its launch-time
+cost. The prewarm lifecycle and nested-MTA cancellation fixtures test these paths.
+
 The nonzero word S+40 is a typed native source identity, generation-unique in
 its namespace and rejected as guest storage. Source operations validate both
 that identity and the actual original S/root/descriptor/vtable. Original

@@ -66,7 +66,7 @@ set(NATIVE_VIDEO_PACKAGE "${CMAKE_SOURCE_DIR}/build/native-assets/frontend/front
 set(NATIVE_VIDEO_GAME_PACKAGE "${CMAKE_SOURCE_DIR}/build/native-assets/simpsons_chars/simpsons_chars_global.str")
 add_custom_command(OUTPUT "${NATIVE_VIDEO_PACKAGE}" "${NATIVE_VIDEO_GAME_PACKAGE}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/build_native_video_menu.py" --output-root "${CMAKE_SOURCE_DIR}/build/native-assets"
-  DEPENDS tools/build_native_video_menu.py tools/build_native_control_menu.py tools/build_native_main_menu.py tools/build_native_mouse_menu.py tools/inspect_assets.py "Simpsons Game, The (USA)/frontend/frontend.str" "Simpsons Game, The (USA)/simpsons_chars/simpsons_chars_global.str"
+  DEPENDS tools/build_native_video_menu.py tools/build_native_control_menu.py tools/build_native_audio_menu.py tools/build_native_main_menu.py tools/build_native_mouse_menu.py tools/inspect_assets.py "Simpsons Game, The (USA)/frontend/frontend.str" "Simpsons Game, The (USA)/simpsons_chars/simpsons_chars_global.str"
   VERBATIM)
 add_custom_target(NativeVideoMenu
   COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/native-assets/frontend"
@@ -132,7 +132,7 @@ foreach(CODEC_COMPONENT avcodec avutil)
     IMPORTED_LOCATION "${SIMPSONS_AUDIO_CODEC}/bin/${CODEC_COMPONENT}-simpsonsxma-${CODEC_MAJOR}.dll"
     INTERFACE_INCLUDE_DIRECTORIES "${SIMPSONS_AUDIO_CODEC}/include")
 endforeach()
-add_library(SimpsonsAudio STATIC audio/native_xma_codec.cpp audio/xma_source.cpp audio/ea_xma_block.cpp audio/audio_catalog.cpp audio/resident_audio_catalog.cpp audio/amx_audio_catalog.cpp audio/resident_xma.cpp)
+add_library(SimpsonsAudio STATIC audio/native_xma_codec.cpp audio/xma_source.cpp audio/fresh_xma_cache.cpp audio/ea_xma_block.cpp audio/audio_catalog.cpp audio/resident_audio_catalog.cpp audio/amx_audio_catalog.cpp audio/resident_xma.cpp)
 target_include_directories(SimpsonsAudio PUBLIC "${CMAKE_SOURCE_DIR}")
 target_compile_definitions(SimpsonsAudio PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(SimpsonsAudio PRIVATE /fp:strict)
@@ -219,8 +219,36 @@ endforeach()
 list(REMOVE_ITEM NATIVE_SOURCES "runtime/stall_profiler.cpp")
 add_library(SimpsonsRuntime STATIC ${NATIVE_SOURCES})
 target_include_directories(SimpsonsRuntime PUBLIC "${CMAKE_SOURCE_DIR}")
-target_link_libraries(SimpsonsRuntime PUBLIC SimpsonsPPC SimpsonsAudio SimpsonsAudioOutput bcrypt user32 gdi32 xinput)
-find_program(SIMPSONS_FXC fxc REQUIRED)
+target_link_libraries(SimpsonsRuntime PUBLIC SimpsonsPPC SimpsonsAudio SimpsonsAudioOutput bcrypt user32 gdi32 xinput dwmapi)
+find_program(SIMPSONS_FXC_EXECUTABLE fxc REQUIRED)
+# The native Vulkan renderer runs the same HLSL as SPIR-V. Every shader rule
+# below invokes SIMPSONS_FXC; with Vulkan enabled that is a wrapper which runs
+# FXC unchanged, then glslang, checks the SPIR-V against the DXBC interface and
+# appends it to the same header (tools/vulkan_shader_compile.py).
+option(SIMPSONS_VULKAN "Build the native Vulkan renderer and SPIR-V shader twins" ON)
+if(SIMPSONS_VULKAN)
+  find_program(SIMPSONS_GLSLANG glslangValidator
+    HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{LOCALAPPDATA}/Android/Sdk/emulator/lib64/vulkan")
+  if(NOT SIMPSONS_GLSLANG)
+    message(FATAL_ERROR "SIMPSONS_VULKAN needs glslangValidator with SPIRV-Tools (Vulkan SDK); set SIMPSONS_GLSLANG or configure with -DSIMPSONS_VULKAN=OFF")
+  endif()
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tools/vulkan_shader_compile.py")
+  file(SHA256 "${CMAKE_SOURCE_DIR}/tools/vulkan_shader_compile.py" SIMPSONS_SPIRV_TOOL_HASH)
+  file(SHA256 "${SIMPSONS_GLSLANG}" SIMPSONS_GLSLANG_HASH)
+  string(SHA256 SIMPSONS_SPIRV_IDENTITY "${SIMPSONS_SPIRV_TOOL_HASH}${SIMPSONS_GLSLANG_HASH}${SIMPSONS_FXC_EXECUTABLE}")
+  string(SUBSTRING "${SIMPSONS_SPIRV_IDENTITY}" 0 12 SIMPSONS_SPIRV_IDENTITY)
+  # The identity is part of every shader command line, so Ninja recompiles all
+  # shaders when the wrapper, glslang or FXC changes.
+  set(SIMPSONS_FXC "${CMAKE_BINARY_DIR}/vulkan_shader_compile-${SIMPSONS_SPIRV_IDENTITY}.cmd")
+  file(TO_NATIVE_PATH "${Python3_EXECUTABLE}" SIMPSONS_SPIRV_PYTHON)
+  file(TO_NATIVE_PATH "${CMAKE_SOURCE_DIR}/tools/vulkan_shader_compile.py" SIMPSONS_SPIRV_SCRIPT)
+  file(TO_NATIVE_PATH "${SIMPSONS_FXC_EXECUTABLE}" SIMPSONS_SPIRV_FXC)
+  file(TO_NATIVE_PATH "${SIMPSONS_GLSLANG}" SIMPSONS_SPIRV_GLSLANG)
+  file(WRITE "${SIMPSONS_FXC}" "@\"${SIMPSONS_SPIRV_PYTHON}\" -B \"${SIMPSONS_SPIRV_SCRIPT}\" --fxc \"${SIMPSONS_SPIRV_FXC}\" --glslang \"${SIMPSONS_SPIRV_GLSLANG}\" -- %*\r\n@exit /b %ERRORLEVEL%\r\n")
+  message(STATUS "SIMPSONS_VULKAN=ON glslang=${SIMPSONS_GLSLANG}")
+else()
+  set(SIMPSONS_FXC "${SIMPSONS_FXC_EXECUTABLE}")
+endif()
 set(SIMPSONS_SHADER_DIR "${CMAKE_SOURCE_DIR}/build/shaders")
 file(MAKE_DIRECTORY "${SIMPSONS_SHADER_DIR}")
 set(SIMPSONS_SCREEN_HEADERS)
@@ -269,7 +297,7 @@ foreach(ENTRY VSAA PSAA)
 endforeach()
 set(SIMPSONS_EDGEAA_HEADERS)
 set(SIMPSONS_NATIVE_AA_HEADERS)
-foreach(ENTRY VSAntialiasing PSFXAA PSSSAA4x)
+foreach(ENTRY VSAntialiasing PSFXAA PSSharpen)
   if(ENTRY MATCHES "^VS")
     set(PROFILE vs_5_0)
   else()
@@ -282,6 +310,87 @@ foreach(ENTRY VSAntialiasing PSFXAA PSSSAA4x)
     DEPENDS renderer/antialiasing.hlsl VERBATIM)
   list(APPEND SIMPSONS_NATIVE_AA_HEADERS "${HEADER}")
 endforeach()
+set(SIMPSONS_TEMPORAL_AA_HEADERS)
+foreach(ENTRY VSTemporalAA PSTemporalAAResolve)
+  if(ENTRY MATCHES "^VS")
+    set(PROFILE vs_5_0)
+  else()
+    set(PROFILE ps_5_0)
+  endif()
+  set(HEADER "${SIMPSONS_SHADER_DIR}/${ENTRY}.h")
+  add_custom_command(OUTPUT "${HEADER}"
+    COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 /T ${PROFILE} /E ${ENTRY}
+      /Fh "${HEADER}" /Vn "k${ENTRY}" "${CMAKE_SOURCE_DIR}/renderer/temporal_aa.hlsl"
+    DEPENDS renderer/temporal_aa.hlsl VERBATIM)
+  list(APPEND SIMPSONS_TEMPORAL_AA_HEADERS "${HEADER}")
+endforeach()
+set(SIMPSONS_SCENE_POST_HEADERS)
+foreach(ENTRY VSScenePost PSWorldLook)
+  if(ENTRY MATCHES "^VS")
+    set(PROFILE vs_5_0)
+  else()
+    set(PROFILE ps_5_0)
+  endif()
+  set(HEADER "${SIMPSONS_SHADER_DIR}/${ENTRY}.h")
+  add_custom_command(OUTPUT "${HEADER}"
+    COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 /T ${PROFILE} /E ${ENTRY}
+      /Fh "${HEADER}" /Vn "k${ENTRY}" "${CMAKE_SOURCE_DIR}/renderer/scene_post.hlsl"
+    DEPENDS renderer/scene_post.hlsl VERBATIM)
+  list(APPEND SIMPSONS_SCENE_POST_HEADERS "${HEADER}")
+endforeach()
+set(SIMPSONS_PRESENTATION_EXTRAS_HEADERS)
+foreach(ENTRY VSPresentationExtras PSFpsOverlay PSUpscaleEdge)
+  if(ENTRY MATCHES "^VS")
+    set(PROFILE vs_5_0)
+  else()
+    set(PROFILE ps_5_0)
+  endif()
+  set(HEADER "${SIMPSONS_SHADER_DIR}/${ENTRY}.h")
+  add_custom_command(OUTPUT "${HEADER}"
+    COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 /T ${PROFILE} /E ${ENTRY}
+      /Fh "${HEADER}" /Vn "k${ENTRY}" "${CMAKE_SOURCE_DIR}/renderer/presentation_extras.hlsl"
+    DEPENDS renderer/presentation_extras.hlsl VERBATIM)
+  list(APPEND SIMPSONS_PRESENTATION_EXTRAS_HEADERS "${HEADER}")
+endforeach()
+set(SIMPSONS_AMBIENT_OCCLUSION_HEADERS)
+foreach(ENTRY VSAmbientOcclusion PSAmbientOcclusion PSAmbientOcclusionBlur PSAmbientOcclusionApply)
+  if(ENTRY MATCHES "^VS")
+    set(PROFILE vs_5_0)
+  else()
+    set(PROFILE ps_5_0)
+  endif()
+  set(HEADER "${SIMPSONS_SHADER_DIR}/${ENTRY}.h")
+  add_custom_command(OUTPUT "${HEADER}"
+    COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 /T ${PROFILE} /E ${ENTRY}
+      /Fh "${HEADER}" /Vn "k${ENTRY}" "${CMAKE_SOURCE_DIR}/renderer/ambient_occlusion.hlsl"
+    DEPENDS renderer/ambient_occlusion.hlsl VERBATIM)
+  list(APPEND SIMPSONS_AMBIENT_OCCLUSION_HEADERS "${HEADER}")
+endforeach()
+set(SIMPSONS_LIVE_RENDERING_HEADERS)
+foreach(ENTRY PSLiveStretchColor PSLiveStretchDepth PSLiveStretchStencil)
+  set(HEADER "${SIMPSONS_SHADER_DIR}/${ENTRY}.h")
+  add_custom_command(OUTPUT "${HEADER}"
+    COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 /T ps_5_0 /E ${ENTRY}
+      /Fh "${HEADER}" /Vn "k${ENTRY}" "${CMAKE_SOURCE_DIR}/renderer/live_rendering.hlsl"
+    DEPENDS renderer/live_rendering.hlsl VERBATIM)
+  list(APPEND SIMPSONS_LIVE_RENDERING_HEADERS "${HEADER}")
+endforeach()
+set(SIMPSONS_SMAA_HEADERS)
+foreach(ENTRY VSSMAAEdge PSSMAAEdge VSSMAAWeight PSSMAAWeight VSSMAANeighborhood PSSMAANeighborhood)
+  if(ENTRY MATCHES "^VS")
+    set(PROFILE vs_5_0)
+    set(SMAA_STAGE_DEFINE /D SMAA_INCLUDE_PS=0)
+  else()
+    set(PROFILE ps_5_0)
+    set(SMAA_STAGE_DEFINE /D SMAA_INCLUDE_VS=0)
+  endif()
+  set(HEADER "${SIMPSONS_SHADER_DIR}/${ENTRY}.h")
+  add_custom_command(OUTPUT "${HEADER}"
+    COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 ${SMAA_STAGE_DEFINE} /T ${PROFILE} /E ${ENTRY} /Fh "${HEADER}" /Vn k${ENTRY} /I "${CMAKE_SOURCE_DIR}/renderer/vendor/smaa" "${CMAKE_SOURCE_DIR}/renderer/smaa.hlsl"
+    DEPENDS renderer/smaa.hlsl renderer/vendor/smaa/SMAA.hlsl VERBATIM)
+  list(APPEND SIMPSONS_SMAA_HEADERS "${HEADER}")
+endforeach()
+
 foreach(ENTRY VSEdgeAA PSEdgeAA)
   if(ENTRY MATCHES "^VS")
     set(PROFILE vs_5_0)
@@ -345,7 +454,7 @@ foreach(ENTRY VSShadowDepth GSShadowDepthProbe)
   list(APPEND SIMPSONS_SHADOW_HEADERS "${HEADER}")
 endforeach()
 set(SIMPSONS_ZPREPASS_HEADERS)
-foreach(ENTRY VSZPrepass GSZPrepassProbe)
+foreach(ENTRY VSZPrepass VSZPrepassTemporal GSZPrepassProbe)
   if(ENTRY MATCHES "^VS")
     set(PROFILE vs_5_0)
   else()
@@ -1057,7 +1166,7 @@ add_custom_command(OUTPUT "${SIMPSONS_DUAL_PROJECTED_PARTICLE_SOURCE}"
     tools/analyze_projected_particle_shader.py tools/analyze_particle_shader.py tools/analyze_rigid_shader.py
     tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py tools/analyze_fourtap_shaders.py analysis/simpsons.pe VERBATIM)
 set(SIMPSONS_PARTICLE_HEADERS)
-foreach(ENTRY VSParticle VSParticleType5 PSParticle PSParticleDraw GSParticleProbe PSParticleProjected PSParticleProjectedDraw VSParticleProjectedProbe PSParticleDual PSParticleDualDraw PSParticleDualProjected PSParticleDualProjectedDraw)
+foreach(ENTRY VSParticle VSParticleType5 PSParticle PSParticleDraw PSParticleSnapshotDraw GSParticleProbe PSParticleProjected PSParticleProjectedDraw VSParticleProjectedProbe PSParticleDual PSParticleDualDraw PSParticleDualProjected PSParticleDualProjectedDraw VSParticleUNormProbe PSParticleUNormDraw PSParticleProjectedUNormDraw PSParticleDualUNormDraw PSParticleDualProjectedUNormDraw PSParticleUNormRoundTripDraw)
   if(ENTRY MATCHES "^VS")
     set(PROFILE vs_5_0)
   elseif(ENTRY MATCHES "^GS")
@@ -1065,7 +1174,7 @@ foreach(ENTRY VSParticle VSParticleType5 PSParticle PSParticleDraw GSParticlePro
   else()
     set(PROFILE ps_5_0)
   endif()
-  if(ENTRY MATCHES "^PSParticle.*Draw$")
+  if(ENTRY MATCHES "^PSParticle.*Draw$" OR ENTRY STREQUAL "VSParticleUNormProbe")
     set(SOURCE "${CMAKE_SOURCE_DIR}/renderer/particle_draw.hlsl")
   elseif(ENTRY MATCHES "Type5")
     set(SOURCE "${SIMPSONS_TYPE5_PARTICLE_SOURCE}")
@@ -1078,10 +1187,16 @@ foreach(ENTRY VSParticle VSParticleType5 PSParticle PSParticleDraw GSParticlePro
   else()
     set(SOURCE "${SIMPSONS_PARTICLE_SOURCE}")
   endif()
+  set(PARTICLE_DEFINES)
+  if(ENTRY STREQUAL "PSParticleSnapshotDraw")
+    set(PARTICLE_DEFINES /D PARTICLE_SNAPSHOT_UNORM=1)
+  elseif(ENTRY STREQUAL "VSParticleUNormProbe" OR ENTRY STREQUAL "PSParticleUNormRoundTripDraw")
+    set(PARTICLE_DEFINES /D PARTICLE_UNORM_PROBE=1)
+  endif()
   set(HEADER "${SIMPSONS_SHADER_DIR}/${ENTRY}.h")
   add_custom_command(OUTPUT "${HEADER}"
     COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 /T ${PROFILE} /E ${ENTRY}
-      /I "${SIMPSONS_SHADER_DIR}" /Fh "${HEADER}" /Vn "k${ENTRY}" "${SOURCE}"
+      ${PARTICLE_DEFINES} /I "${SIMPSONS_SHADER_DIR}" /Fh "${HEADER}" /Vn "k${ENTRY}" "${SOURCE}"
     DEPENDS "${SIMPSONS_PARTICLE_SOURCE}" "${SIMPSONS_PROJECTED_PARTICLE_SOURCE}" "${SIMPSONS_DUAL_PARTICLE_SOURCE}"
       "${SIMPSONS_TYPE5_PARTICLE_SOURCE}" "${SIMPSONS_DUAL_PROJECTED_PARTICLE_SOURCE}" renderer/particle_draw.hlsl renderer/shadow_mesh.hlsl VERBATIM)
   list(APPEND SIMPSONS_PARTICLE_HEADERS "${HEADER}")
@@ -1102,18 +1217,22 @@ foreach(ENTRY VSCoronaQuery PSCoronaQuery PSCoronaQueryPacked PSCoronaSprite PSC
   list(APPEND SIMPSONS_CORONA_HEADERS "${HEADER}")
 endforeach()
 set(SIMPSONS_IMMEDIATE_HEADERS)
-foreach(ENTRY VSImmediate PSImmediate PSImmediateDual PSImmediateDraw PSImmediateDualDraw VSImmediateProjected PSImmediateProjected PSImmediateProjectedDraw PSImmediateProjectedDual PSImmediateProjectedDualDraw VSRadial PSRadial PSRadialQuery PSRadialDraw)
+foreach(ENTRY VSImmediate PSImmediate PSImmediateDual PSImmediateDraw PSImmediateDualDraw VSImmediateProjected PSImmediateProjected PSImmediateProjectedDraw PSImmediateProjectedDual PSImmediateProjectedDualDraw VSRadial PSRadial PSRadialQuery PSRadialDraw PSImmediateUNormDraw PSImmediateDualUNormDraw PSRadialUNormDraw PSImmediateSnapshotDraw)
   if(ENTRY MATCHES "^VS")
     set(PROFILE vs_5_0)
   else()
     set(PROFILE ps_5_0)
   endif()
   set(HEADER "${SIMPSONS_SHADER_DIR}/${ENTRY}.h")
+  set(SIMPSONS_IMMEDIATE_DEFINES)
+  if(ENTRY STREQUAL "PSImmediateSnapshotDraw")
+    list(APPEND SIMPSONS_IMMEDIATE_DEFINES /D IMMEDIATE_UNORM_SNAPSHOT=1)
+  endif()
   add_custom_command(OUTPUT "${HEADER}"
     COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_immediate_shaders.py"
     COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_radial_shaders.py"
     COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_projected_immediate_shaders.py"
-    COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 /T ${PROFILE} /E ${ENTRY}
+    COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 /T ${PROFILE} /E ${ENTRY} ${SIMPSONS_IMMEDIATE_DEFINES}
       /Fh "${HEADER}" /Vn "k${ENTRY}" "${CMAKE_SOURCE_DIR}/renderer/immediate_draw.hlsl"
     DEPENDS renderer/immediate_shader.hlsl renderer/immediate_draw.hlsl renderer/radial_shader.hlsl renderer/projected_immediate_shader.hlsl renderer/shadow_mesh.hlsl
       tools/analyze_immediate_shaders.py tools/analyze_radial_shaders.py tools/analyze_projected_immediate_shaders.py analysis/simpsons.pe VERBATIM)
@@ -1168,6 +1287,112 @@ foreach(ENTRY PSDof PSBlur PSBloom PSFogLinear PSFogExp PSFogExp2 PSSat PSFlatEf
       tools/xenos_pixel_reference.py tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py tools/analyze_fourtap_shaders.py analysis/simpsons.pe VERBATIM)
   list(APPEND SIMPSONS_SCREEN_EFFECT_HEADERS "${HEADER}")
 endforeach()
+set(SIMPSONS_TEMPORAL_DIR "${SIMPSONS_SHADER_DIR}/temporal")
+set(SIMPSONS_TEMPORAL_SOURCES)
+set(SIMPSONS_TEMPORAL_HEADERS)
+file(READ "${CMAKE_SOURCE_DIR}/tools/temporal_geometry_profiles.json" SIMPSONS_TEMPORAL_MANIFEST)
+string(JSON SIMPSONS_TEMPORAL_COUNT LENGTH "${SIMPSONS_TEMPORAL_MANIFEST}")
+math(EXPR SIMPSONS_TEMPORAL_LAST "${SIMPSONS_TEMPORAL_COUNT}-1")
+foreach(INDEX RANGE ${SIMPSONS_TEMPORAL_LAST})
+  string(JSON ADDRESS GET "${SIMPSONS_TEMPORAL_MANIFEST}" ${INDEX} 0)
+  list(APPEND SIMPSONS_TEMPORAL_SOURCES "${SIMPSONS_TEMPORAL_DIR}/temporal_${ADDRESS}.hlsl")
+endforeach()
+add_custom_command(OUTPUT ${SIMPSONS_TEMPORAL_SOURCES} "${SIMPSONS_TEMPORAL_DIR}/temporal_geometry.profiles"
+  COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/build_temporal_geometry_shaders.py"
+    --output "${SIMPSONS_TEMPORAL_DIR}" --shader-dir "${SIMPSONS_SHADER_DIR}"
+  DEPENDS tools/build_temporal_geometry_shaders.py tools/temporal_geometry_profiles.json
+    "${SIMPSONS_SHADER_DIR}/a168_shader.hlsl"
+    "${SIMPSONS_SHADER_DIR}/chocolate_shader.hlsl"
+    "${SIMPSONS_SHADER_DIR}/mono_shader.hlsl"
+    "${SIMPSONS_SHADER_DIR}/rigid_alpha_shader.hlsl"
+    "${SIMPSONS_SHADER_DIR}/rigid_multitone_shader.hlsl"
+    "${SIMPSONS_SHADER_DIR}/rigid_normalmap_shader.hlsl"
+    "${SIMPSONS_SHADER_DIR}/skin_alpha_shader.hlsl"
+    "${SIMPSONS_SHADER_DIR}/skin_dualalpha_shader.hlsl"
+    "${SIMPSONS_SHADER_DIR}/skin_dualtextured_shader.hlsl"
+    "${SIMPSONS_SHADER_DIR}/skin_flipbook_shader.hlsl"
+    "${SIMPSONS_SHADER_DIR}/skin_gloss_shader.hlsl"
+    "${SIMPSONS_SHADER_DIR}/skin_shader.hlsl"
+    "${SIMPSONS_SHADER_DIR}/skin_textured_shader.hlsl"
+    "${SIMPSONS_SHADER_DIR}/sky_shader.hlsl"
+    renderer/a168_draw.hlsl
+    renderer/chocolate_draw.hlsl
+    renderer/flipbook_alpha_draw.hlsl
+    renderer/flipbook_draw.hlsl
+    renderer/flipbook_shader.hlsl
+    renderer/mono_draw.hlsl
+    renderer/projtex_alpha_draw.hlsl
+    renderer/rigid_alpha_draw.hlsl
+    renderer/rigid_draw.hlsl
+    renderer/rigid_dualtextured_draw.hlsl
+    renderer/rigid_dualtextured_shader.hlsl
+    renderer/rigid_dualtextured_uv_alpha_draw.hlsl
+    renderer/rigid_dualtextured_uv_draw.hlsl
+    renderer/rigid_dualtextured_uv_shader.hlsl
+    renderer/rigid_family_alpha_draw.hlsl
+    renderer/rigid_family_alpha_shader.hlsl
+    renderer/rigid_gloss_draw.hlsl
+    renderer/rigid_gloss_shader.hlsl
+    renderer/rigid_multitone_draw.hlsl
+    renderer/rigid_normalmap_draw.hlsl
+    renderer/rigid_remaining_draw.hlsl
+    renderer/rigid_remaining_shader.hlsl
+    renderer/rigid_shader.hlsl
+    renderer/rigid_textured_draw.hlsl
+    renderer/rigid_textured_shader.hlsl
+    renderer/rigid_uv_alpha_draw.hlsl
+    renderer/rigid_uv_draw.hlsl
+    renderer/rigid_uv_shader.hlsl
+    renderer/shadow_mesh.hlsl
+    renderer/skin_alpha_draw.hlsl
+    renderer/skin_draw.hlsl
+    renderer/skin_draw_input.hlsl
+    renderer/skin_dualalpha_draw.hlsl
+    renderer/skin_dualtextured_draw.hlsl
+    renderer/skin_dualtextured_uv_alpha_draw.hlsl
+    renderer/skin_dualtextured_uv_draw.hlsl
+    renderer/skin_dualtextured_uv_shader.hlsl
+    renderer/skin_textured_draw.hlsl
+    renderer/sky_draw.hlsl
+    renderer/vfx_rigid_draw.hlsl
+    renderer/vfx_rigid_shader.hlsl
+    renderer/ball_effect.hlsl
+    renderer/immediate_draw.hlsl
+    renderer/immediate_shader.hlsl
+    renderer/radial_shader.hlsl
+    renderer/projected_immediate_shader.hlsl
+  VERBATIM)
+foreach(INDEX RANGE ${SIMPSONS_TEMPORAL_LAST})
+  string(JSON ADDRESS GET "${SIMPSONS_TEMPORAL_MANIFEST}" ${INDEX} 0)
+  foreach(STAGE VS PS)
+    set(ENTRY "${STAGE}Temporal_${ADDRESS}")
+    if(STAGE STREQUAL "VS")
+      set(PROFILE vs_5_0)
+    else()
+      set(PROFILE ps_5_0)
+    endif()
+    set(HEADER "${SIMPSONS_SHADER_DIR}/${ENTRY}.h")
+    add_custom_command(OUTPUT "${HEADER}"
+      COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 /T ${PROFILE} /E ${ENTRY}
+        /I "${SIMPSONS_TEMPORAL_DIR}" /I "${CMAKE_SOURCE_DIR}/renderer"
+        /Fh "${HEADER}" /Vn "k${ENTRY}" "${SIMPSONS_TEMPORAL_DIR}/temporal_${ADDRESS}.hlsl"
+      DEPENDS "${SIMPSONS_TEMPORAL_DIR}/temporal_${ADDRESS}.hlsl" VERBATIM)
+    list(APPEND SIMPSONS_TEMPORAL_HEADERS "${HEADER}")
+  endforeach()
+endforeach()
+foreach(ENTRY VSTemporalOutput PSTemporalOutput VSTemporalUiBackground PSTemporalUiBackground)
+  if(ENTRY MATCHES "^VS")
+    set(PROFILE vs_5_0)
+  else()
+    set(PROFILE ps_5_0)
+  endif()
+  set(HEADER "${SIMPSONS_SHADER_DIR}/${ENTRY}.h")
+  add_custom_command(OUTPUT "${HEADER}"
+    COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 /T ${PROFILE} /E ${ENTRY}
+      /Fh "${HEADER}" /Vn "k${ENTRY}" "${CMAKE_SOURCE_DIR}/renderer/temporal_output.hlsl"
+    DEPENDS renderer/temporal_output.hlsl VERBATIM)
+  list(APPEND SIMPSONS_TEMPORAL_HEADERS "${HEADER}")
+endforeach()
 set_property(SOURCE renderer/post_filter.cpp APPEND PROPERTY OBJECT_DEPENDS "${SIMPSONS_POST_FILTER_HEADERS};${SIMPSONS_BALL_COMPOSITE_HEADERS};${SIMPSONS_LUMA_HEADERS};${SIMPSONS_SCREEN_EFFECT_HEADERS};${SIMPSONS_SHADER_DIR}/VSTextured.h")
 # Ninja must rebuild the consumers in the same invocation that regenerates
 # embedded shader bytecode. Explicit file dependencies also avoid the Windows
@@ -1179,9 +1404,49 @@ set_property(SOURCE renderer/screen_pipeline.cpp APPEND PROPERTY OBJECT_DEPENDS
   "${SIMPSONS_RIGID_HEADERS}")
 set_property(SOURCE renderer/skin_mesh.cpp APPEND PROPERTY OBJECT_DEPENDS
   "${SIMPSONS_SHADER_DIR}/VSSkin.h;${SIMPSONS_SHADER_DIR}/PSSkinDraw.h;${SIMPSONS_SHADER_DIR}/PSSkinAlphaDraw.h;${SIMPSONS_SHADER_DIR}/VSSkinDual.h;${SIMPSONS_SHADER_DIR}/PSSkinDualDraw.h")
+set(SIMPSONS_UI_COMPOSITE_HEADERS)
+foreach(ENTRY VSUiComposite PSUiCompositeDepth)
+  if(ENTRY MATCHES "^VS")
+    set(PROFILE vs_5_0)
+  else()
+    set(PROFILE ps_5_0)
+  endif()
+  set(HEADER "${SIMPSONS_SHADER_DIR}/${ENTRY}.h")
+  add_custom_command(OUTPUT "${HEADER}"
+    COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 /T ${PROFILE} /E ${ENTRY}
+      /Fh "${HEADER}" /Vn "k${ENTRY}" "${CMAKE_SOURCE_DIR}/renderer/ui_composite.hlsl"
+    DEPENDS renderer/ui_composite.hlsl VERBATIM)
+  list(APPEND SIMPSONS_UI_COMPOSITE_HEADERS "${HEADER}")
+endforeach()
+set_property(SOURCE renderer/ui_composite.cpp APPEND PROPERTY OBJECT_DEPENDS "${SIMPSONS_UI_COMPOSITE_HEADERS}")
+foreach(ENTRY PSUiCompositeDepthOnly PSUiCompositeStencilBit)
+  set(HEADER "${SIMPSONS_SHADER_DIR}/${ENTRY}.h")
+  add_custom_command(OUTPUT "${HEADER}"
+    COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 /T ps_5_0 /E ${ENTRY}
+      /Fh "${HEADER}" /Vn "k${ENTRY}" "${CMAKE_SOURCE_DIR}/renderer/ui_composite_fallback.hlsl"
+    DEPENDS renderer/ui_composite_fallback.hlsl VERBATIM)
+  list(APPEND SIMPSONS_UI_COMPOSITE_HEADERS "${HEADER}")
+endforeach()
+set_property(SOURCE renderer/ui_composite.cpp APPEND PROPERTY OBJECT_DEPENDS "${SIMPSONS_UI_COMPOSITE_HEADERS}")
+set(SIMPSONS_SCENE_FEEDBACK_HEADERS)
+foreach(ENTRY VSSceneFeedback PSSceneFeedbackColor PSSceneFeedbackDepth PSSceneFeedbackDepthOnly PSSceneFeedbackStencilBit)
+  if(ENTRY MATCHES "^VS")
+    set(PROFILE vs_5_0)
+  else()
+    set(PROFILE ps_5_0)
+  endif()
+  set(HEADER "${SIMPSONS_SHADER_DIR}/${ENTRY}.h")
+  add_custom_command(OUTPUT "${HEADER}"
+    COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 /T ${PROFILE} /E ${ENTRY}
+      /Fh "${HEADER}" /Vn "k${ENTRY}" "${CMAKE_SOURCE_DIR}/renderer/scene_feedback.hlsl"
+    DEPENDS renderer/scene_feedback.hlsl VERBATIM)
+  list(APPEND SIMPSONS_SCENE_FEEDBACK_HEADERS "${HEADER}")
+endforeach()
+set_property(SOURCE renderer/scene_feedback.cpp APPEND PROPERTY OBJECT_DEPENDS "${SIMPSONS_SCENE_FEEDBACK_HEADERS}")
 add_library(SimpsonsGraphics STATIC
   renderer/native_backend.cpp
   renderer/d3d_call_stats.cpp
+  renderer/gpu_timeline.cpp
   renderer/native_input_prompts.cpp
   renderer/native_storage_screen.cpp
   renderer/cube_texture.cpp
@@ -1195,6 +1460,7 @@ add_library(SimpsonsGraphics STATIC
   renderer/zprepass_mesh.cpp
   renderer/rigid_mesh.cpp
   renderer/skin_mesh.cpp
+  renderer/skin_detail.cpp
   renderer/sky_mesh.cpp
   renderer/particle_draw.cpp
   renderer/immediate_draw.cpp
@@ -1232,18 +1498,84 @@ add_library(SimpsonsGraphics STATIC
   renderer/engine_binding_reset.cpp
   renderer/native_viewport.cpp
   renderer/antialiasing.cpp
+  renderer/smaa_pipeline.cpp
+  renderer/dlss_disabled.cpp
+  renderer/temporal_scene.cpp
+  renderer/temporal_backend.cpp
+  ${SIMPSONS_TEMPORAL_HEADERS}
+  renderer/ui_composite.cpp
+  renderer/scene_feedback.cpp
+  ${SIMPSONS_SCENE_FEEDBACK_HEADERS}
+  ${SIMPSONS_UI_COMPOSITE_HEADERS}
   ${SIMPSONS_NATIVE_AA_HEADERS}
+  ${SIMPSONS_SMAA_HEADERS}
   renderer/native_presentation.cpp
   renderer/native_recording.cpp
+  renderer/live_rendering.cpp
+  ${SIMPSONS_LIVE_RENDERING_HEADERS}
+  renderer/temporal_aa.cpp
+  ${SIMPSONS_TEMPORAL_AA_HEADERS}
+  renderer/scene_post.cpp
+  ${SIMPSONS_SCENE_POST_HEADERS}
+  renderer/presentation_extras.cpp
+  ${SIMPSONS_PRESENTATION_EXTRAS_HEADERS}
+  renderer/ambient_occlusion.cpp
+  ${SIMPSONS_AMBIENT_OCCLUSION_HEADERS}
   ${SIMPSONS_SCREEN_HEADERS} ${SIMPSONS_FOURTAP_HEADERS} ${SIMPSONS_IM2D_DRAW_HEADERS} ${SIMPSONS_MOVIE_HEADERS} ${SIMPSONS_EDGE_HEADERS} ${SIMPSONS_AA_HEADERS} ${SIMPSONS_EDGEAA_HEADERS} ${SIMPSONS_SHADOW_HEADERS} "${SIMPSONS_EFFECT_CATALOG}")
+set_property(SOURCE renderer/live_rendering.cpp APPEND PROPERTY OBJECT_DEPENDS "${SIMPSONS_LIVE_RENDERING_HEADERS};${SIMPSONS_NATIVE_AA_HEADERS}")
+set_property(SOURCE renderer/temporal_aa.cpp APPEND PROPERTY OBJECT_DEPENDS "${SIMPSONS_TEMPORAL_AA_HEADERS}")
+set_property(SOURCE renderer/scene_post.cpp APPEND PROPERTY OBJECT_DEPENDS "${SIMPSONS_SCENE_POST_HEADERS}")
+set_property(SOURCE renderer/presentation_extras.cpp APPEND PROPERTY OBJECT_DEPENDS "${SIMPSONS_PRESENTATION_EXTRAS_HEADERS}")
+set_property(SOURCE renderer/ambient_occlusion.cpp APPEND PROPERTY OBJECT_DEPENDS "${SIMPSONS_AMBIENT_OCCLUSION_HEADERS}")
+# Generated shader headers need explicit object edges: clang-cl's relative
+# include dependencies can otherwise leave a fixture stale for one Ninja build.
+set_property(SOURCE renderer/particle_draw.cpp tests/test_particle_backend.cpp
+  tests/test_particle_projected_shader.cpp tests/test_particle_family_shader.cpp
+  APPEND PROPERTY OBJECT_DEPENDS "${SIMPSONS_PARTICLE_HEADERS}")
+set_property(SOURCE renderer/immediate_draw.cpp APPEND PROPERTY OBJECT_DEPENDS "${SIMPSONS_IMMEDIATE_HEADERS}")
+set_property(SOURCE renderer/immediate_draw.cpp APPEND PROPERTY OBJECT_DEPENDS "${SIMPSONS_TEMPORAL_HEADERS}")
+set_property(SOURCE renderer/temporal_scene.cpp APPEND PROPERTY OBJECT_DEPENDS "${SIMPSONS_TEMPORAL_HEADERS}")
 add_dependencies(SimpsonsGraphics VerifyEffectCatalog)
+target_sources(SimpsonsGraphics PRIVATE renderer/graphics_api.cpp)
+if(SIMPSONS_VULKAN)
+  target_sources(SimpsonsGraphics PRIVATE
+    renderer/vulkan/vulkan_implementation.cpp
+    renderer/vulkan/vulkan_device.cpp
+    renderer/vulkan/vulkan_formats.cpp
+    renderer/vulkan/spirv_module.cpp
+    renderer/vulkan/d3d11_vulkan_resources.cpp
+    renderer/vulkan/d3d11_vulkan_pipeline.cpp
+    renderer/vulkan/d3d11_vulkan_context.cpp
+    renderer/vulkan/d3d11_vulkan_device.cpp
+    renderer/vulkan/dxgi_vulkan.cpp)
+  # Vendored implementations keep their upstream warnings out of the build.
+  set_source_files_properties(renderer/vulkan/vulkan_implementation.cpp PROPERTIES COMPILE_OPTIONS "-w")
+  target_include_directories(SimpsonsGraphics PUBLIC
+    "${CMAKE_SOURCE_DIR}/third_party/vulkan/Vulkan-Headers/include"
+    "${CMAKE_SOURCE_DIR}/third_party/vulkan/volk"
+    "${CMAKE_SOURCE_DIR}/third_party/vulkan/VulkanMemoryAllocator/include")
+  # SIMPSONS_VULKAN_SPIRV makes every generated shader header register its
+  # SPIR-V twin in the translation units that create the shader.
+  target_compile_definitions(SimpsonsGraphics PUBLIC SIMPSONS_VULKAN=1 SIMPSONS_VULKAN_SPIRV=1)
+else()
+  target_compile_definitions(SimpsonsGraphics PUBLIC SIMPSONS_VULKAN=0)
+endif()
+# Normal rendering requires no NVIDIA SDK, libraries or runtime DLL.
+get_target_property(SIMPSONS_GRAPHICS_CRT SimpsonsGraphics MSVC_RUNTIME_LIBRARY)
+if(NOT SIMPSONS_GRAPHICS_CRT)
+  # Preserve the established Windows runtime default explicitly.
+  set_property(TARGET SimpsonsGraphics PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+endif()
+target_link_libraries(SimpsonsGraphics PRIVATE advapi32 user32)
+
 target_include_directories(SimpsonsGraphics PRIVATE "${SIMPSONS_SHADER_DIR}" "${SIMPSONS_GENERATED_DIR}")
 target_include_directories(SimpsonsGraphics PUBLIC "${CMAKE_SOURCE_DIR}")
 target_compile_definitions(SimpsonsGraphics PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN
   SIMPSONS_STALL_PROFILER=$<BOOL:${SIMPSONS_STALL_PROFILER}>)
-target_link_libraries(SimpsonsGraphics PUBLIC d3d11 dxgi SimpsonsStallProfiler)
+target_link_libraries(SimpsonsGraphics PUBLIC d3d11 dxgi bcrypt SimpsonsStallProfiler)
 target_link_libraries(SimpsonsRuntime PUBLIC SimpsonsGraphics)
-add_executable(ParticleBackendTests tests/test_particle_backend.cpp)
+add_executable(ParticleBackendTests tests/test_particle_backend.cpp ${SIMPSONS_PARTICLE_HEADERS})
+target_include_directories(ParticleBackendTests PRIVATE "${SIMPSONS_SHADER_DIR}")
 target_link_libraries(ParticleBackendTests PRIVATE SimpsonsGraphics)
 add_executable(ParticleProjectedShaderTests tests/test_particle_projected_shader.cpp ${SIMPSONS_PARTICLE_HEADERS})
 target_include_directories(ParticleProjectedShaderTests PRIVATE "${SIMPSONS_SHADER_DIR}")
@@ -1290,7 +1622,10 @@ if(SIMPSONS_PGO_MODE STREQUAL "GENERATE")
   endforeach()
 elseif(SIMPSONS_PGO_MODE STREQUAL "USE")
   foreach(SIMPSONS_PGO_TARGET SimpsonsPPC SimpsonsRuntime SimpsonsGraphics SimpsonsAudio SimpsonsAudioOutput SimpsonsNative)
-    target_compile_options(${SIMPSONS_PGO_TARGET} PRIVATE "$<$<CONFIG:Release>:/clang:-fprofile-use=${SIMPSONS_PGO_PROFILE_ABS}>" "$<$<CONFIG:RelWithDebInfo>:/clang:-fprofile-use=${SIMPSONS_PGO_PROFILE_ABS}>")
+    # A function edited since training reports a stale-profile mismatch and
+    # keeps its unprofiled code. That stays a visible warning, never a /WX error.
+    target_compile_options(${SIMPSONS_PGO_TARGET} PRIVATE "$<$<CONFIG:Release>:/clang:-fprofile-use=${SIMPSONS_PGO_PROFILE_ABS}>" "$<$<CONFIG:RelWithDebInfo>:/clang:-fprofile-use=${SIMPSONS_PGO_PROFILE_ABS}>"
+      "$<$<CONFIG:Release>:/clang:-Wno-error=backend-plugin>" "$<$<CONFIG:RelWithDebInfo>:/clang:-Wno-error=backend-plugin>")
   endforeach()
 endif()
 add_executable(SimpsonsLauncher WIN32 app/launcher.cpp)
@@ -1307,9 +1642,15 @@ if(BUILD_TESTING)
     SIMPSONS_STALL_PROFILER=1 SIMPSONS_STALL_PROFILER_TESTING=1)
   target_compile_options(StallProfilerTests PRIVATE /fp:strict /W4 /WX /EHsc /clang:-mssse3)
   add_test(NAME RuntimeStallProfiler COMMAND StallProfilerTests)
-  set_tests_properties(RuntimeStallProfiler PROPERTIES ENVIRONMENT "SIMPSONS_STALL_PROFILE=1")
+  set_tests_properties(RuntimeStallProfiler PROPERTIES ENVIRONMENT "SIMPSONS_STALL_PROFILE=1;SIMPSONS_STACK_SAMPLE=")
   add_test(NAME RuntimeStallProfilerDisabled COMMAND StallProfilerTests --disabled)
-  set_tests_properties(RuntimeStallProfilerDisabled PROPERTIES ENVIRONMENT "SIMPSONS_STALL_PROFILE=0")
+  set_tests_properties(RuntimeStallProfilerDisabled PROPERTIES ENVIRONMENT "SIMPSONS_STALL_PROFILE=0;SIMPSONS_STACK_SAMPLE=")
+  add_test(NAME RuntimeStallProfilerClock COMMAND StallProfilerTests --clock-records)
+  set_tests_properties(RuntimeStallProfilerClock PROPERTIES ENVIRONMENT "SIMPSONS_STALL_PROFILE=1;SIMPSONS_STACK_SAMPLE=clock-fixture")
+  add_test(NAME RuntimeStallProfilerClockDisabled COMMAND StallProfilerTests --disabled)
+  set_tests_properties(RuntimeStallProfilerClockDisabled PROPERTIES ENVIRONMENT "SIMPSONS_STALL_PROFILE=0;SIMPSONS_STACK_SAMPLE=clock-fixture")
+  add_test(NAME StackProfileClock COMMAND "${Python3_EXECUTABLE}" -B
+    "${CMAKE_SOURCE_DIR}/tests/test_stack_profile_clock.py" -v)
   add_executable(StallProfilerCompiledOutTests tests/test_stall_profiler_compiled_out.cpp)
   target_include_directories(StallProfilerCompiledOutTests PRIVATE "${CMAKE_SOURCE_DIR}")
   target_compile_definitions(StallProfilerCompiledOutTests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN SIMPSONS_STALL_PROFILER=0)
@@ -1374,6 +1715,21 @@ if(BUILD_TESTING)
   add_test(NAME NativeStaticShadowMeshDecode COMMAND StaticShadowMeshTests)
   add_test(NAME OriginalCharacterMeshEvidence COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_character_mesh.py" --verify)
   add_executable(ShadowMeshTests tests/test_shadow_mesh.cpp)
+  add_executable(MaterialDigestTests tests/test_material_digest.cpp)
+  target_compile_options(MaterialDigestTests PRIVATE /fp:strict /W4 /WX)
+  target_link_libraries(MaterialDigestTests PRIVATE SimpsonsGraphics)
+  add_test(NAME NativeMaterialDigestContract COMMAND MaterialDigestTests)
+  set_tests_properties(NativeMaterialDigestContract PROPERTIES TIMEOUT 30)
+  add_executable(ConstantBufferArenaTests tests/test_constant_buffer_arena.cpp)
+  target_compile_options(ConstantBufferArenaTests PRIVATE /fp:strict /W4 /WX)
+  target_link_libraries(ConstantBufferArenaTests PRIVATE SimpsonsGraphics d3dcompiler)
+  target_include_directories(ConstantBufferArenaTests PRIVATE "${SIMPSONS_SHADER_DIR}")
+  add_test(NAME NativeConstantBufferArenaWARP COMMAND ConstantBufferArenaTests "${CMAKE_SOURCE_DIR}/analysis/simpsons.pe")
+  add_test(NAME NativeConstantBufferArenaHardware COMMAND ConstantBufferArenaTests "${CMAKE_SOURCE_DIR}/analysis/simpsons.pe" --hardware)
+  # The arena's independent oracle compiles HLSL at run time (D3DCompile), so it
+  # always runs on D3D11; VulkanDeviceConformance covers Vulkan constant offsets.
+  set_tests_properties(NativeConstantBufferArenaWARP NativeConstantBufferArenaHardware PROPERTIES TIMEOUT 90
+    ENVIRONMENT "SIMPSONS_RENDERER=d3d11")
   add_executable(ZPrepassMeshTests tests/test_zprepass_mesh.cpp)
   add_executable(MonoMeshTests tests/test_mono_mesh.cpp)
   target_compile_options(MonoMeshTests PRIVATE /fp:strict /W4 /WX)
@@ -1677,6 +2033,16 @@ if(BUILD_TESTING)
   set_tests_properties(NativeSkinShaderWARP NativeSkinShaderHardware PROPERTIES TIMEOUT 60)
   add_executable(RigidMeshTests tests/test_rigid_mesh.cpp "${SIMPSONS_CHOCOLATE_UV_PROBE_HEADER}")
   add_executable(SkyMeshTests tests/test_sky_mesh.cpp)
+  add_executable(NativeVideoExtrasTests tests/test_native_video_extras.cpp)
+  target_compile_options(NativeVideoExtrasTests PRIVATE /fp:strict /W4 /WX)
+  target_link_libraries(NativeVideoExtrasTests PRIVATE SimpsonsGraphics)
+  add_test(NAME NativeVideoExtrasWARP COMMAND NativeVideoExtrasTests)
+  add_test(NAME NativeVideoExtrasHardware COMMAND NativeVideoExtrasTests --hardware)
+  set_tests_properties(NativeVideoExtrasWARP NativeVideoExtrasHardware PROPERTIES TIMEOUT 120)
+  add_executable(SkinDetailTests tests/test_skin_detail.cpp)
+  target_compile_options(SkinDetailTests PRIVATE /fp:strict /W4 /WX)
+  target_link_libraries(SkinDetailTests PRIVATE SimpsonsGraphics)
+  add_test(NAME NativeCharacterDetail COMMAND SkinDetailTests)
   add_executable(SkinMeshTests tests/test_skin_mesh.cpp)
   target_compile_options(SkinMeshTests PRIVATE /fp:strict /W4 /WX)
   target_link_libraries(SkinMeshTests PRIVATE SimpsonsGraphics)
@@ -2057,6 +2423,10 @@ if(BUILD_TESTING)
   target_compile_options(PlayerTelemetryTests PRIVATE /fp:strict /W4 /WX)
   add_test(NAME OriginalPlayerFrameTelemetry COMMAND PlayerTelemetryTests)
   add_executable(NativeFrameRateTests tests/test_native_frame_rate.cpp)
+  add_executable(NativeFramePacerTests tests/test_frame_pacer.cpp)
+  target_include_directories(NativeFramePacerTests PRIVATE "${CMAKE_SOURCE_DIR}")
+  target_compile_options(NativeFramePacerTests PRIVATE /W4 /WX)
+  add_test(NAME NativeFramePacer COMMAND NativeFramePacerTests)
   add_executable(NativeVideoSettingsTests tests/test_native_video_settings.cpp)
   add_executable(NativeControlSettingsTests tests/test_native_control_settings.cpp)
   target_compile_options(NativeControlSettingsTests PRIVATE /fp:strict /W4 /WX)
@@ -2077,7 +2447,58 @@ if(BUILD_TESTING)
   target_compile_options(AntialiasingTests PRIVATE /fp:strict /W4 /WX)
   target_link_libraries(AntialiasingTests PRIVATE SimpsonsGraphics)
   add_test(NAME NativeAntialiasing COMMAND AntialiasingTests)
+  add_test(NAME NativeAntialiasingHardware COMMAND AntialiasingTests --hardware)
+  set_tests_properties(NativeAntialiasing NativeAntialiasingHardware PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
   set_tests_properties(NativeAntialiasing PROPERTIES TIMEOUT 60)
+  set(SIMPSONS_UI_COMPOSITE_FIXTURE_HEADERS)
+  foreach(ENTRY VSUiCompositeFixture PSUiCompositeFixture)
+    if(ENTRY MATCHES "^VS")
+      set(PROFILE vs_5_0)
+    else()
+      set(PROFILE ps_5_0)
+    endif()
+    set(HEADER "${SIMPSONS_SHADER_DIR}/${ENTRY}.h")
+    add_custom_command(OUTPUT "${HEADER}"
+      COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 /T ${PROFILE} /E ${ENTRY}
+        /Fh "${HEADER}" /Vn "k${ENTRY}" "${CMAKE_SOURCE_DIR}/renderer/ui_composite_fixture.hlsl"
+      DEPENDS renderer/ui_composite_fixture.hlsl VERBATIM)
+    list(APPEND SIMPSONS_UI_COMPOSITE_FIXTURE_HEADERS "${HEADER}")
+  endforeach()
+  foreach(ENTRY PSUiCompositeFixtureDepthOnly PSUiCompositeFixtureStencilBit)
+    set(HEADER "${SIMPSONS_SHADER_DIR}/${ENTRY}.h")
+    add_custom_command(OUTPUT "${HEADER}"
+      COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 /T ps_5_0 /E ${ENTRY}
+        /Fh "${HEADER}" /Vn "k${ENTRY}" "${CMAKE_SOURCE_DIR}/renderer/ui_composite_fixture_fallback.hlsl"
+      DEPENDS renderer/ui_composite_fixture_fallback.hlsl VERBATIM)
+    list(APPEND SIMPSONS_UI_COMPOSITE_FIXTURE_HEADERS "${HEADER}")
+  endforeach()
+  foreach(ENTRY VSUiCompositeJitterFixture PSUiCompositeJitterFixtureDepthOnly PSUiCompositeJitterFixtureStencilBit PSUiCompositeJitterLateWorld)
+    if(ENTRY MATCHES "^VS")
+      set(PROFILE vs_5_0)
+    else()
+      set(PROFILE ps_5_0)
+    endif()
+    set(HEADER "${SIMPSONS_SHADER_DIR}/${ENTRY}.h")
+    add_custom_command(OUTPUT "${HEADER}"
+      COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 /T ${PROFILE} /E ${ENTRY}
+        /Fh "${HEADER}" /Vn "k${ENTRY}" "${CMAKE_SOURCE_DIR}/renderer/ui_composite_jitter_fixture.hlsl"
+      DEPENDS renderer/ui_composite_jitter_fixture.hlsl VERBATIM)
+    list(APPEND SIMPSONS_UI_COMPOSITE_FIXTURE_HEADERS "${HEADER}")
+  endforeach()
+  add_executable(UICompositeTests tests/test_ui_composite.cpp ${SIMPSONS_UI_COMPOSITE_FIXTURE_HEADERS})
+  target_include_directories(UICompositeTests PRIVATE "${SIMPSONS_SHADER_DIR}")
+  target_compile_options(UICompositeTests PRIVATE /fp:strict /W4 /WX)
+  target_link_libraries(UICompositeTests PRIVATE SimpsonsGraphics)
+  add_test(NAME NativeUiComposite COMMAND UICompositeTests --spatial-only)
+  add_test(NAME NativeUiCompositeHardware COMMAND UICompositeTests --hardware --spatial-only)
+  set_tests_properties(NativeUiComposite NativeUiCompositeHardware PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+  # DLSS/temporal history research fixtures are excluded from normal targets.
+  add_executable(SMAATests tests/test_smaa.cpp)
+  target_compile_options(SMAATests PRIVATE /fp:strict /W4 /WX)
+  target_link_libraries(SMAATests PRIVATE SimpsonsGraphics)
+  add_test(NAME NativeSMAA COMMAND SMAATests)
+  add_test(NAME NativeSMAAHardware COMMAND SMAATests --hardware)
+  set_tests_properties(NativeSMAA NativeSMAAHardware PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
   add_executable(UltrawideCameraTests tests/test_ultrawide_camera.cpp)
   target_compile_options(UltrawideCameraTests PRIVATE /fp:strict /W4 /WX)
   target_link_libraries(UltrawideCameraTests PRIVATE SimpsonsRuntime)
@@ -2499,6 +2920,9 @@ if(BUILD_TESTING)
   target_link_libraries(DacLifecycleTests PRIVATE SimpsonsRuntime bcrypt)
   add_test(NAME OriginalDacLifecycle COMMAND DacLifecycleTests "${CMAKE_SOURCE_DIR}/analysis/simpsons.pe")
   set_tests_properties(OriginalDacLifecycle PROPERTIES TIMEOUT 45)
+  add_test(NAME OriginalDacLifecyclePrewarm COMMAND DacLifecycleTests "${CMAKE_SOURCE_DIR}/analysis/simpsons.pe" --prewarm)
+  add_test(NAME OriginalDacPrewarmCancellation COMMAND DacLifecycleTests "${CMAKE_SOURCE_DIR}/analysis/simpsons.pe" --prewarm-cancel)
+  set_tests_properties(OriginalDacLifecyclePrewarm OriginalDacPrewarmCancellation PROPERTIES TIMEOUT 45)
   add_executable(AudioReaderLifecycleTests tests/test_audio_reader_lifecycle.cpp)
   target_compile_options(AudioReaderLifecycleTests PRIVATE /fp:strict /W4 /WX)
   target_link_libraries(AudioReaderLifecycleTests PRIVATE SimpsonsRuntime bcrypt)
@@ -2562,10 +2986,20 @@ if(BUILD_TESTING)
       --source "${SIMPSONS_GENERATED_DIR}/ppc_recomp.70.cpp"
       --matrix-source "${SIMPSONS_GENERATED_DIR}/ppc_recomp.71.cpp"
       --runtime-source "${SIMPSONS_GENERATED_DIR}/ppc_recomp.239.cpp"
+      --blockcopy-source "${SIMPSONS_GENERATED_DIR}/ppc_recomp.140.cpp"
+      --bytecopy-source "${SIMPSONS_GENERATED_DIR}/ppc_recomp.176.cpp"
+      --pair-source "${SIMPSONS_GENERATED_DIR}/ppc_recomp.265.cpp"
+      --vm-source "${SIMPSONS_GENERATED_DIR}/ppc_recomp.182.cpp"
       --vector-source "${SIMPSONS_GENERATED_DIR}/ppc_recomp.271.cpp" --output "${INLINE_MEMORY_REFERENCE}"
-    DEPENDS tools/generate_inline_memory_reference.py "${SIMPSONS_GENERATED_DIR}/ppc_recomp.70.cpp"
+    DEPENDS tools/generate_inline_memory_reference.py tools/inline_fast_memory_generation.py
+      tools/stall_profile_generation.py config/inline_fast_memory.json
+      "${SIMPSONS_GENERATED_DIR}/ppc_recomp.70.cpp"
       "${SIMPSONS_GENERATED_DIR}/ppc_recomp.71.cpp"
-      "${SIMPSONS_GENERATED_DIR}/ppc_recomp.239.cpp" "${SIMPSONS_GENERATED_DIR}/ppc_recomp.271.cpp"
+      "${SIMPSONS_GENERATED_DIR}/ppc_recomp.140.cpp"
+      "${SIMPSONS_GENERATED_DIR}/ppc_recomp.176.cpp"
+      "${SIMPSONS_GENERATED_DIR}/ppc_recomp.182.cpp"
+      "${SIMPSONS_GENERATED_DIR}/ppc_recomp.239.cpp" "${SIMPSONS_GENERATED_DIR}/ppc_recomp.265.cpp"
+      "${SIMPSONS_GENERATED_DIR}/ppc_recomp.271.cpp"
     VERBATIM)
   add_executable(InlineMemoryTests tests/test_inline_memory.cpp "${INLINE_MEMORY_REFERENCE}")
   set_source_files_properties(tests/test_inline_memory.cpp PROPERTIES OBJECT_DEPENDS "${INLINE_MEMORY_REFERENCE}")
@@ -2573,6 +3007,8 @@ if(BUILD_TESTING)
   target_compile_options(InlineMemoryTests PRIVATE /fp:strict /W4 /WX /Ob2)
   target_link_libraries(InlineMemoryTests PRIVATE SimpsonsRuntime)
   add_test(NAME NativeInlineMemoryContract COMMAND InlineMemoryTests)
+  add_test(NAME NativeInlineFastMemoryGeneration COMMAND "${Python3_EXECUTABLE}" -B
+    "${CMAKE_SOURCE_DIR}/tests/test_inline_fast_memory_generation.py" -v)
   set_tests_properties(NativeInlineMemoryContract PROPERTIES TIMEOUT 30)
   add_executable(NativeTickTests tests/test_native_tick.cpp)
   target_compile_options(NativeTickTests PRIVATE /fp:strict)
@@ -2681,6 +3117,27 @@ if(BUILD_TESTING)
   target_link_libraries(NativeGraphicsTests PRIVATE SimpsonsGraphics)
   add_test(NAME NativeGraphicsResources COMMAND NativeGraphicsTests)
   add_test(NAME NativeGraphicsResourcesHardware COMMAND NativeGraphicsTests --hardware)
+  if(SIMPSONS_VULKAN)
+    set(SIMPSONS_VULKAN_FIXTURE_HEADERS)
+    foreach(ENTRY VSVkFixtureFullscreen VSVkFixturePosition PSVkFixtureColor PSVkFixtureUv PSVkFixtureDepth
+        PSVkFixturePositionDepth PSVkFixtureSample PSVkFixtureReverse)
+      if(ENTRY MATCHES "^VS")
+        set(PROFILE vs_5_0)
+      else()
+        set(PROFILE ps_5_0)
+      endif()
+      set(HEADER "${SIMPSONS_SHADER_DIR}/${ENTRY}.h")
+      add_custom_command(OUTPUT "${HEADER}"
+        COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 /T ${PROFILE} /E ${ENTRY}
+          /Fh "${HEADER}" /Vn "k${ENTRY}" "${CMAKE_SOURCE_DIR}/tests/vulkan_device_fixture.hlsl"
+        DEPENDS tests/vulkan_device_fixture.hlsl VERBATIM)
+      list(APPEND SIMPSONS_VULKAN_FIXTURE_HEADERS "${HEADER}")
+    endforeach()
+    add_executable(VulkanDeviceTests tests/test_vulkan_device.cpp ${SIMPSONS_VULKAN_FIXTURE_HEADERS})
+    target_include_directories(VulkanDeviceTests PRIVATE "${SIMPSONS_SHADER_DIR}")
+    target_link_libraries(VulkanDeviceTests PRIVATE SimpsonsGraphics)
+    add_test(NAME VulkanDeviceConformance COMMAND VulkanDeviceTests)
+  endif()
   add_executable(ViewportResetTests tests/test_viewport_reset.cpp)
   target_compile_options(ViewportResetTests PRIVATE /fp:strict /W4 /WX)
   target_link_libraries(ViewportResetTests PRIVATE SimpsonsRuntime)
@@ -2773,6 +3230,18 @@ if(BUILD_TESTING)
   add_executable(ITXDRGBATests tests/test_itxd_rgba.cpp)
   target_compile_options(ITXDRGBATests PRIVATE /fp:strict /W4 /WX)
   target_link_libraries(ITXDRGBATests PRIVATE SimpsonsGraphics)
+  add_executable(ITXDRGBAPreparationTests tests/test_itxd_rgba_preparation.cpp runtime/itxd_rgba_preparation.cpp)
+  target_compile_options(ITXDRGBAPreparationTests PRIVATE /fp:strict /W4 /WX)
+  target_link_libraries(ITXDRGBAPreparationTests PRIVATE SimpsonsGraphics)
+  add_test(NAME NativeITXDRGBAPreparation COMMAND ITXDRGBAPreparationTests)
+  set_tests_properties(NativeITXDRGBAPreparation PROPERTIES TIMEOUT 30)
+  add_executable(ITXDTexturePreparationTests tests/test_itxd_texture_preparation.cpp runtime/itxd_texture_preparation.cpp)
+  target_compile_options(ITXDTexturePreparationTests PRIVATE /fp:strict /W4 /WX)
+  target_compile_definitions(ITXDTexturePreparationTests PRIVATE SIMPSONS_ITXD_TEXTURE_PREPARATION_TESTING=1)
+  target_link_libraries(ITXDTexturePreparationTests PRIVATE SimpsonsGraphics)
+  add_test(NAME NativeITXDTexturePreparationWARP COMMAND ITXDTexturePreparationTests)
+  add_test(NAME NativeITXDTexturePreparationHardware COMMAND ITXDTexturePreparationTests --hardware)
+  set_tests_properties(NativeITXDTexturePreparationWARP NativeITXDTexturePreparationHardware PROPERTIES TIMEOUT 60)
   add_custom_target(VerifyITXDTonalFixture
     COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/prepare_itxd_tonal_fixture.py"
     VERBATIM)

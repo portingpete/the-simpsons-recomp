@@ -1,4 +1,5 @@
 #include "ball_effect.h"
+#include "temporal_scene.h"
 #include "VSBallEffect.h"
 #include "PSBallEffectDraw.h"
 #include <bit>
@@ -18,10 +19,12 @@ ComPtr<ID3D11Buffer> upload(ID3D11Device* device,const void* bytes,UINT size,UIN
 // unrelated sampled view through D3D11's automatic read/write hazard handling.
 struct Restore {
     ID3D11DeviceContext* c;
+    ComPtr<ID3D11DeviceContext1> ranged;
     ComPtr<ID3D11VertexShader> vs;ComPtr<ID3D11PixelShader> ps;
     std::array<ID3D11ClassInstance*,256> vsClasses{},psClasses{};
     UINT vsClassCount=256,psClassCount=256;
-    ComPtr<ID3D11Buffer> vb,vc0,pc1,pc2;ComPtr<ID3D11InputLayout> layout;
+    ComPtr<ID3D11Buffer> vb;ComPtr<ID3D11InputLayout> layout;
+    detail::ConstantBufferBinding vc0,pc1,pc2;
     std::array<std::array<ID3D11ShaderResourceView*,128>,6> srvs{};
     ComPtr<ID3D11SamplerState> sampler;
     ComPtr<ID3D11DepthStencilState> depth;ComPtr<ID3D11BlendState> blend;ComPtr<ID3D11RasterizerState> raster;
@@ -29,9 +32,11 @@ struct Restore {
     std::array<D3D11_VIEWPORT,16> viewports{};std::array<D3D11_RECT,16> scissors{};
     UINT viewportCount=16,scissorCount=16,stride{},offset{},stencil{},sampleMask{};
     FLOAT factors[4]{};D3D11_PRIMITIVE_TOPOLOGY topology{};
-    explicit Restore(ID3D11DeviceContext* ctx):c(ctx){
+    Restore(ID3D11DeviceContext* ctx,ComPtr<ID3D11DeviceContext1> rangedContext):c(ctx),ranged(std::move(rangedContext)){
         c->VSGetShader(&vs,vsClasses.data(),&vsClassCount);c->PSGetShader(&ps,psClasses.data(),&psClassCount);
-        c->VSGetConstantBuffers(0,1,&vc0);c->PSGetConstantBuffers(1,1,&pc1);c->PSGetConstantBuffers(2,1,&pc2);
+        vc0=detail::captureConstantBuffer(c,ranged.Get(),detail::ConstantBufferStage::Vertex,0);
+        pc1=detail::captureConstantBuffer(c,ranged.Get(),detail::ConstantBufferStage::Pixel,1);
+        pc2=detail::captureConstantBuffer(c,ranged.Get(),detail::ConstantBufferStage::Pixel,2);
         c->IAGetVertexBuffers(0,1,&vb,&stride,&offset);c->IAGetInputLayout(&layout);c->IAGetPrimitiveTopology(&topology);
         c->PSGetSamplers(0,1,&sampler);
         c->VSGetShaderResources(0,128,srvs[0].data());c->PSGetShaderResources(0,128,srvs[1].data());
@@ -52,8 +57,10 @@ struct Restore {
     ~Restore(){
         clearResources();c->OMSetRenderTargets(8,targets.data(),dsv.Get());
         c->VSSetShader(vs.Get(),vsClasses.data(),vsClassCount);c->PSSetShader(ps.Get(),psClasses.data(),psClassCount);
-        auto* b=vc0.Get();c->VSSetConstantBuffers(0,1,&b);b=pc1.Get();c->PSSetConstantBuffers(1,1,&b);b=pc2.Get();c->PSSetConstantBuffers(2,1,&b);
-        b=vb.Get();c->IASetVertexBuffers(0,1,&b,&stride,&offset);c->IASetInputLayout(layout.Get());c->IASetPrimitiveTopology(topology);
+        detail::bindConstantBuffer(c,ranged.Get(),detail::ConstantBufferStage::Vertex,0,vc0);
+        detail::bindConstantBuffer(c,ranged.Get(),detail::ConstantBufferStage::Pixel,1,pc1);
+        detail::bindConstantBuffer(c,ranged.Get(),detail::ConstantBufferStage::Pixel,2,pc2);
+        auto* b=vb.Get();c->IASetVertexBuffers(0,1,&b,&stride,&offset);c->IASetInputLayout(layout.Get());c->IASetPrimitiveTopology(topology);
         auto* s=sampler.Get();c->PSSetSamplers(0,1,&s);
         c->VSSetShaderResources(0,128,srvs[0].data());c->PSSetShaderResources(0,128,srvs[1].data());
         c->GSSetShaderResources(0,128,srvs[2].data());c->HSSetShaderResources(0,128,srvs[3].data());
@@ -94,14 +101,15 @@ struct BallEffectPipeline {
     }
     void surfaces(ID3D11Device* device,UINT w,UINT h){
         if(width==w&&height==h)return;
-        D3D11_TEXTURE2D_DESC d{};d.Width=w;d.Height=h;d.MipLevels=d.ArraySize=1;d.SampleDesc.Count=1;
+        D3D11_TEXTURE2D_DESC d{};d.Width=w;d.Height=h;d.MipLevels=d.ArraySize=1;d.SampleDesc={1,0};
         d.Format=DXGI_FORMAT_R10G10B10A2_TYPELESS;d.BindFlags=D3D11_BIND_RENDER_TARGET;
         ComPtr<ID3D11Texture2D> p,t;ComPtr<ID3D11RenderTargetView> r;ComPtr<ID3D11ShaderResourceView> s;
         check(device->CreateTexture2D(&d,nullptr,&p),"packed output");
         d.BindFlags=D3D11_BIND_SHADER_RESOURCE;check(device->CreateTexture2D(&d,nullptr,&t),"sampled destination");
         D3D11_RENDER_TARGET_VIEW_DESC rd{};rd.Format=DXGI_FORMAT_R10G10B10A2_UINT;rd.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;
         check(device->CreateRenderTargetView(p.Get(),&rd,&r),"packed output view");
-        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=DXGI_FORMAT_R10G10B10A2_UINT;sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;sd.Texture2D.MipLevels=1;
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=DXGI_FORMAT_R10G10B10A2_UINT;sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels=1;
         check(device->CreateShaderResourceView(t.Get(),&sd,&s),"destination view");
         packed=std::move(p);destination=std::move(t);output=std::move(r);sampled=std::move(s);width=w;height=h;
     }
@@ -147,11 +155,11 @@ void NativeBackend::drawBallEffect(const std::shared_ptr<RenderTarget>& target,c
     bd.RenderTarget[0].DestBlendAlpha=D3D11_BLEND_ZERO;bd.RenderTarget[0].BlendOpAlpha=D3D11_BLEND_OP_ADD;
     bd.RenderTarget[0].RenderTargetWriteMask=UINT8(d.colorMask);
     check(device->CreateBlendState(&bd,&blend),"packed color state");
-    ComPtr<ID3D11RasterizerState> raster;D3D11_RASTERIZER_DESC rd{};rd.FillMode=D3D11_FILL_SOLID;rd.CullMode=D3D11_CULL_NONE;rd.DepthClipEnable=TRUE;rd.ScissorEnable=d.scissorEnable;
+    ComPtr<ID3D11RasterizerState> raster;D3D11_RASTERIZER_DESC rd{};rd.FillMode=D3D11_FILL_SOLID;rd.CullMode=D3D11_CULL_NONE;rd.DepthClipEnable=TRUE;rd.ScissorEnable=d.scissorEnable;rd.MultisampleEnable=TRUE;
     check(device->CreateRasterizerState(&rd,&raster),"raster state");ComPtr<ID3D11SamplerState> sampler;
     check(device->CreateSamplerState(&sm,&sampler),"texture sampler");
     {
-        Restore restore(context.Get());restore.clearResources();context->OMSetRenderTargets(0,nullptr,nullptr);
+        Restore restore(context.Get(),constantBindingContext());restore.clearResources();context->OMSetRenderTargets(0,nullptr,nullptr);
         context->CopyResource(p.packed.Get(),target->texture.Get());context->CopyResource(p.destination.Get(),target->texture.Get());
         auto* vb=vertices.Get();UINT stride=16,offset=0;context->IASetVertexBuffers(0,1,&vb,&stride,&offset);
         context->IASetInputLayout(p.layout.Get());context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -162,8 +170,20 @@ void NativeBackend::drawBallEffect(const std::shared_ptr<RenderTarget>& target,c
         const auto vp=renderViewport(target,{0,0,float(target->width),float(target->height),0,1});context->RSSetViewports(1,&vp);
         if(d.scissorEnable){const auto sc=renderScissor(target,{LONG(d.scissor[0]),LONG(d.scissor[1]),LONG(d.scissor[2]),LONG(d.scissor[3])});context->RSSetScissorRects(1,&sc);}
         context->RSSetState(raster.Get());context->OMSetDepthStencilState(depthState.Get(),0);context->OMSetBlendState(blend.Get(),nullptr,d.multisampleMask);
-        auto* output=p.output.Get();context->OMSetRenderTargets(1,&output,depth->view.Get());context->Draw(6,0);
+        auto* output=p.output.Get();context->OMSetRenderTargets(1,&output,depth->view.Get());
+        ShadowMeshDraw temporalState=d;temporalState.temporalBlendEnable=0;temporalState.temporalBlendWord=0x00010001;
+        auto temporal=temporalGeometryDraw(target,depth,temporalState,0x82156548,4);
+        if(temporal) {
+            std::array<TemporalRegister,15> current{};
+            std::copy(d.constants.begin(),d.constants.end(),current.begin());
+            std::copy(triangles.begin(),triangles.end(),current.begin()+9);
+            temporal->packedOutput(output,bool(d.blendEnable)||!d.depthWrite);
+            temporal->prepare(context.Get(),current);
+        }
+        {ScopedTemporalGeometryDraw fused(context.Get(),temporal);context->Draw(6,0);}
         context->OMSetRenderTargets(0,nullptr,nullptr);context->CopyResource(target->texture.Get(),p.packed.Get());++ballEffectDraws;
+        noteTemporalSceneDraw(target,depth,d.colorMask,d.depthEnable&&d.depthWrite,false,
+            temporal?std::optional{temporalSceneJitter()}:std::nullopt);
     }
     requireOwner();
 }

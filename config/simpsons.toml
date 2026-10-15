@@ -126,6 +126,28 @@ registers = ["ctx", "base"]
 return = true
 evidence_hex = "7d8802a6"
 
+# Native Master volume row in the original Audio menu. Populate/Save keep the
+# original slider and subtitle callbacks; Leave (Audio state) saves or restores.
+[[midasm_hook]]
+address = 0x823A5438
+name = "SimpsonsNativeAudioPopulate"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6"
+
+[[midasm_hook]]
+address = 0x823A5460
+name = "SimpsonsNativeAudioSave"
+registers = ["ctx", "base"]
+return = true
+evidence_hex = "7d8802a6"
+
+[[midasm_hook]]
+address = 0x823A5938
+name = "SimpsonsNativeAudioLeave"
+registers = ["ctx", "base"]
+evidence_hex = "2f1e0006"
+
 # Original Options event dispatcher, Video state: r30 is accept (6) or
 # cancel (7). Preserve its brightness save/rollback and screen transition.
 [[midasm_hook]]
@@ -611,6 +633,51 @@ evidence_hex = "7d8802a69181fff8fbc1ffe8"
 
 # Apply the selected FOV and frozen internal aspect to the original main world
 # camera before dirty-frame sync, so culling and native projection agree.
+# Screen shake setting: ShakeCameraModifier evaluation 8295A0E8 adds its
+# position/rotation offsets (SP+68..70, SP+78..80) to the camera state here.
+[[midasm_hook]]
+address = 0x8295A3DC
+name = "SimpsonsNativeCameraShake"
+registers = ["ctx", "base"]
+evidence_hex = "c01d0000c1a10068ec00682a"
+
+# Photo mode: skip the Apt overlay render (HUD, subtitles) of 827F7460.
+[[midasm_hook]]
+address = 0x827F7488
+name = "SimpsonsNativePhotoHud"
+registers = ["ctx", "base"]
+evidence_hex = "4bffe45138610050"
+jump_address_on_true = 0x827F748C
+
+# Photo mode: the 2D HUD scene pass 826D5CB0 still runs 826D5050; the scene
+# color from before it is restored afterwards, erasing the HUD.
+[[midasm_hook]]
+address = 0x826D5CDC
+name = "SimpsonsNativeHudBegin"
+registers = ["ctx", "base"]
+evidence_hex = "4bfff37538610050"
+
+[[midasm_hook]]
+address = 0x826D5CE0
+name = "SimpsonsNativeHudEnd"
+registers = ["ctx", "base"]
+evidence_hex = "386100504bfdad0d"
+
+# Photo mode: the gameplay update's original pause query result.
+[[midasm_hook]]
+address = 0x82690ED0
+name = "SimpsonsNativePhotoPause"
+registers = ["ctx", "base"]
+evidence_hex = "546b063e2b0b0000409a00ac"
+
+# Native TAA: jitter the main world projection after the original camera
+# begin computes it and before 823EF028 caches projection slot two.
+[[midasm_hook]]
+address = 0x823F0210
+name = "SimpsonsNativeTemporalProjection"
+registers = ["ctx", "base"]
+evidence_hex = "4bffee193d4082d139600000"
+
 [[midasm_hook]]
 address = 0x823F1870
 name = "SimpsonsNativeUltrawideCameraBegin"
@@ -6137,3 +6204,111 @@ address = 0x82766E3C
 name = "SimpsonsNativeDecalMeshDeferredFinish"
 registers = ["ctx", "base"]
 evidence_hex = "382101a0482d55c8"
+
+# Typed camera-base events; original instructions/plugin callbacks remain AOT.
+# Constructed sees r3 BEFORE mr r3,r31. Freed follows the real free callback.
+[[midasm_hook]]
+address = 0x823F1EAC
+name = "SimpsonsNativeCameraConstructed"
+registers = ["ctx", "base"]
+evidence_hex = "7fe3fb78382100608181fff87d8803a6"
+
+[[midasm_hook]]
+address = 0x823F1D48
+name = "SimpsonsNativeCameraClosing"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbe1fff09421ffa0"
+
+[[midasm_hook]]
+address = 0x823F1D98
+name = "SimpsonsNativeCameraFreed"
+registers = ["ctx", "base"]
+evidence_hex = "38600001382100608181fff87d8803a6"
+
+# Original8269D608 completed row/query publication, before stack restoration.
+# The outer constructor already supplied the real camera/raster/frame pair.
+[[midasm_hook]]
+address = 0x8269D778
+name = "SimpsonsNativeMainCameraPublished"
+registers = ["ctx", "base"]
+evidence_hex = "382100f03981ffc04839eea54839ec88"
+
+# Typed completed Beam construction/storage/retirement observations; no motion admission.
+[[midasm_hook]]
+address = 0x8274D570
+name = "SimpsonsNativeBeamAllocationCall"
+registers = ["ctx", "base"]
+evidence_hex = "4e800421382100708181fff87d8803a6"
+
+[[midasm_hook]]
+address = 0x8274D574
+name = "SimpsonsNativeBeamAllocationReturn"
+registers = ["ctx", "base"]
+evidence_hex = "382100708181fff87d8803a64e800020"
+
+[[midasm_hook]]
+address = 0x82774504
+name = "SimpsonsNativeBeamFactoryRejected"
+registers = ["ctx", "base"]
+evidence_hex = "7fa3eb78382100b0482c7f042b1d0000"
+
+[[midasm_hook]]
+address = 0x8277454C
+name = "SimpsonsNativeBeamConstructed"
+registers = ["ctx", "base"]
+evidence_hex = "382100b0482c7ec038600000382100b0"
+
+[[midasm_hook]]
+address = 0x8275A978
+name = "SimpsonsNativeBeamRetired"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbe1fff09421ffa0"
+
+[[midasm_hook]]
+address = 0x8275A9B0
+name = "SimpsonsNativeBeamRecycled"
+registers = ["ctx", "base"]
+evidence_hex = "382100608181fff87d8803a6ebe1fff0"
+
+[[midasm_hook]]
+address = 0x82775CA8
+name = "SimpsonsNativeBeamNondeletingClosing"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbe1fff09421ffa0"
+
+[[midasm_hook]]
+address = 0x82775CF0
+name = "SimpsonsNativeBeamNondeletingClosed"
+registers = ["ctx", "base"]
+evidence_hex = "382100608181fff87d8803a6ebe1fff0"
+
+[[midasm_hook]]
+address = 0x82775EC0
+name = "SimpsonsNativeBeamDeletingClosing"
+registers = ["ctx", "base"]
+evidence_hex = "7d8802a69181fff8fbc1ffe8fbe1fff0"
+
+[[midasm_hook]]
+address = 0x82775F24
+name = "SimpsonsNativeBeamDeletingFreed"
+registers = ["ctx", "base"]
+evidence_hex = "7fe3fb78382100708181fff87d8803a6"
+
+[[midasm_hook]]
+address = 0x82775F28
+name = "SimpsonsNativeBeamDeletingClosed"
+registers = ["ctx", "base"]
+evidence_hex = "382100708181fff87d8803a6ebc1ffe8"
+
+[[midasm_hook]]
+address = 0x8275A9E0
+name = "SimpsonsNativeBeamGenericFreed"
+registers = ["ctx", "base"]
+evidence_hex = "382100608181fff87d8803a6ebe1fff0"
+
+[[midasm_hook]]
+address = 0x82774554
+name = "SimpsonsNativeBeamAllocationFailed"
+registers = ["ctx", "base"]
+evidence_hex = "38600000382100b0482c7eb47d8802a6"
+

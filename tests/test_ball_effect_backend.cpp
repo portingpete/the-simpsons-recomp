@@ -1,4 +1,5 @@
 #include "renderer/ball_effect.h"
+#include "header/test_graphics_device.h"
 #include "renderer/device_availability.h"
 #include <d3d11sdklayers.h>
 #include <cstdio>
@@ -10,6 +11,7 @@ struct NativeIm2DProbe {
     static ID3D11DeviceContext* context(NativeBackend& b){return b.context.Get();}
     static ID3D11Device* device(NativeBackend& b){return b.device.Get();}
     static void debug(NativeBackend& b,bool hardware){
+        if(testUsesVulkan())return; // D3D11 debug layer: a D3D11-only diagnostic.
         ComPtr<ID3D11Device> d;ComPtr<ID3D11DeviceContext> c;D3D_FEATURE_LEVEL level;
         const D3D_FEATURE_LEVEL levels[]={D3D_FEATURE_LEVEL_11_1,D3D_FEATURE_LEVEL_11_0};
         if(SUCCEEDED(D3D11CreateDevice(nullptr,hardware?D3D_DRIVER_TYPE_HARDWARE:D3D_DRIVER_TYPE_WARP,nullptr,D3D11_CREATE_DEVICE_DEBUG,levels,2,D3D11_SDK_VERSION,&d,&level,&c))){

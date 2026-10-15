@@ -201,6 +201,7 @@ void EngineParticles::finish(PPCContext& c,uint8_t* base){
         dump("constants.bin",draw.constants.data(),sizeof(draw.constants));
         dump("original-staging.bin",s.runtime.pointer(s.staging,s.count*64,false),s.count*64);
     }
+    if(draw.colorMask&7)s.backend.rejectUntrackedTemporalWorldDraw(driver.color(camera.colorIdentity,alphaOne),driver.depth(camera.depthIdentity),"particle geometry");
     s.backend.drawParticles(driver.color(camera.colorIdentity,alphaOne),driver.depth(camera.depthIdentity),draw);
     const bool type5=draw.vertexPolicy==Graphics::ParticleVertexPolicy::Type5;
     const uint32_t variant=(type5?4u:0u)|(s.projector?2u:0u)|(dual?1u:0u),bit=1u<<variant;

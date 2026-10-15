@@ -3,13 +3,26 @@
 Open **Options → Controls** from the frontend or pause menu. The screen uses the
 game's original Apt movie, text, pulsing buttons and Accept/Cancel footers.
 
-The first two pages list sixteen keyboard/mouse actions, with two bindings per
-action. Select the page row to advance through the three pages; Left/Right on
+The first three pages list 23 keyboard/mouse actions, with two bindings per
+action. Select the page row to advance through the four pages; Left/Right on
 that row moves backward/forward. On a binding row, Left selects the primary slot
 and Right selects the secondary slot. The slot number appears in each label.
 Press Enter/controller A or click a binding row, then press the desired key or
 mouse button. The row displays the capture prompt until the input is released.
 Escape cancels a capture; Delete or Backspace clears the selected slot.
+
+The mouse wheel binds like a key ("Wheel up" / "Wheel down").
+
+| Page | Actions (default primary / secondary) |
+| --- | --- |
+| Keyboard 1/3 | Move forward W, Move backward S, Move left A, Move right D, Jump Space / Enter, Attack J / left mouse, Special attack K / right mouse, Action / interact E |
+| Keyboard 2/3 | Switch character Q, Target lock R, Left stick click F, Right stick click G / middle mouse, Character menu Tab / Backspace, Special power Left Shift, Left trigger Left Ctrl / Right Ctrl, Pause Escape |
+| Keyboard 3/3 | Look up/down/left/right Numpad 8/2/4/6, Walk (hold) C, Free camera F7, Photo mode P |
+
+Look keys turn the camera like the right stick (the mouse also does). Holding
+Walk scales movement to a walk. While no controller is connected as player
+one, the game's button prompts show these keyboard and mouse bindings (yellow
+key and mouse glyphs); with a controller they keep the original buttons.
 
 A key already assigned to another action swaps with the displaced binding.
 F6, F8, F9 and Windows keys remain reserved. A reserved key leaves capture active
@@ -18,7 +31,7 @@ cannot navigate the following menu; focus loss cancels capture and releases inpu
 Menu navigation retains its fixed WASD/arrows, Enter and Escape controls so
 rebinding movement or pause cannot strand the player in the settings screen.
 
-The third page contains mouse sensitivity (25–300% in 25% steps), separate
+The fourth page contains mouse sensitivity (25–300% in 25% steps), separate
 mouse X/Y inversion switches, and **Reset keyboard and mouse defaults**. These settings
 apply live. It also retains the original controller invert Y, invert X and
 vibration selectors, which use the existing gamepad preference save/rollback.
@@ -33,12 +46,38 @@ Cancel stops capture and leaves the screen open.
 Native preferences are stored in the profile store's sibling `.controls.cfg`
 file, preserving the original profile validation. Missing or malformed files use
 the default bindings and 100% mouse sensitivity without mouse inversion.
+Version 2 stores all 23 actions. A version 1 file keeps its 16 bindings; each
+new action keeps its default key unless the player already uses that key, in
+which case it starts unbound.
+
+## Free camera and photo mode
+
+**Free camera** (F7, or L3 + R3 on a controller) detaches the camera from the
+player. It uses the controller layout, so the keyboard keys are those bound to
+the matching buttons: the left stick (WASD) moves and the right stick (mouse,
+look keys) looks; right/left trigger (Special power Shift / Left trigger Ctrl)
+rise and lower; A (Jump) moves faster and X (Attack) slower; LB/RB (Switch
+character Q / Target lock R) zoom out and in; R3 (Right stick click) resets the
+zoom. Player input is held while it is active. **Photo mode**
+(P, or Y while the free camera is on) also pauses the game and hides the HUD
+(the HUD pass is drawn and then replaced by the stashed world image), so the
+scene can be framed and captured; pressing it again resumes. Leaving a level
+releases the camera.
+
+## Audio
+
+**Options → Audio** keeps the original Voice, Music, Effects and Chatter
+sliders and the Subtitles selector, and adds a native **Master volume** row
+(0–100% in steps of 5) applied to the final mix live. Accept saves it to the
+profile store's sibling `.audio.cfg`; Cancel restores the opening value. The
+original sliders already control dialogue, music and sound effects
+separately.
 
 `tools/build_native_control_menu.py` extends each owned retail Options resource
 after the native video patch and before Xbox constant relocation canonicalization.
 It creates separate derived packages and leaves retail resources unchanged.
-The keyboard pages contain ten visible rows; the mouse/controller page contains
-nine. Original Audio, Credits, controls selector callbacks, screen navigation and
+The keyboard pages contain ten visible rows (the last page's eighth action row
+is empty); the mouse/controller page contains nine. Original Audio, Credits, controls selector callbacks, screen navigation and
 controller input remain authored game behavior.
 
 The page header sits below the original Controls underline. Keyboard rows use a

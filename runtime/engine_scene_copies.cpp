@@ -13,7 +13,7 @@ void need(bool b,const char* why){if(!b)throw Failure(std::string("Native scene 
 namespace Simpsons {
 struct EngineSceneCopies::State {
     Runtime& runtime;Graphics::NativeBackend& backend;const uint32_t context,thread;
-    struct Record {uint32_t id{};std::shared_ptr<Graphics::RenderTarget> target;uint32_t copiedCamera{};};
+    struct Record {uint32_t id{};std::shared_ptr<Graphics::RenderTarget> target;uint32_t copiedCamera{};std::shared_ptr<Graphics::NativeCopySubmission> actualCopy;};
     std::array<Record,2> records{};uint32_t constructionSp{},constructionCamera{};
     State(Runtime& r,Graphics::NativeBackend& b,uint32_t c):runtime(r),backend(b),context(c),thread(GetCurrentThreadId()){}
     void require() const {
@@ -55,7 +55,7 @@ void EngineSceneCopies::create(PPCContext& c,uint8_t* base){
     need(!s.records[slot].id&&(slot?bool(s.records[0].id):!s.records[1].id),"duplicate or reordered construction");
     if(slot)need(s.constructionSp==sp&&s.constructionCamera==camera.camera,"creation pair parent changed");
     auto target=s.backend.createTarget(1280,720,Graphics::TargetFormat::RGB10A2,Graphics::TargetScale::Scene);
-    const auto id=s.runtime.engineDriver->allocateTargetIdentity();s.records[slot]={id,std::move(target)};
+    const auto id=s.runtime.engineDriver->allocateTargetIdentity();s.records[slot]={id,std::move(target),0,{}};
     s.constructionSp=sp;s.constructionCamera=camera.camera;c.r3.u64=id;
     std::fprintf(stderr,"[NATIVE SCENE COPY] allocated slot=%zu id=%08X RGB10A2 1280x720; original global publication follows, pixels unspecified\n",slot,id);
 }
@@ -65,20 +65,21 @@ std::shared_ptr<Graphics::RenderTarget> EngineSceneCopies::destination(const PPC
          c.r3.u32==id&&!c.r4.u32&&c.r5.u32==camera&&c.r26.u32==camera,"copy lacks original destination/camera caller");
     return s.records[slot].target;
 }
-void EngineSceneCopies::copied(uint32_t id,uint32_t camera) {
+void EngineSceneCopies::copied(uint32_t id,uint32_t camera,std::shared_ptr<Graphics::NativeCopySubmission> actualCopy) {
     auto& s=*state;auto& record=s.records[s.find(id)];
     need(camera==s.runtime.engineDriver->cameraBinding().camera,"copy camera changed before publication");
-    record.copiedCamera=camera;
+    need(bool(actualCopy),"copy has no actual backend submission owner");
+    record.copiedCamera=camera;record.actualCopy=std::move(actualCopy);
 }
 std::shared_ptr<Graphics::RenderTarget> EngineSceneCopies::edgeSource(uint32_t id,uint32_t camera) const {
     auto& s=*state;const auto slot=s.find(id);const auto& record=s.records[slot];
-    need(slot==0 && camera && record.copiedCamera==camera &&
+    need(slot==0 && camera && record.actualCopy && record.copiedCamera==camera &&
          camera==s.runtime.engineDriver->cameraBinding().camera,"edge source lacks its original first camera copy");
     return record.target;
 }
 std::shared_ptr<Graphics::RenderTarget> EngineSceneCopies::aaSource(uint32_t id,uint32_t camera) const {
     auto& s=*state;const auto slot=s.find(id);const auto& record=s.records[slot];
-    need(slot==1 && camera && record.copiedCamera==camera &&
+    need(slot==1 && camera && record.actualCopy && record.copiedCamera==camera &&
          camera==s.runtime.engineDriver->cameraBinding().camera,"AA source lacks its original second camera copy");
     return record.target;
 }

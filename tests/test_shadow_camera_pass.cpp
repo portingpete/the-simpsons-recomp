@@ -268,6 +268,13 @@ void staticShadowMesh(Runtime& rt,const PPCContext& entry,uint32_t owner,uint32_
     }
     need(!std::memcmp(rendered.data()+8*(512*1024+300),depthBefore.data()+8*(512*1024+300),5),
          "Static world translation changed a depth pixel outside its quad");
+    {   // An identical repeat reuses the exact source cache entry (no copy/decode/upload)
+        // and must draw the same depth.
+        const auto unchanged=snapshot(rt,fixture,0x800);invokeStatic();++renderedDraws;
+        need(effects.shadowMeshDrawCount()==draws+renderedDraws&&driver.readbackDepth(depthId)==rendered,
+             "Cached static shadow source drew a different depth or draw count");
+        same(rt,fixture,unchanged,"Cached static shadow draw changed its input payload");
+    }
     if(staticTangent) {
         // Change every packed tangent lane while using the same real original
         // owner and producer. The shadow shader's false branch must ignore it.

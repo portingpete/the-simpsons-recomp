@@ -1,4 +1,5 @@
 #include "renderer/native_backend.h"
+#include "header/test_graphics_device.h"
 #include "renderer/device_availability.h"
 #include <d3d11sdklayers.h>
 #include <algorithm>
@@ -197,7 +198,160 @@ struct NativeMovieProbe {
     static ID3D11Device* device(NativeBackend& b) {return b.device.Get();}
     static ID3D11DeviceContext* context(NativeBackend& b) {return b.context.Get();}
     static const void* pipeline(NativeBackend& b) {return b.moviePipeline.get();}
+    static ComPtr<ID3D11Texture2D> scratch(NativeBackend& b) {return b.screenScratch.texture;}
+    static void queuedScratch(bool hardware) {
+        NativeBackend b(!hardware);debug(b,hardware);b.configureRendering(1280,720,1,Antialiasing::Original,200);
+        auto a=b.createTarget(32,16,TargetFormat::RGB10A2,TargetScale::Scene);
+        auto other=b.createTarget(32,16,TargetFormat::RGB10A2,TargetScale::Scene);
+        auto smallerTarget=b.createTarget(16,8,TargetFormat::RGB10A2,TargetScale::Scene);
+        auto fixed=b.createTarget(32,16,TargetFormat::RGB10A2);
+        auto za=b.createDepthTarget(32,16,TargetScale::Scene),zs=b.createDepthTarget(16,8,TargetScale::Scene),zf=b.createDepthTarget(32,16);
+        auto frontA=b.createTarget(32,16,TargetFormat::RGB10A2,TargetScale::Scene);
+        auto frontScreen=b.createTarget(32,16,TargetFormat::RGB10A2,TargetScale::Scene);
+        auto frontOther=b.createTarget(32,16,TargetFormat::RGB10A2,TargetScale::Scene);
+        auto frontSmall=b.createTarget(16,8,TargetFormat::RGB10A2,TargetScale::Scene);
+        auto frontFixed=b.createTarget(32,16,TargetFormat::RGB10A2);
+        auto frontFinal=b.createTarget(32,16,TargetFormat::RGB10A2,TargetScale::Scene);
+        for(const auto& target:{a,other,smallerTarget,fixed})b.clearTarget(target,{1,0,1,1});
+        for(const auto& depth:{za,zs,zf})b.clearDepthTarget(depth,.5f,0xA5);
+        auto draw=rectangle();auto planes=uniformPlanes(8,10,{16,128,128});
+        // The .125/.875 crop gives chroma U weights with denominator128 at
+        // the larger extent. Separable128-wide/64-high byte gradients retain
+        // independently byte-representable filtering at both physical extents.
+        const std::array<uint8_t,8> lx={0,64,128,64,0,128,64,0};
+        const std::array<uint8_t,10> ly={0,64,0,64,0,64,0,64,0,64};
+        const std::array<uint8_t,4> rx={0,128,0,128},bx={128,128,0,0};
+        const std::array<uint8_t,5> ry={64,0,64,0,64},by={0,64,64,0,64};
+        for(size_t i=0;i<3;++i)for(uint32_t y=0;y<(i?5u:10u);++y)for(uint32_t x=0;x<(i?4u:8u);++x)
+            planes[i][size_t(y)*(i?4u:8u)+x]=uint8_t(i==0?16+lx[x]+ly[y]:(i==1?24+rx[x]+ry[y]:24+bx[x]+by[y]));
+        upload(b,draw,8,10,planes,true);
+        auto arithmeticGold=[&](const std::shared_ptr<RenderTarget>& target) {
+            std::vector<uint32_t> expected(size_t(target->pixelWidth())*target->pixelHeight());
+            for(uint32_t y=0;y<target->pixelHeight();++y)for(uint32_t x=0;x<target->pixelWidth();++x) {
+                const float tx=(float(x)+.5f)/float(target->pixelWidth()),ty=1-(float(y)+.5f)/float(target->pixelHeight());
+                const float u=draw.vertices[0].u+(draw.vertices[1].u-draw.vertices[0].u)*tx;
+                const float v=draw.vertices[0].v+(draw.vertices[2].v-draw.vertices[0].v)*ty;
+                std::array<float,3> sampled{};
+                for(size_t i=0;i<3;++i) {
+                    sampled[i]=sample(planes[i],i?4u:8u,i?5u:10u,u,v,false);
+                    need(std::abs(sampled[i]*255-std::nearbyint(sampled[i]*255))<.0001f,"Queued movie oracle filter is not byte-representable");
+                }
+                expected[size_t(y)*target->pixelWidth()+x]=pack(oracle(sampled[0],sampled[1],sampled[2]));
+            }
+            return expected;
+        };
+        // The cache-lifetime oracle uses an independent device and forces the
+        // former allocation path for every frame. Prepare it before queueing
+        // b's scratch draws: no readback/Flush/wait may separate those draws.
+        // The separate arithmetic fixtures above/below still check the pinned
+        // original shader oracle. Bilinear normalized binary32 results can lie
+        // on a packed rounding threshold even for exact byte-valued samples.
+        NativeBackend reference(!hardware);debug(reference,hardware);
+        reference.configureRendering(1280,720,1,Antialiasing::Original,200);
+        auto gold=[&](const std::shared_ptr<RenderTarget>& target) {
+            const auto arithmetic=arithmeticGold(target);
+            const auto scale=target->pixelWidth()==target->width?TargetScale::Fixed:TargetScale::Scene;
+            auto color=reference.createTarget(target->width,target->height,TargetFormat::RGB10A2,scale);
+            auto depth=reference.createDepthTarget(target->width,target->height,scale);
+            reference.clearTarget(color,{1,0,1,1});reference.clearDepthTarget(depth,.5f,0xA5);
+            reference.bindTargets({color,nullptr,nullptr,nullptr},depth);
+            reference.setViewport({0,0,float(color->width),float(color->height),0,1});
+            auto independent=draw;independent.textures={};upload(reference,independent,8,10,planes,true);
+            reference.screenScratch={};reference.drawMovie(color,depth,independent);
+            need(reference.screenScratch.texture&&reference.screenScratch.desc.Width==target->pixelWidth()&&
+                 reference.screenScratch.desc.Height==target->pixelHeight(),"Fresh movie differential used a different physical extent");
+            const auto bytes=reference.readbackTarget(color);std::vector<uint32_t> expected(bytes.size()/4);
+            size_t roundedDifferently=0;
+            for(size_t i=0;i<expected.size();++i){expected[i]=pixel(bytes,i);roundedDifferently+=expected[i]!=arithmetic[i];}
+            if(roundedDifferently)std::fprintf(stderr,"[MOVIE TEST] fresh allocation extent=%ux%u CPU filtered rounding differences=%zu pixel55,30=%08X\n",
+                color->pixelWidth(),color->pixelHeight(),roundedDifferently,
+                color->pixelWidth()>55&&color->pixelHeight()>30?expected[30*color->pixelWidth()+55]:0);
+            reference.clearBindings();return expected;
+        };
+        const auto expectedA=gold(a);const auto initialVertices=draw.vertices;
+        draw.vertices[0].u=draw.vertices[2].u=.125f;draw.vertices[1].u=draw.vertices[3].u=.875f;
+        const auto expectedOther=gold(other);
+        for(auto& value:planes[0])value=uint8_t(255-value);
+        const auto expectedSmall=gold(smallerTarget),expectedFixed=gold(fixed),expectedFinal=gold(a);
+        for(auto& value:planes[0])value=uint8_t(255-value);draw.vertices=initialVertices;
+        auto issue=[&](const std::shared_ptr<RenderTarget>& target,const std::shared_ptr<DepthTarget>& depth) {
+            b.bindTargets({target,nullptr,nullptr,nullptr},depth);b.setViewport({0,0,float(target->width),float(target->height),0,1});
+            const State before(b.context.Get(),b.level(),true);const auto count=b.movieDrawCount();
+            b.drawMovie(target,depth,draw);
+            need(b.movieDrawCount()==count+1&&State(b.context.Get(),b.level(),true).bytes==before.bytes,
+                 "Queued movie changed preserved state or draw count");
+            b.requireSelectedTargets({target,nullptr,nullptr,nullptr},depth);
+        };
+        issue(a,za);const auto first=b.screenScratch.texture;const auto firstView=b.screenScratch.view;
+        need(first&&firstView&&b.screenScratch.desc.Width==64&&b.screenScratch.desc.Height==32&&
+             b.screenScratch.desc.Format==DXGI_FORMAT_R10G10B10A2_UINT,"Movie scratch used logical extent or wrong packed format");
+        auto copyA=b.copyFront(a,frontA);
+        // A real screen pass changes half the target between queued movies.
+        // Neither old scratch contents nor a previously selected target may
+        // identify the next movie's destination history.
+        ScreenDraw screen{};screen.vertices={{{-1,1,0,0},{0,1,1,0},{-1,-1,0,1},{0,-1,1,1}}};
+        screen.color={.23f,.47f,.71f,.37f};screen.colorWriteMask=15;screen.blendSelector=3;
+        b.drawOriginalScreen(a,za,screen,false,6,false);
+        need(b.screenScratch.texture==first&&b.screenScratch.view==firstView,"Screen pass allocated a second compatible movie scratch");
+        auto expectedScreen=expectedA;
+        for(uint32_t y=0;y<a->pixelHeight();++y)for(uint32_t x=0;x<a->pixelWidth()/2;++x)
+            expectedScreen[size_t(y)*a->pixelWidth()+x]=pack(screen.color);
+        auto copyScreen=b.copyFront(a,frontScreen);
+        draw.vertices[0].u=draw.vertices[2].u=.125f;draw.vertices[1].u=draw.vertices[3].u=.875f;
+        issue(other,za);need(b.screenScratch.texture==first&&b.screenScratch.view==firstView,"Same-size different movie target missed scratch reuse");
+        auto copyOther=b.copyFront(other,frontOther);
+        for(auto& value:planes[0])value=uint8_t(255-value);
+        for(size_t i=0;i<3;++i)b.writeTexture(draw.textures[i],planes[i]);
+        issue(smallerTarget,zs);const auto resized=b.screenScratch.texture;
+        need(resized!=first&&b.screenScratch.desc.Width==32&&b.screenScratch.desc.Height==16,"Movie descriptor change reused incompatible scratch");
+        auto copySmall=b.copyFront(smallerTarget,frontSmall);
+        issue(fixed,zf);need(b.screenScratch.texture==resized,"Equal physical/different logical movie extent missed scratch reuse");
+        auto copyFixed=b.copyFront(fixed,frontFixed);
+        issue(a,za);need(b.screenScratch.texture!=resized,"Returning movie extent reused smaller scratch");
+        // A matching descriptor from another device must miss while both
+        // actual resources are pinned, ruling out recycled pointer identity.
+        NativeBackend foreign(!hardware);debug(foreign,hardware);auto ft=foreign.createTarget(64,32,TargetFormat::RGB10A2);auto fz=foreign.createDepthTarget(64,32);
+        foreign.bindTargets({ft,nullptr,nullptr,nullptr},fz);foreign.setViewport({0,0,64,32,0,1});
+        auto seed=rectangle();upload(foreign,seed,8,10,uniformPlanes(8,10,{93,211,37}));foreign.drawMovie(ft,fz,seed);
+        const auto foreignTexture=foreign.screenScratch.texture;b.screenScratch=foreign.screenScratch;
+        issue(a,za);need(b.screenScratch.device.Get()==b.device.Get()&&b.screenScratch.texture!=foreignTexture,"Movie reused foreign-device scratch");
+        auto copyFinal=b.copyFront(a,frontFinal);
+        // An extra OM scratch output still rejects before any resource copy.
+        ComPtr<ID3D11RenderTargetView> selected;ComPtr<ID3D11DepthStencilView> selectedDepth;
+        b.context->OMGetRenderTargets(1,&selected,&selectedDepth);
+        const std::array<ID3D11RenderTargetView*,2> outputs={selected.Get(),b.screenScratch.view.Get()};
+        b.context->OMSetRenderTargets(2,outputs.data(),selectedDepth.Get());const State rejectedBefore(b.context.Get(),b.level());
+        const auto count=b.movieDrawCount();const auto retainedScratch=b.screenScratch.texture;
+        bool rejected=false;try{b.drawMovie(a,za,draw);}catch(const Error&){rejected=true;}
+        need(rejected&&b.movieDrawCount()==count&&b.screenScratch.texture==retainedScratch&&
+             State(b.context.Get(),b.level()).bytes==rejectedBefore.bytes,"Rejected movie scratch output changed state/count/cache");
+        std::weak_ptr<RenderTarget> weakTarget=a;std::array<std::weak_ptr<Texture>,3> weakPlanes={draw.textures[0],draw.textures[1],draw.textures[2]};
+        b.clearBindings();a.reset();other.reset();smallerTarget.reset();fixed.reset();draw.textures={};
+        for(const auto& plane:weakPlanes)need(plane.expired(),"Movie scratch retained a caller plane owner");
+        need(!weakTarget.expired(),"Queued movie receipt lost its source target owner");
+        // Every movie/screen/copy above was queued with no readback, Flush or
+        // completion wait. The last event must retire all earlier scratch use.
+        b.waitCopy(copyFinal);
+        for(const auto& copy:{copyA,copyScreen,copyOther,copySmall,copyFixed})need(b.copyComplete(copy),"Queued movie front event did not complete in order");
+        auto image=[&](const auto& target,const std::vector<uint32_t>& expected,const char* name) {
+            const auto bytes=b.readbackTarget(target);need(bytes.size()==expected.size()*4,"Queued movie output extent differs");
+            for(size_t i=0;i<expected.size();++i){
+                if(pixel(bytes,i)!=expected[i])std::fprintf(stderr,"queued movie %s pixel=%zu,%zu got=%08X expected=%08X\n",
+                    name,i%target->pixelWidth(),i/target->pixelWidth(),pixel(bytes,i),expected[i]);
+                need(pixel(bytes,i)==expected[i],"Queued shared scratch changed movie/screen packed pixels");}
+        };
+        image(frontA,expectedA,"first");image(frontScreen,expectedScreen,"screen");image(frontOther,expectedOther,"cropped");
+        image(frontSmall,expectedSmall,"smaller");image(frontFixed,expectedFixed,"fixed");image(frontFinal,expectedFinal,"final");
+        for(const auto& depth:{za,zs,zf}) {
+            const auto bytes=b.readbackDepthTarget(depth);
+            for(size_t i=0;i<bytes.size()/8;++i) {uint32_t code{};std::memcpy(&code,bytes.data()+i*8,4);
+                need(code==0x3F000000&&bytes[i*8+4]==0xA5,"Queued movie/screen altered defined depth/stencil bits");}
+        }
+        copyA.reset();copyScreen.reset();copyOther.reset();copySmall.reset();copyFixed.reset();copyFinal.reset();b.waitIdle();
+        need(weakTarget.expired(),"Movie scratch retained target after transfer retirement");foreign.waitIdle();
+    }
     static void debug(NativeBackend& b,bool hardware) {
+        if(testUsesVulkan())return; // D3D11 debug layer: a D3D11-only diagnostic.
         // Optional SDK debug layer, installed on the qualification host. Device
         // replacement occurs before any fixture or backend resource exists.
         ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;D3D_FEATURE_LEVEL level{};
@@ -319,6 +473,7 @@ int run(bool hardware) {
     // boundary. It still tests both strip triangles and every output pixel.
     constexpr uint32_t width=32,height=32;
     auto target=backend.createTarget(width,height,TargetFormat::RGB10A2);auto depth=backend.createDepthTarget(width,height);
+    backend.registerTemporalWorldTargets(target,depth);
     backend.bindTargets({target,nullptr,nullptr,nullptr},depth);backend.setViewport({0,0,float(width),float(height),0,1});
     backend.clearTarget(target,{0.25f,0.5f,0.75f,1});backend.clearDepthTarget(depth,0.5f,0xA5);
     const auto originalDepth=backend.readbackDepthTarget(depth);
@@ -370,8 +525,13 @@ int run(bool hardware) {
     need(!NativeMovieProbe::pipeline(backend),"Cold validation published movie pipeline");
     auto queue=[&] {
         const State before(c,backend.level(),true);const auto count=backend.movieDrawCount();
-        debugMessages(device,true);
+        debugMessages(device,true);const auto movieOrigins=backend.temporalSceneOrigins();
         backend.drawMovie(target,depth,draw);need(backend.movieDrawCount()==count+1,"Movie did not count exactly one actual Draw");
+        const auto movieAfter=backend.temporalSceneOrigins();
+        need(movieAfter.components[0].compatible({})&&
+            movieAfter.components[0].revision>movieOrigins.components[0].revision&&
+            movieAfter.components[1]==movieOrigins.components[1]&&movieAfter.components[2]==movieOrigins.components[2],
+            "Actual movie DS-disabled submission altered retained depth/stencil origin receipts");
         debugMessages(device);
         need(State(c,backend.level(),true).bytes==before.bytes,"Movie changed preserved bindings/stream/viewport/scissor");postState(c,draw);
         backend.requireSelectedTargets({target,nullptr,nullptr,nullptr},depth);
@@ -517,6 +677,7 @@ int run(bool hardware) {
     debugMessages(device,true);backend.drawMovie(liveTarget,liveDepth,live);debugMessages(device);pixels(backend,liveTarget,live,1280,720,livePlanes,true);
     need(!backend.screenDrawCount()&&!backend.im2dDrawCount()&&!backend.presentationCount(),"Movie changed another backend counter");
     movieReplacementContracts(hardware);
+    NativeMovieProbe::queuedScratch(hardware);
     backend.waitIdle();std::printf("PASS: %zu movie backend checks on %s; maximum spatial RGB error=%d codes; native GPU/packing policy, console pixel parity unverified\n",checks,hardware?"hardware":"WARP",maximumSpatialError);return 0;
 }
 }

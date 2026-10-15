@@ -4,6 +4,7 @@ from build_native_video_menu import ROOT, PACKAGES, NATIVE_ROWS, ROW_IDS, VIDEO_
 from inspect_assets import stoc_entries, decode_entry, resource_chunks
 from build_native_mouse_menu import MENU_NAMES, patch_mouse, constant_references
 from build_native_control_menu import patch_controls
+from build_native_audio_menu import patch_audio
 from build_native_main_menu import patch_main_menu
 
 def resources(data):
@@ -115,14 +116,14 @@ class NativeMenuTests(unittest.TestCase):
             elif name=='frontend.swf':self.assertEqual(native[name],patch_mouse(patch_main_menu(original[name])),name)
             elif name!='options.swf':self.assertEqual(native[name],patch_mouse(original[name]),name)
         self.assertEqual(source.read_bytes(),before)
-        self.assertEqual(native['options.swf'],patch_mouse(patch_controls(patch_options(original['options.swf']))))
+        self.assertEqual(native['options.swf'],patch_mouse(patch_audio(patch_controls(patch_options(original['options.swf'])))))
         for entry in stoc_entries(build(source))['entries']:
             if entry['encoding']=='raw':
                 self.assertEqual(entry['word_20'],0)
                 self.assertGreaterEqual(entry['word_12'],entry['stored_size'])
         apt=native['options.swf'][0x20:]
         frames=u(apt,0xe0c)
-        self.assertEqual(u(apt,frames),24) # Eight existing controls plus fifteen settings and native page row.
+        self.assertEqual(u(apt,frames),8+len(NATIVE_ROWS)+1) # Existing controls, native settings and page row.
         self.assertIn(b'getNativeAction\0',apt)
         rows=(*NATIVE_ROWS,'page')
         for row in rows:
@@ -145,9 +146,9 @@ class NativeMenuTests(unittest.TestCase):
             pointer=u(apt,at+52)
             self.assertEqual(apt[pointer:apt.index(0,pointer)],name.encode('ascii'))
             changed.update(range(at+4,at+8));changed.update(range(at+52,at+56))
-        self.assertEqual(u(apt,0x5f8+20),144)
+        self.assertEqual(u(apt,0x5f8+20),92+2*(len(NATIVE_ROWS)+1)+20+2) # Native Video, Controls and Audio characters.
         character_table=u(apt,0x5f8+24)
-        for i in range(92,124,2):
+        for i in range(92,92+2*(len(NATIVE_ROWS)+1),2):
             text=u(apt,character_table+i*4)
             self.assertEqual(u(apt,text),2)
             self.assertEqual(apt[u(apt,text+56)],0) # No shared Brightness localization binding.
@@ -160,7 +161,7 @@ class NativeMenuTests(unittest.TestCase):
         self.assertEqual(struct.unpack_from('>f',apt,0xdb0+36)[0],20)
         changed.update(range(0xdb0+36,0xdb0+40))
         aa_text=u(apt,character_table+104*4)
-        self.assertTrue(apt[u(apt,aa_text+52):].startswith(b'Antialiasing: Original (restart)\0'))
+        self.assertTrue(apt[u(apt,aa_text+52):].startswith(b'Antialiasing: Original\0'))
         options_stream=u(apt,0x23c8)
         self.assertEqual(apt[options_stream:options_stream+0xc6],old[0x74c0:0x7586])
         for at in (0x3a24,0x3a64,0x3aa4):changed.update(range(at+36,at+40))
@@ -170,6 +171,11 @@ class NativeMenuTests(unittest.TestCase):
         changed.update(range(0x1708,0x1710))
         for at in (0x3CB4,0x3DB4,0x3E74,0x3DF4,0x3E34,0x3EB4,0x3CF4,0x3D34,0x3D74):changed.update(range(at+36,at+40))
         for at in (0xE50,0xEA0,0xEF0):changed.update(range(at+36,at+40))
+        # Audio: Master volume row (frame-0 action, frame table, shifted rows).
+        from build_native_audio_menu import INIT_CONTROL as AUDIO_INIT,MENU as AUDIO_MENU,ROW_SHIFTS
+        changed.update(range(AUDIO_INIT+4,AUDIO_INIT+8))
+        audio_frames=u(old,AUDIO_MENU+12);changed.update(range(audio_frames,audio_frames+8))
+        for at in ROW_SHIFTS:changed.update(range(at+36,at+40))
         # The native unloader rewrites every constant-table element to its
         # traversal ordinal. These four-byte indices must be canonicalized;
         # opcode bytes, geometry and all timeline structures remain pinned.
@@ -207,11 +213,12 @@ class NativeMenuTests(unittest.TestCase):
                 self.assertEqual(scope['currentSelection'],0)
                 self.assertEqual(scope['nativeAction'],0)
                 seen=set()
-                for page in (0,1,0):
+                for page in (*range(len(VIDEO_PAGES)),0):
                     self.assertEqual(scope['nativePage'],page)
                     self.assertEqual(scope['MenuItemButtons'],['btn_'+row for row in VIDEO_PAGES[page]])
-                    self.assertEqual(scope['MenuItemIds'],['NativeVideoPage','Brightness',*ROW_IDS[:7]] if page==0 else ['NativeVideoPage',*ROW_IDS[7:]])
-                    self.assertEqual(len(scope['MenuItemButtons']),9)
+                    self.assertEqual(scope['MenuItemIds'],['NativeVideoPage' if row=='page' else 'Brightness' if row=='brightness' else ROW_IDS[NATIVE_ROWS.index(row)] for row in VIDEO_PAGES[page]])
+                    self.assertEqual(len(scope['MenuItemButtons']),len(VIDEO_PAGES[page]))
+                    self.assertLessEqual(len(scope['MenuItemButtons']),9)
                     self.assertEqual(scope['brightnessSlider']['_visible'],int(page==0))
                     self.assertEqual(scope['GizmoTypes'],['','slider'] if page==0 else [])
                     self.assertEqual(scope['Gizmos'],['','brightnessSlider'] if page==0 else [])
@@ -238,10 +245,17 @@ class NativeMenuTests(unittest.TestCase):
                     self.assertEqual(scope['currentSelection'],0)
                     self.assertEqual(scope['_root']['InitialSelection'],'Brightness')
                     visible=[name for name in ('brightness',*NATIVE_ROWS,'page') if scope.get('btn_'+name,{}).get('_visible')]
-                    self.assertEqual(set(visible),set(VIDEO_PAGES[1-page]))
+                    self.assertEqual(set(visible),set(VIDEO_PAGES[(page+1)%len(VIDEO_PAGES)]))
                 self.assertEqual(seen,set(range(PAGE_ROW_ID+1)))
+                for _ in range(len(VIDEO_PAGES)*2):
+                    before=scope['nativePage'];actions.call('previousPage',scope)
+                    page=(before-1)%len(VIDEO_PAGES)
+                    self.assertEqual(scope['nativePage'],page)
+                    self.assertEqual(scope['currentSelection'],0)
+                    visible=[name for name in ('brightness',*NATIVE_ROWS,'page') if scope.get('btn_'+name,{}).get('_visible')]
+                    self.assertEqual(set(visible),set(VIDEO_PAGES[page]))
                 for extent in ('2560x1080','3440x1440','3840x1600','5120x1440'):
-                    label='Render resolution: '+extent+' Ultrawide (restart)'
+                    label='Render resolution: '+extent+' Ultrawide'
                     button={'DynamicText_mc':{'dynamicText':{'variable':'$FE_Brightness'}}}
                     text={'text_entry':{}}
                     scope['_root']['VideoMenu']={'btn_resolution':button,'text_resolution':text}
@@ -253,9 +267,11 @@ class NativeMenuTests(unittest.TestCase):
                     self.assertEqual(button['DynamicText_mc']['dynamicText']['variable'],'')
                     self.assertEqual(text['text_entry']['text'],label)
                     self.assertEqual(scope['currentSelection'],selection)
-                for row,label in (('fov','FOV (16:9): 110 degrees'),('renderscale','Render scale: 67% (restart)'),
+                for row,label in (('fov','FOV (16:9): 110 degrees'),('renderscale','Render scale: 67%'),
                                   ('bloom','Bloom: Off'),('depthoffield','Depth of field: Off'),('motionblur','Motion blur: Off'),
-                                  ('atmosphericfog','Atmospheric fog: Off'),('colorgrading','Color grading: Off'),('cinematicbars','Cinematic bars: Off')):
+                                  ('atmosphericfog','Atmospheric fog: Off'),('colorgrading','Color grading: Off'),('cinematicbars','Cinematic bars: Off'),
+                                  ('sharpening','Sharpening: 75%'),('backgroundcap','Background limit: Unlimited'),('framelatency','Frame queue: 3 frames'),
+                                  ('renderer','Renderer: Vulkan (restart)')):
                     button={'DynamicText_mc':{'dynamicText':{'variable':'$FE_Brightness'}}}
                     text={'text_entry':{}}
                     scope['_root']['VideoMenu']={'btn_'+row:button,'text_'+row:text}

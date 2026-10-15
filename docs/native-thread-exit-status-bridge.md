@@ -59,8 +59,10 @@ and exit-code query:
 [THREAD EXIT STATUS] first completed original query: object=0x........ mapped_handle=0x... native_id=... wait=0x00000000 status=0x........ id_error=0; ...
 ```
 
-The mapped handle is the lowest matching guest handle at the retained-owner
-snapshot. Zero means the owner has no mapped guest handle (closed or pseudo).
+Only the first completed diagnostic scans the handle registry, under its mutex,
+for the lowest guest handle matching the retained owner at that current snapshot.
+Active polls and subsequent completed queries skip this diagnostic-only scan.
+Zero means the owner has no mapped guest handle (closed or pseudo).
 This is diagnostic identity, not a condition for success. Native ID is obtained
 from the retained handle; `id_error` explicitly records any ID-query failure.
 The process-wide atomic flag bounds logging only; it is never read to decide

@@ -11,7 +11,6 @@
 namespace Simpsons {
 namespace {
 constexpr UINT_PTR fpsTimerId=1;
-constexpr UINT videoMessage=WM_APP+17;
 constexpr UINT menuMouseMessage=WM_APP+18;
 constexpr wchar_t windowTitle[]=L"The Simpsons Game - Native development";
 }
@@ -23,11 +22,33 @@ void NativeWindow::setMenuMouse(bool active) {
     // window thread dispatches it. Entering must release its existing capture.
     if(const auto window=handle())PostMessageW(window,menuMouseMessage,active?1:0,0);
 }
-void NativeWindow::configureVideo(uint32_t outputWidth,uint32_t outputHeight,bool fullscreen) {
+void NativeWindow::configureVideo(const VideoRequest& request) {
     const HWND window=handle();
     StallProfiler::Scope messageProfile(StallProfiler::Section::Wait,"NativeWindow::configureVideo.SendMessage",nullptr,reinterpret_cast<uintptr_t>(window));
-    if(!SendMessageW(window,videoMessage,WPARAM(outputWidth)|(WPARAM(outputHeight)<<16),fullscreen?1:0))
+    // SendMessage is synchronous, so the request outlives its handling.
+    if(!SendMessageW(window,videoMessage,0,reinterpret_cast<LPARAM>(&request)))
         throw Failure("Native video window change failed");
+}
+bool NativeWindow::applyDisplayMode(HWND window,const NativeDisplayMode& mode) {
+    MONITORINFOEXW monitor{};monitor.cbSize=sizeof(monitor);
+    if(!GetMonitorInfoW(MonitorFromWindow(window,MONITOR_DEFAULTTONEAREST),&monitor))return false;
+    DEVMODEW requested{};requested.dmSize=sizeof(requested);
+    requested.dmPelsWidth=mode.width;requested.dmPelsHeight=mode.height;requested.dmFields=DM_PELSWIDTH|DM_PELSHEIGHT;
+    if(mode.refresh){requested.dmDisplayFrequency=mode.refresh;requested.dmFields|=DM_DISPLAYFREQUENCY;}
+    // CDS_FULLSCREEN is a temporary mode: the registry keeps the desktop mode
+    // and Windows restores it if this process ends without restoring it.
+    const LONG result=ChangeDisplaySettingsExW(monitor.szDevice,&requested,nullptr,CDS_FULLSCREEN,nullptr);
+    std::fprintf(stderr,"[NATIVE DISPLAY] exclusive %ux%u@%u on %ls: %s\n",mode.width,mode.height,mode.refresh,
+        monitor.szDevice,result==DISP_CHANGE_SUCCESSFUL?"applied":"rejected, keeping the desktop mode");
+    if(result!=DISP_CHANGE_SUCCESSFUL)return false;
+    exclusiveDevice=monitor.szDevice;exclusiveMode=mode;exclusiveActive=true;exclusiveSuspended=false;
+    displayRefresh=mode.refresh;
+    return true;
+}
+void NativeWindow::restoreDisplayMode() {
+    if(!exclusiveActive||exclusiveSuspended)return;
+    ChangeDisplaySettingsExW(exclusiveDevice.empty()?nullptr:exclusiveDevice.c_str(),nullptr,nullptr,0,nullptr);
+    std::fprintf(stderr,"[NATIVE DISPLAY] restored the desktop display mode\n");
 }
 NativeWindow::NativeWindow(std::shared_ptr<Platform::NativeInputRecording> recording):keyboard(std::make_shared<Platform::NativeKeyboard>()),inputRecording(std::move(recording)) {
     ui=std::thread([this]{run();});
@@ -101,6 +122,7 @@ LRESULT CALLBACK NativeWindow::procedure(HWND window,UINT message,WPARAM wparam,
             if(Simpsons::active&&Simpsons::active->window.get()==self)
                 Simpsons::active->requestStop("Native window closed");
             self->closed=true;
+            self->restoreDisplayMode();self->exclusiveActive=false;
             self->resumeMouseAfterMenu=false;
             self->captureMouse(window,false);self->keyboard->focus(false);self->hwnd=nullptr;
         }
@@ -124,7 +146,22 @@ LRESULT CALLBACK NativeWindow::procedure(HWND window,UINT message,WPARAM wparam,
             return 0;
         }
         if(message==videoMessage) {
-            const bool full=lparam!=0;
+            const auto& request=*reinterpret_cast<const VideoRequest*>(lparam);
+            const bool full=request.fullscreen;
+            // Automated background runs never change the user's display mode.
+            const bool quietWindow=(GetWindowLongPtrW(window,GWL_EXSTYLE)&WS_EX_NOACTIVATE)!=0;
+            const bool exclusive=full&&request.exclusive&&request.mode.width&&request.mode.height&&!quietWindow;
+            if(full&&request.exclusive&&quietWindow) {
+                static bool reported=false;
+                if(!reported){reported=true;std::fprintf(stderr,"[NATIVE DISPLAY] background window: exclusive fullscreen uses the desktop mode\n");}
+            }
+            // Leaving exclusive, or changing its mode, restores the desktop first.
+            if(self->exclusiveActive&&(!exclusive||!(request.mode==self->exclusiveMode))) {
+                self->restoreDisplayMode();self->exclusiveActive=false;self->exclusiveSuspended=false;
+                self->displayRefresh=0;
+            }
+            bool exclusiveApplied=self->exclusiveActive;
+            if(exclusive&&!self->exclusiveActive)exclusiveApplied=self->applyDisplayMode(window,request.mode);
             // Replacing the window style must retain live visibility and input
             // state. Dropping WS_VISIBLE hides even an actively rendered game.
             const DWORD state=DWORD(GetWindowLongPtrW(window,GWL_STYLE))&(WS_VISIBLE|WS_DISABLED);
@@ -135,8 +172,9 @@ LRESULT CALLBACK NativeWindow::procedure(HWND window,UINT message,WPARAM wparam,
                 MONITORINFO monitor{sizeof(monitor)};
                 if(!GetMonitorInfoW(MonitorFromWindow(window,MONITOR_DEFAULTTONEAREST),&monitor))return 0;
                 bounds=monitor.rcMonitor;
+                (void)exclusiveApplied;
             } else {
-                bounds={0,0,LONG(wparam&0xffff),LONG((wparam>>16)&0xffff)};
+                bounds={0,0,LONG(request.width),LONG(request.height)};
                 if(!AdjustWindowRectExForDpi(&bounds,style,FALSE,0,GetDpiForWindow(window)))return 0;
                 const auto origin=self->fullscreen?self->windowedRect:previous;
                 OffsetRect(&bounds,origin.left-bounds.left,origin.top-bounds.top);
@@ -177,6 +215,24 @@ LRESULT CALLBACK NativeWindow::procedure(HWND window,UINT message,WPARAM wparam,
             SetWindowTextW(window,title);
             return 0;
         }
+        if(message==WM_ACTIVATEAPP&&self->exclusiveActive) {
+            // Alt+Tab gives the desktop its own mode back; returning re-applies it.
+            if(!wparam&&!self->exclusiveSuspended) {
+                self->restoreDisplayMode();self->exclusiveSuspended=true;
+                ShowWindow(window,SW_MINIMIZE);
+            } else if(wparam&&self->exclusiveSuspended) {
+                const auto mode=self->exclusiveMode;self->exclusiveActive=false;self->exclusiveSuspended=false;
+                if(self->applyDisplayMode(window,mode)) {
+                    MONITORINFO monitor{sizeof(monitor)};
+                    if(GetMonitorInfoW(MonitorFromWindow(window,MONITOR_DEFAULTTONEAREST),&monitor)) {
+                        ShowWindow(window,SW_RESTORE);
+                        const auto& r=monitor.rcMonitor;
+                        SetWindowPos(window,nullptr,r.left,r.top,r.right-r.left,r.bottom-r.top,SWP_NOZORDER|SWP_FRAMECHANGED);
+                        RECT client{};if(GetClientRect(window,&client)){self->presentationWidth=uint32_t(client.right);self->presentationHeight=uint32_t(client.bottom);}
+                    }
+                }
+            }
+        }
         if(message==WM_SETFOCUS) self->keyboard->focus(true);
         if(message==WM_KILLFOCUS) {
             self->resumeMouseAfterMenu=false;self->captureMouse(window,false);self->keyboard->focus(false);
@@ -206,7 +262,8 @@ LRESULT CALLBACK NativeWindow::procedure(HWND window,UINT message,WPARAM wparam,
         if(message==WM_MOUSEWHEEL) {
             POINT point{int16_t(LOWORD(lparam)),int16_t(HIWORD(lparam))};
             if(ScreenToClient(window,&point))pointerPosition(MAKELPARAM(point.x,point.y));
-            self->keyboard->pointerWheel(int16_t(HIWORD(wparam)));return 0;
+            self->keyboard->pointerWheel(int16_t(HIWORD(wparam)));
+            self->keyboard->wheel(int16_t(HIWORD(wparam)));return 0;
         }
         if(message==WM_INPUT&&self->mouseCaptured&&GET_RAWINPUT_CODE_WPARAM(wparam)==RIM_INPUT) {
             RAWINPUT raw{};UINT size=sizeof(raw);

@@ -118,6 +118,7 @@ void recordingMonoFrontier(Runtime& rt,const PPCContext& entry,bool bit2) {
     PPC_STORE_U8(packet+12,1); // Original recordable-packet eligibility.
     uint32_t dispatcherCalls=0,recordingCalls=0,replayCalls=0,publicationCalls=0;
     bool sessionDeletionRejected=false,publicationNegativesDone=false;
+    auto replayCaptureOrigins=driver.temporalSceneOrigins();
     Observation observed([&](uint32_t pc,PPCContext& c,uint8_t* memory,bool after){
         need(memory==base,"Mono recording observer changed memory domain");
         if(pc==0x826FF6D8&&uint32_t(c.lr)==0x827406A0) {
@@ -161,7 +162,9 @@ void recordingMonoFrontier(Runtime& rt,const PPCContext& entry,bool bit2) {
             std::printf("AUDIT_MONO_RECORDING_FRONTIER source=8211F480 original_wrapper=8273B4D0 dispatcher=82740680 recording=82740420 caller=82740A60 alpha=0 flag2=%u bucket=%u create=passed recording_entry=encountered use=unproven release=unproven\n",
                 c.r6.u32,c.r7.u32);}
         if(pc==0x827402F0){++replayCalls;need(uint32_t(c.lr)==0x82740AFC&&c.r3.u32==packet,
-            "Original mono cached replay caller differs");}
+            "Original mono cached replay caller differs");
+            need(driver.temporalSceneOrigins().components==replayCaptureOrigins.components,
+                "Original mono capture changed Scene origins before its actual command-list execution");}
         if(pc==0x82701448) {
             using S=Graphics::ScalarState;const auto& effective=driver.effectiveState();
             std::printf("AUDIT_MONO_RECORDING_STATE source=8211F480 caller=%08X flag2=%u halfpixel=%u msaa=%u sample_mask=%08X scissor_enable=%u primitive_reset=%u color_mask=%u\n",
@@ -177,7 +180,13 @@ void recordingMonoFrontier(Runtime& rt,const PPCContext& entry,bool bit2) {
     stage=bit2?"whole original mono recording bit2 frontier":"whole original mono recording default frontier";
     const auto call=[&]{
         EngineCpuCalls original(entry,base);seedAbi(original.registers());const auto saved=fullAbi(original.registers());
+        replayCaptureOrigins=driver.temporalSceneOrigins();
         original.invoke(0x8273B4D0,packet);need(fullAbi(original.registers())==saved,"Whole mono recording wrapper changed its ABI");
+        const auto executedOrigins=driver.temporalSceneOrigins();
+        need(executedOrigins.components[0].revision>replayCaptureOrigins.components[0].revision&&
+            executedOrigins.components[0].kind==Graphics::TemporalRasterOriginKind::Unknown&&
+            executedOrigins.components[2]==replayCaptureOrigins.components[2],
+            "Original unadapted mono execution lost its actual packed-color write or altered untouched stencil origin");
     };
     call();
     const auto plugin=PPC_LOAD_U32(0x82D6D850),node=PPC_LOAD_U32(object+plugin+4),payload=PPC_LOAD_U32(node+0x28);

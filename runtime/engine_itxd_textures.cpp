@@ -1,6 +1,8 @@
 #include "engine_itxd_textures.h"
 #include "engine_cpu_calls.h"
 #include "engine_driver.h"
+#include "itxd_rgba_preparation.h"
+#include "stall_profiler.h"
 #include "renderer/native_backend.h"
 #include "renderer/itxd_blocks.h"
 #include "renderer/native_input_prompts.h"
@@ -17,6 +19,11 @@ namespace {
 using namespace Simpsons;
 void need(bool ok,const char* why){if(!ok)throw Failure(std::string("Native ITXD: ")+why);}
 uint32_t address(uint64_t value){need(value<=UINT32_MAX,"address arithmetic overflow");return uint32_t(value);}
+template<class F>
+decltype(auto) itxdColdWork(const char* name,uint32_t record,F&& work) {
+    StallProfiler::Scope scope(StallProfiler::Section::Rendering,name,currentContext,record);
+    return work();
+}
 struct HostState {
     const uint32_t fp=PPCFPSCRRegister::getcsr();const DWORD error=GetLastError();
     HostState(){PPCFPSCRRegister::restoreHostCSR(PPCFPSCRRegister::DefaultCSR);}
@@ -45,6 +52,10 @@ struct EngineITXDTextures::State {
         uint64_t generation{};Phase phase=Phase::Relocated;
         Metadata relocated{};std::vector<uint8_t> pixels;
         std::shared_ptr<Graphics::Texture> texture;
+        ITXDRGBAPreparation::Handle preparedRGBA;
+        bool preparationAdmitted{};
+        ITXDRGBAPreparation::Handle preparedBC2;
+        bool bc2PreparationAdmitted{};
     };
     struct Copy {
         Source source;uint32_t sp{},t{},allocator{},vtable{};
@@ -61,8 +72,39 @@ struct EngineITXDTextures::State {
     std::unordered_map<uint32_t,Record> records; // T, never embedded SDK H.
     uint64_t nextGeneration=1;
     Graphics::NativeInputPrompts inputPrompts;
-    State(Runtime& r,Graphics::NativeBackend& b,uint32_t c):runtime(r),backend(b),context(c){}
+    ITXDRGBAPreparation rgbaPreparation;
+    State(Runtime& r,Graphics::NativeBackend& b,uint32_t c):runtime(r),backend(b),context(c) {}
     std::shared_ptr<Graphics::Texture> nativeTexture(Record& r);
+    void prepareRGBA(Record& r) {
+        if(r.texture||r.preparationAdmitted||word(r.relocated,0xC4)!=0x18280186||word(r.relocated,0xB0))return;
+        // Called only after the entire group's original publication proof.
+        // The worker receives a second owned snapshot, never r/guest pointers.
+        r.preparedRGBA=itxdColdWork("ITXD.prepare.submit",r.t,[&]{
+            return rgbaPreparation.submit({r.t,r.generation},r.source.descriptor,
+                word(r.relocated,0x84),word(r.relocated,0x88),r.pixels);});
+        r.preparationAdmitted=!r.preparedRGBA.expired();
+        if(r.preparationAdmitted) {
+            const auto budget=rgbaPreparation.stats();
+            std::fprintf(stderr,"[NATIVE ITXD PREPARE] R=%08X generation=%llu extent=%ux%u name=%.64s reserved_bytes=%zu outstanding_jobs=%zu; published owned CPU snapshot only\n",
+                r.t+0x78,static_cast<unsigned long long>(r.generation),word(r.relocated,0x84),word(r.relocated,0x88),
+                reinterpret_cast<const char*>(r.source.metadata.data()+0x10),budget.reservedBytes,budget.outstandingJobs);
+        }
+    }
+    void prepareBC2Base(Record& r) {
+        if(r.texture||r.bc2PreparationAdmitted||word(r.relocated,0xC4)!=0x1A200153||
+           word(r.relocated,0xB0)||r.source.descriptor[4]||r.source.descriptor[5]!=0x200)return;
+        // Only complete original group publication reaches this owned snapshot.
+        r.preparedBC2=itxdColdWork("ITXD.prepare.submit",r.t,[&]{
+            return rgbaPreparation.submitBC2Base({r.t,r.generation},r.source.descriptor,
+                word(r.relocated,0x84),word(r.relocated,0x88),r.pixels);});
+        r.bc2PreparationAdmitted=!r.preparedBC2.expired();
+        if(r.bc2PreparationAdmitted) {
+            const auto budget=rgbaPreparation.stats();
+            std::fprintf(stderr,"[NATIVE ITXD BC2 PREPARE] R=%08X generation=%llu extent=%ux%u name=%.64s reserved_bytes=%zu outstanding_jobs=%zu; published owned CPU snapshot only\n",
+                r.t+0x78,static_cast<unsigned long long>(r.generation),word(r.relocated,0x84),word(r.relocated,0x88),
+                reinterpret_cast<const char*>(r.source.metadata.data()+0x10),budget.reservedBytes,budget.outstandingJobs);
+        }
+    }
     void require(uint8_t* base) const {
         need(active==&runtime&&base==runtime.base,"wrong runtime");runtime.checkRunning();
         // No renderer-thread check here: CPU ownership can originate on workers.
@@ -300,6 +342,8 @@ void EngineITXDTextures::endLoad(PPCContext& c,uint8_t* base){
     }
     need(members.size()==l.sources.size(),"original group texture count differs");
     // Use the original read-only lookup; index/tree implementation stays AOT.
+    std::vector<uint32_t> published;
+    published.reserve(l.sources.size());
     {
         EngineCpuCalls cpu(c,base);
         for(const auto& src:l.sources){
@@ -307,9 +351,12 @@ void EngineITXDTextures::endLoad(PPCContext& c,uint8_t* base){
             auto i=std::find(members.begin(),members.end(),t);need(i!=members.end(),"original group/index association differs");members.erase(i);
             s.sameSource(r,src);
             r.phase=State::Phase::Published;
+            published.push_back(t);
         }
     }
     std::fprintf(stderr,"[NATIVE ITXD LOAD] group=%08X records=%zu original index/group publication verified\n",group,l.sources.size());
+    for(const auto t:published)s.prepareRGBA(s.find(t));
+    for(const auto t:published)s.prepareBC2Base(s.find(t));
     s.loads.erase(GetCurrentThreadId());
     lock.unlock();if(boundaryObserver)boundaryObserver(0x826F2654,c,base);
 }
@@ -326,6 +373,8 @@ void EngineITXDTextures::preflightRelease(PPCContext& c,uint8_t* base){
         auto& r=s.find(c.r3.u32);need(r.phase==State::Phase::Published,"final release of unpublished/retiring generation");s.releasable(r);
         const auto plugin=s.read(0x82CF0600);need(!s.read(r.t+plugin+0x10),"final release still has an additional group owner");
         s.releases.emplace(thread,State::Release{r.t,c.r1.u32,r.generation,false,false});r.phase=State::Phase::Releasing;
+        s.rgbaPreparation.cancel(r.preparedRGBA);r.preparedRGBA.reset();
+        s.rgbaPreparation.cancel(r.preparedBC2);r.preparedBC2.reset();
     }else{
         need(uint32_t(c.lr)==0x826F815C,"copied destructor called outside final group release");
         auto i=s.releases.find(thread);need(i!=s.releases.end(),"copied destructor lacks pre-index preflight");auto& release=i->second;auto& r=s.find(release.t);
@@ -418,7 +467,8 @@ std::shared_ptr<Graphics::Texture> EngineITXDTextures::State::nativeTexture(Reco
     const auto format=word(r.relocated,0xC4);
     if(format==0x28000102 && !word(r.relocated,0xB0)) {
         if(!r.texture){std::vector<std::vector<uint8_t>> levels;
-            try {levels=Graphics::decodeITXDLuminanceMipChain(r.source.descriptor,width,height,r.pixels);}
+            try {levels=itxdColdWork("ITXD.decode",r.t,[&]{
+                return Graphics::decodeITXDLuminanceMipChain(r.source.descriptor,width,height,r.pixels);});}
             catch(const Graphics::Error&) {
                 const auto& d=r.source.descriptor;
                 std::fprintf(stderr,"[NATIVE ITXD L8 REJECTED] R=%08X H=%08X source=%08X generation=%llu name=%.64s extent=%ux%u payload=%08X bytes=%zu descriptor=%08X,%08X,%08X,%08X,%08X,%08X fn=%08X lr=%08X\n",
@@ -429,7 +479,8 @@ std::shared_ptr<Graphics::Texture> EngineITXDTextures::State::nativeTexture(Reco
                 throw;
             }
             std::vector<std::span<const uint8_t>> views;for(const auto& level:levels)views.emplace_back(level);
-            r.texture=s.backend.createTextureMipChain(width,height,Graphics::TextureFormat::RGBA8,views);
+            r.texture=itxdColdWork("ITXD.upload",r.t,[&]{
+                return s.backend.createTextureMipChain(width,height,Graphics::TextureFormat::RGBA8,views);});
             std::fprintf(stderr,"[NATIVE ITXD L8] R=%08X generation=%llu extent=%ux%u name=%.64s levels=%zu; tiled luminance RRR1 owned upload\n",
                 raster,static_cast<unsigned long long>(r.generation),width,height,reinterpret_cast<const char*>(r.source.metadata.data()+0x10),levels.size());}
         s.backend.validateTexture(r.texture);return r.texture;
@@ -437,8 +488,10 @@ std::shared_ptr<Graphics::Texture> EngineITXDTextures::State::nativeTexture(Reco
     if(format==0x18280186 && !word(r.relocated,0xB0) &&
        (!std::memcmp(r.source.metadata.data()+0x10,"simpsons_palette",sizeof("simpsons_palette")) ||
         !std::memcmp(r.source.metadata.data()+0x10,"dual_simpsons_palette",sizeof("dual_simpsons_palette")))){
-        if(!r.texture){const auto pixels=Graphics::decodeITXDPaletteRGBA8(r.source.descriptor,width,height,r.pixels);
-            r.texture=s.backend.createTexture(width,height,Graphics::TextureFormat::RGBA8,pixels);
+        if(!r.texture){const auto pixels=itxdColdWork("ITXD.decode",r.t,[&]{
+                return Graphics::decodeITXDPaletteRGBA8(r.source.descriptor,width,height,r.pixels);});
+            r.texture=itxdColdWork("ITXD.upload",r.t,[&]{
+                return s.backend.createTexture(width,height,Graphics::TextureFormat::RGBA8,pixels);});
             std::fprintf(stderr,"[NATIVE ITXD PALETTE] R=%08X H=%08X generation=%llu extent=%ux%u; original tiled8-in-32/ZYXW decoded to owned RGBA8\n",
                 raster,r.t+0xCC,static_cast<unsigned long long>(r.generation),width,height);}
         s.backend.validateTexture(r.texture);return r.texture;
@@ -447,9 +500,22 @@ std::shared_ptr<Graphics::Texture> EngineITXDTextures::State::nativeTexture(Reco
     // checked by the decoder, not the asset's human-readable name.
     if(format==0x18280186 && !word(r.relocated,0xB0)) {
         if(!r.texture){
-            const auto levels=Graphics::decodeITXDCandyRGBA8(r.source.descriptor,width,height,r.pixels);
+            // Original metadata/allocator and published-generation checks above
+            // precede ready consumption. A miss never waits for worker completion.
+            auto prepared=s.rgbaPreparation.takeReady(r.preparedRGBA,{r.t,r.generation});
+            s.rgbaPreparation.cancel(r.preparedRGBA);r.preparedRGBA.reset();
+            if(r.preparationAdmitted)std::fprintf(stderr,
+                "[NATIVE ITXD PREPARE %s] R=%08X generation=%llu extent=%ux%u name=%.64s; %s\n",
+                prepared?"HIT":"MISS",raster,static_cast<unsigned long long>(r.generation),width,height,
+                reinterpret_cast<const char*>(r.source.metadata.data()+0x10),
+                prepared?"completed owned CPU conversion; original GPU admission follows":"existing synchronous decoder; no future wait");
+            // The result's lease remains pinned through upload; levels die before
+            // prepared, so buffers are freed before that reservation is released.
+            const auto levels=prepared?std::move(prepared->levels):itxdColdWork("ITXD.decode",r.t,[&]{
+                return Graphics::decodeITXDCandyRGBA8(r.source.descriptor,width,height,r.pixels);});
             std::vector<std::span<const uint8_t>> views;for(const auto& level:levels)views.emplace_back(level);
-            r.texture=s.backend.createTextureMipChain(width,height,Graphics::TextureFormat::RGBA8,views);
+            r.texture=itxdColdWork("ITXD.upload",r.t,[&]{
+                return s.backend.createTextureMipChain(width,height,Graphics::TextureFormat::RGBA8,views);});
             std::fprintf(stderr,"[NATIVE ITXD RGBA8] R=%08X generation=%llu extent=%ux%u levels=%zu; original qualified RGBA8 owned upload\n",
                 raster,static_cast<unsigned long long>(r.generation),width,height,levels.size());
         }
@@ -463,11 +529,28 @@ std::shared_ptr<Graphics::Texture> EngineITXDTextures::State::nativeTexture(Reco
         need(false,"copied texture format/auxiliary profile is unqualified for GPU consumption");
     }
     if(!r.texture){
-        const auto levels=Graphics::decodeITXDBCMipChain(r.source.descriptor,format&255,width,height,r.pixels);
+        // All original publication, metadata, allocator and renderer-owner checks
+        // above still precede ready consumption; no worker wait or GPU work here.
+        std::optional<ITXDRGBAPreparation::Ready> prepared;
+        if(format==0x1A200153) {
+            auto ready=s.rgbaPreparation.takeReadyBC2Base(r.preparedBC2,{r.t,r.generation},
+                r.source.descriptor,width,height);
+            if(ready)prepared.emplace(std::move(*ready));
+            s.rgbaPreparation.cancel(r.preparedBC2);r.preparedBC2.reset();
+            if(r.bc2PreparationAdmitted)std::fprintf(stderr,
+                "[NATIVE ITXD BC2 PREPARE %s] R=%08X generation=%llu extent=%ux%u name=%.64s; %s\n",
+                prepared?"HIT":"MISS",raster,static_cast<unsigned long long>(r.generation),width,height,
+                reinterpret_cast<const char*>(r.source.metadata.data()+0x10),
+                prepared?"completed owned CPU conversion; original GPU admission follows":"existing synchronous decoder; no future wait");
+        }
+        // The ready reservation outlives levels through the original GPU upload.
+        const auto levels=prepared?std::move(prepared->levels):itxdColdWork("ITXD.decode",r.t,[&]{
+            return Graphics::decodeITXDBCMipChain(r.source.descriptor,format&255,width,height,r.pixels);});
         std::vector<std::span<const uint8_t>> views;for(const auto& level:levels)views.emplace_back(level);
         const auto nativeFormat=format==0x1A200152?Graphics::TextureFormat::BC1:
                                 format==0x1A200153?Graphics::TextureFormat::BC2:Graphics::TextureFormat::BC3;
-        r.texture=s.backend.createTextureMipChain(width,height,nativeFormat,views);
+        r.texture=itxdColdWork("ITXD.upload",r.t,[&]{
+            return s.backend.createTextureMipChain(width,height,nativeFormat,views);});
         std::fprintf(stderr,"[NATIVE ITXD GPU] R=%08X generation=%llu extent=%ux%u BC%u levels=%zu owned upload\n",raster,static_cast<unsigned long long>(r.generation),width,height,(format&255)-0x51,levels.size());
     }
     s.backend.validateTexture(r.texture);return r.texture;

@@ -355,8 +355,13 @@ void menuPointerQueries(){
     SendMessageW(hwnd,WM_MOUSEMOVE,0,MAKELPARAM(500,220));
     SendMessageW(hwnd,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(500,220));SendMessageW(hwnd,WM_LBUTTONUP,0,MAKELPARAM(500,220));
     native->state(0,state);pointer=native->menuPointer();
-    need(window.isMenuMouse()&&pointer.active&&pointer.pressed==1&&pointer.x==500&&pointer.y==220&&!state.Gamepad.wButtons,
-        "Owned window did not route absolute mouse click to the menu");
+    if(!(window.isMenuMouse()&&pointer.active&&pointer.pressed==1&&pointer.x==500&&pointer.y==220&&!state.Gamepad.wButtons)) {
+        RECT client{};GetClientRect(hwnd,&client);
+        std::fprintf(stderr,"menu=%d active=%d pressed=%u pointer=%d,%d extent=%ux%u buttons=%04X client=%ldx%ld dpi=%u\n",
+            int(window.isMenuMouse()),int(pointer.active),unsigned(pointer.pressed),int(pointer.x),int(pointer.y),
+            unsigned(pointer.width),unsigned(pointer.height),unsigned(state.Gamepad.wButtons),client.right,client.bottom,GetDpiForWindow(hwnd));
+        need(false,"Owned window did not route absolute mouse click to the menu");
+    }
     GUITHREADINFO gui{};gui.cbSize=sizeof(gui);
     need(GetGUIThreadInfo(GetWindowThreadProcessId(hwnd,nullptr),&gui)&&gui.hwndCapture!=hwnd,"Menu click captured or hid the desktop cursor");
     SendMessageW(hwnd,WM_MOUSELEAVE,0,0);need(!native->menuPointer().active,"Window mouse leave retained a hit target");
@@ -1402,6 +1407,9 @@ void originalPoll(const char* image){
 }
 int main(int argc,char** argv){
     SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);SetUnhandledExceptionFilter(Simpsons::exceptionFilter);
+    // Match the game process: an unaware sender's client coordinates are rescaled
+    // for the per-monitor-aware window on any display above 100%.
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     try{
         if(argc==3&&std::strcmp(argv[1],"--movie-action-only")==0){
             movieActionAudit(argv[2]);std::printf("PASS CPU movie action controllers:%zu checks; no decoder playback/GPU/gameplay claim\n",checks);return 0;

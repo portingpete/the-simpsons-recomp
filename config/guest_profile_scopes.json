@@ -1,0 +1,8 @@
+[
+  {"chunk":142,"entry":"82718B70","label":"Guest.loader82718B70"},
+  {"chunk":176,"entry":"8281E9B0","label":"Guest.byteDecode8281E9B0"},
+  {"chunk":181,"entry":"828389F0","label":"Guest.vmOuter828389F0"},
+  {"chunk":182,"entry":"82844AB0","label":"Guest.vmSetup82844AB0"},
+  {"chunk":265,"entry":"82B2ABD8","label":"Guest.pairUpdate82B2ABD8"},
+  {"chunk":265,"entry":"82B2A8D0","label":"Guest.pairShift82B2A8D0"}
+]

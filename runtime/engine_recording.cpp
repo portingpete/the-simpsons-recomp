@@ -1339,7 +1339,7 @@ void EngineRecordingOwners::deleteRecord(PPCContext& c,uint8_t* base,uint32_t si
         effects.requireCachedRecordRetirement(p.id,p.typed,p.object,p.metadata,p.native);
         // A sealed native list may still own submitted GPU work. Complete that
         // work before invalidating per-payload replay data or releasing it.
-        s.backend.waitIdle();
+        s.backend.waitRecordingPayload(p.native);
         effects.retireCachedRecord(p.id,p.typed,p.object,p.metadata,p.native);
         s.backend.releaseRecordingPayload(p.native);d.released=true;
         c.r3.u64=0;c.lr=0x82737440;return; // Replace only the resource-release BL.

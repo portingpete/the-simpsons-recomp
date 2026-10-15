@@ -261,12 +261,11 @@ void NativeBackend::drawShadowMesh(const std::shared_ptr<RenderTarget>& target,c
     requireSelectedTargets({target,nullptr,nullptr,nullptr},depth);requireNoOutputUavs();
     requireShadowDepthShader(vertex);requireShadowDepthCommit(commit);m.requireBindings(context.Get());requireNoAuxiliaryStages(context.Get());
     const DepthConstants values{uint32_t(reverse),d.depthBiasBits,d.slopeBiasBits,0};
-    // Reuse identical immutable buffers; never update in flight. Miss creates
-    // a NEW immutable buffer with the same descriptor, published only after
-    // success; eviction keeps old GPU/live refs alive via caller ComPtr.
+    // Keep the per-mesh fast path while sharing exact immutable misses across
+    // meshes. Cached/live/GPU refs pin old buffers independently of eviction.
     ComPtr<ID3D11Buffer> constants;
     if(auto* hit=m.depthConstants.find(values))constants=hit;
-    else{constants=immutable(device.Get(),&values,sizeof(values),D3D11_BIND_CONSTANT_BUFFER);m.depthConstants.publish(values,constants.Get());}
+    else{constants=sceneDepthConstantBuffer(values.reverse,values.constantBits,values.slopeBits);m.depthConstants.publish(values,constants.Get());}
     // All rejection and allocation precede the flush or shadow context mutation.
     flushIm2D();
     requireSelectedTargets({target,nullptr,nullptr,nullptr},depth);
@@ -284,6 +283,7 @@ void NativeBackend::drawShadowMesh(const std::shared_ptr<RenderTarget>& target,c
         // R16 triangle strips consume FFFF as cut indices, including parity reset.
         forEachOriginalR16StripChunk(d.startIndex,d.indexCount,[&](uint32_t n,uint32_t first){context->DrawIndexed(n,first,d.baseVertex);});
         ++shadowMeshDraws;
+        noteTemporalSceneDraw(target,depth,0,d.depthEnable&&d.depthWrite,false);
     }
     requireShadowDepthShader(vertex);requireShadowDepthCommit(commit);m.requireBindings(context.Get());
     requireSelectedTargets({target,nullptr,nullptr,nullptr},depth);requireOwner();

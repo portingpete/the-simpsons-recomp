@@ -3,10 +3,24 @@
 #include <cstdint>
 
 namespace Simpsons::Graphics {
+// Measures a window in its own DPI awareness. The native window thread is per-monitor
+// aware; a caller thread with another awareness reads DPI-virtualized coordinates on
+// any display above 100% (a 1280x720 client reads 853x480 at 150%).
+class WindowDpiScope {
+    DPI_AWARENESS_CONTEXT previous_{};
+public:
+    explicit WindowDpiScope(HWND window) noexcept {
+        if(const auto context=GetWindowDpiAwarenessContext(window))previous_=SetThreadDpiAwarenessContext(context);
+    }
+    ~WindowDpiScope() {if(previous_)SetThreadDpiAwarenessContext(previous_);}
+    WindowDpiScope(const WindowDpiScope&)=delete;
+    WindowDpiScope& operator=(const WindowDpiScope&)=delete;
+};
 inline bool presentationWindowMatches(HWND window,uint32_t width,uint32_t height) {
     DWORD process{};
     if(!window || !IsWindow(window) || !GetWindowThreadProcessId(window,&process) || process!=GetCurrentProcessId())
         return false;
+    const WindowDpiScope dpi(window);
     // Minimize changes the Win32 client extent, not the fixed render targets or
     // swapchain buffers. Sample IsIconic on both sides of the client query.
     const ULONGLONG start=GetTickCount64();

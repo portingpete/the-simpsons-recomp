@@ -2,6 +2,9 @@
 #define NOMINMAX
 #endif
 #include "renderer/sky_mesh.h"
+#include "header/test_graphics_device.h"
+#include "renderer/d3d_call_stats.h"
+#include "renderer/device_availability.h"
 #include "renderer/native_material_compiler.h"
 #include "renderer/effect_reflection.h"
 #include "renderer/post_filter.h"
@@ -17,6 +20,7 @@
 #include <thread>
 #include <vector>
 using namespace Simpsons::Graphics;
+extern "C" uint64_t gD3DDeviceCounts[64];
 void require(bool value,const char* message){if(!value)throw Error(message);}
 template<class F>void rejects(F action){bool rejected=false;try{action();}catch(const Error&){rejected=true;}require(rejected,"Invalid sky operation succeeded");}
 #include "header/test_engine_binding_reset.h"
@@ -25,10 +29,35 @@ template<class F>void rejects(F action){bool rejected=false;try{action();}catch(
 namespace Simpsons::Graphics {
 struct NativeRecordingProbe {
     static ID3D11DeviceContext* context(NativeBackend& b){return b.context.Get();}
+    static ID3D11Device* device(NativeBackend& b){return b.device.Get();}
+    static ComPtr<ID3D11Buffer> depthConstants(NativeBackend& b,const SkyMeshDraw& d) {
+        return b.sceneDepthConstantBuffer(d.viewport[4]==0x3F800000&&d.viewport[5]==0,d.depthBiasBits,d.slopeBiasBits);
+    }
+    static void resetSceneCache(NativeBackend& b){b.resetSceneStateCacheForDevice();}
+    static void replaceDevice(NativeBackend& b,bool hardware) {
+        ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;D3D_FEATURE_LEVEL level{};
+        const auto result=createTestDevice(hardware,D3D11_CREATE_DEVICE_BGRA_SUPPORT,&device,&level,&context);
+        require(SUCCEEDED(result),"Sky depth-constant device replacement failed");
+        b.availability=std::make_shared<DeviceAvailability>(device.Get());b.device=device;b.context=context;b.featureLevel=level;
+    }
     // TEST ONLY: drops the backend's exact-content sky cache. shared_ptr reset
     // is valid on the incomplete pointee; live handles keep their meshes alive.
     static void resetMeshCache(NativeBackend& b){b.skyMeshCache_.reset();}
 };
+}
+void depthConstantBytes(NativeBackend& backend,ID3D11Buffer* buffer,const SkyMeshDraw& draw) {
+    ComPtr<ID3D11Device> device;buffer->GetDevice(&device);
+    require(device.Get()==NativeRecordingProbe::device(backend),"Sky depth constant belongs to another device");
+    D3D11_BUFFER_DESC desc{};buffer->GetDesc(&desc);
+    require(desc.ByteWidth==16&&desc.Usage==D3D11_USAGE_IMMUTABLE&&desc.BindFlags==D3D11_BIND_CONSTANT_BUFFER&&
+        !desc.CPUAccessFlags&&!desc.MiscFlags&&!desc.StructureByteStride,"Sky recorded depth constant is not an exact immutable16 buffer");
+    desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Buffer> staging;require(SUCCEEDED(device->CreateBuffer(&desc,nullptr,&staging)),"Sky depth constant staging failed");
+    auto* context=NativeRecordingProbe::context(backend);context->CopyResource(staging.Get(),buffer);
+    D3D11_MAPPED_SUBRESOURCE mapped{};require(SUCCEEDED(context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped)),"Sky depth constant readback failed");
+    const std::array<uint32_t,4> expected{uint32_t(draw.viewport[4]==0x3F800000&&draw.viewport[5]==0),draw.depthBiasBits,draw.slopeBiasBits,0};
+    const bool exact=mapped.pData&&mapped.RowPitch>=16&&!std::memcmp(mapped.pData,expected.data(),16);context->Unmap(staging.Get(),0);
+    require(exact,"Sky recorded depth constant GPU bytes changed");
 }
 void uploadCacheReuse(bool hardware) {
     NativeBackend backend(!hardware);
@@ -141,8 +170,43 @@ void run(const std::vector<uint8_t>& image,bool hardware,bool opaque) {
     const EngineBindingResetProbe::Snapshot initial(context);
     const auto untouched=backend.readbackTarget(color),depthBefore=backend.readbackDepthTarget(depth),siblingBefore=backend.readbackTarget(sibling);
     auto first=begin();backend.bindSkyMeshVertices(first,mesh);backend.bindSkyMeshDeclaration(first,mesh);backend.bindSkyMeshIndices(first,mesh);
-    backend.recordSkyMesh(first,color,depth,mesh,*vs,*ps,moving,materialPS,live,draw);backend.finishRecordingPayload(first);
-    auto second=begin();backend.recordSkyMesh(second,color,depth,mesh,*vs,*ps,slower,materialPS,secondLive,draw);backend.finishRecordingPayload(second);
+    installD3DCallStats(NativeRecordingProbe::context(backend),NativeRecordingProbe::device(backend));
+    NativeRecordingProbe::resetSceneCache(backend);auto buffersBefore=gD3DDeviceCounts[3];
+    backend.recordSkyMesh(first,color,depth,mesh,*vs,*ps,moving,materialPS,live,draw);
+    require(gD3DDeviceCounts[3]==buffersBefore+3,"First recorded sky draw did not create two private banks and one immutable depth buffer");
+    backend.finishRecordingPayload(first);
+    buffersBefore=gD3DDeviceCounts[3];auto originalDepthConstants=NativeRecordingProbe::depthConstants(backend,draw);
+    auto* originalDepthIdentity=originalDepthConstants.Get();
+    require(gD3DDeviceCounts[3]==buffersBefore,"Recorded sky depth buffer was absent from the shared cache");
+    depthConstantBytes(backend,originalDepthConstants.Get(),draw);
+    auto second=begin();buffersBefore=gD3DDeviceCounts[3];
+    backend.recordSkyMesh(second,color,depth,mesh,*vs,*ps,slower,materialPS,secondLive,draw);
+    require(gD3DDeviceCounts[3]==buffersBefore+2,"Repeated recorded sky draw recreated immutable depth or shared its writable banks");
+    backend.finishRecordingPayload(second);
+    {
+        std::array<SkyMeshDraw,3> changed{draw,draw,draw};
+        changed[0].depthBiasBits=0x80000000;changed[1].slopeBiasBits=0x80000000;
+        changed[2].viewport[4]=0x3F800000;changed[2].viewport[5]=0;
+        for(const auto& different:changed) {
+            auto separate=begin();buffersBefore=gD3DDeviceCounts[3];
+            backend.recordSkyMesh(separate,color,depth,mesh,*vs,*ps,moving,materialPS,live,different);
+            require(gD3DDeviceCounts[3]==buffersBefore+3,"Distinct recorded sky depth bits incorrectly hit another key");
+            backend.finishRecordingPayload(separate);
+            buffersBefore=gD3DDeviceCounts[3];const auto constants=NativeRecordingProbe::depthConstants(backend,different);
+            require(gD3DDeviceCounts[3]==buffersBefore&&constants.Get()!=originalDepthConstants.Get(),"Recorded sky signed zero or reverse key was lost");
+            depthConstantBytes(backend,constants.Get(),different);backend.releaseRecordingPayload(separate);
+        }
+        NativeBackend foreign(!hardware);buffersBefore=gD3DDeviceCounts[3];
+        const auto foreignConstants=NativeRecordingProbe::depthConstants(foreign,draw);
+        require(gD3DDeviceCounts[3]==buffersBefore+1&&foreignConstants.Get()!=originalDepthConstants.Get(),"Sky depth constants crossed backend ownership");
+        depthConstantBytes(foreign,foreignConstants.Get(),draw);
+        auto* oldDevice=NativeRecordingProbe::device(foreign);NativeRecordingProbe::replaceDevice(foreign,hardware);
+        require(oldDevice!=NativeRecordingProbe::device(foreign),"Sky depth constant device replacement did not occur");
+        buffersBefore=gD3DDeviceCounts[3];const auto replaced=NativeRecordingProbe::depthConstants(foreign,draw);
+        require(gD3DDeviceCounts[3]==buffersBefore+1&&replaced.Get()!=foreignConstants.Get(),"Sky depth constants crossed replacement devices");
+        depthConstantBytes(foreign,replaced.Get(),draw);ComPtr<ID3D11Device> retained;foreignConstants->GetDevice(&retained);
+        require(retained.Get()==oldDevice,"Sky device replacement mutated a retained immutable depth owner");
+    }
     require(EngineBindingResetProbe::Snapshot(context)==initial,"Sky recording changed immediate state");
     require(backend.readbackTarget(color)==untouched,"Sky recording drew before execution");
     rejects([&]{backend.executeRecordingPayload(first);});
@@ -166,6 +230,20 @@ void run(const std::vector<uint8_t>& image,bool hardware,bool opaque) {
     // Linear filtering/UNORM conversion can round this exact midpoint to
     // either adjacent RGB10 code on hardware. Endpoint colors stay exact.
     solid(execute(first),1023u<<10);solid(execute(second),(512u<<10)|512u,1);
+    {
+        for(float bias:{1.f,2.f,3.f,4.f,5.f,6.f,7.f,8.f,9.f}) {
+            auto different=draw;different.depthBiasBits=std::bit_cast<uint32_t>(bias);
+            (void)NativeRecordingProbe::depthConstants(backend,different);
+        }
+        const auto afterEviction=NativeRecordingProbe::depthConstants(backend,draw);
+        require(afterEviction.Get()!=originalDepthIdentity,"Sky depth cache eviction fixture did not retire the original entry");
+        NativeRecordingProbe::resetSceneCache(backend);
+        // Drop the observer reference too: only retained draw/list ownership
+        // may keep this old immutable buffer alive after cache retirement.
+        require(originalDepthConstants.Detach()->Release()>0,"Sky payload failed to retain its immutable depth buffer");
+        solid(execute(first),1023u<<10);solid(execute(second),(512u<<10)|512u,1);
+        depthConstantBytes(backend,originalDepthIdentity,draw);
+    }
     {
         std::array<std::shared_ptr<RenderTarget>,2> queued;
         for(auto& target:queued)target=backend.createTarget(extent,extent,TargetFormat::RGB10A2);

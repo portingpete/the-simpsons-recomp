@@ -48,30 +48,55 @@ struct EngineAudioOutput::State {
         uint64_t hints=0,submitted=0,consumed=0,cancelled=0,passes=0,backendRetired=0;
     };
     std::optional<Construction> construction;
+    std::unique_ptr<Audio::NativeAudioOutput> preparedNative;
     std::unique_ptr<Audio::NativeAudioOutput> native;
+    float masterVolume=1.0f;
     std::unique_ptr<Audio::DacProcessor> processor;
     bool apartment=false;
     explicit State(Runtime& rt):runtime(rt) {
         require(rt.mainThreadHandle && GetThreadId(rt.mainThreadHandle->native)==thread,
                 "Dac0 construction requires the original main thread");
+        masterVolume=rt.audioSettings.gain();
     }
     ~State() {
+        if(apartment && GetCurrentThreadId()!=thread) {
+            std::fprintf(stderr,"[NATIVE AUDIO FAILURE] Dac0 MTA owner destroyed on a different thread\n");
+            std::terminate();
+        }
         HostFloatingPoint fp;
         // Runtime first cancels/joins original guest workers. The private host
         // processor and every downstream callback/data read must quiesce before
         // releasing its backend, the main thread's MTA or guest memory.
         processor.reset();
         native.reset();
-        if(apartment) {
-            if(GetCurrentThreadId()!=thread) {
-                std::fprintf(stderr,"[NATIVE AUDIO FAILURE] Dac0 MTA owner destroyed on a different thread\n");
-                std::terminate();
-            }
-            CoUninitialize();
-        }
+        preparedNative.reset();
+        if(apartment) CoUninitialize();
         if(construction) std::fprintf(stderr,
             "[NATIVE AUDIO] terminal Dac0 cleanup owner=%08X mixer=%08X; original graph cleanup was not completed\n",
             construction->owner,construction->mixer);
+    }
+    std::unique_ptr<Audio::NativeAudioOutput> createEndpoint() {
+        require(GetCurrentThreadId()==thread && !apartment,"Invalid Dac0 endpoint apartment ownership");
+        // Balance both S_OK and S_FALSE, including endpoint failure or shutdown
+        // during creation. Destroy the graph before relinquishing this MTA.
+        HostFloatingPoint fp;
+        const HRESULT hr=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
+        if(FAILED(hr)) throw Audio::OutputError("Initialize Dac0 output MTA",hr);
+        try {
+            auto result=std::make_unique<Audio::NativeAudioOutput>(Audio::NativeAudioOutput::Options{
+                .capacity=4,.muted=runtime.audioMuted,.deviceId={}});
+            result->setVolume(masterVolume);
+            runtime.checkRunning();
+            apartment=true;
+            return result;
+        }catch(...) {CoUninitialize();throw;}
+    }
+    void unconfiguredEndpoint(Audio::NativeAudioOutput& endpoint) const {
+        const auto snapshot=endpoint.poll();
+        if(snapshot.error) throw Audio::OutputError("Validate prepared Dac0 endpoint",snapshot.error);
+        require(!snapshot.configured && !snapshot.running && !snapshot.stopped && !snapshot.owned,
+                "Dac0 prepared endpoint has unexpected processing ownership");
+        require(endpoint.endpoint().muted==runtime.audioMuted,"Dac0 prepared endpoint mute policy changed");
     }
     void caller(PPCContext& ctx,uint8_t* base,bool main=false) const {
         require(active==&runtime && base==runtime.base && (!main || GetCurrentThreadId()==thread) && currentContext==&ctx,
@@ -188,6 +213,25 @@ struct EngineAudioOutput::State {
 };
 EngineAudioOutput::EngineAudioOutput(Runtime& rt):state(std::make_unique<State>(rt)) {}
 EngineAudioOutput::~EngineAudioOutput()=default;
+void EngineAudioOutput::setMasterVolume(float volume) {
+    auto& s=*state;std::lock_guard lock(s.mutex);
+    require(std::isfinite(volume)&&volume>=0&&volume<=1,"Master volume must be within 0..1");
+    s.masterVolume=volume;
+    if(s.native)s.native->setVolume(volume);
+    if(s.preparedNative)s.preparedNative->setVolume(volume);
+}
+uint64_t EngineAudioOutput::prepareEndpoint() {
+    auto& s=*state;std::lock_guard lock(s.mutex);
+    require(active==&s.runtime && GetCurrentThreadId()==s.thread,"Invalid Dac0 endpoint preparation thread/runtime");
+    s.runtime.checkRunning();
+    require(!s.construction && !s.native && !s.processor,"Dac0 endpoint preparation followed original ownership");
+    require(bool(s.preparedNative)==s.apartment,"Dac0 prepared endpoint apartment ownership changed");
+    if(s.preparedNative) {s.unconfiguredEndpoint(*s.preparedNative);return s.preparedNative->generation();}
+    s.preparedNative=s.createEndpoint();
+    std::fprintf(stderr,"[NATIVE AUDIO] endpoint prepared before original startup generation=%llu; no source, guest owner or PCM\n",
+        static_cast<unsigned long long>(s.preparedNative->generation()));
+    return s.preparedNative->generation();
+}
 void EngineAudioOutput::begin(PPCContext& ctx,uint8_t* base) {
     auto& s=*state;std::lock_guard lock(s.mutex);s.caller(ctx,base,true);s.noHardware(base);
     require(!s.construction && !s.native,"Dac0 constructor entered with a pending/live output owner");
@@ -220,7 +264,7 @@ void EngineAudioOutput::begin(PPCContext& ctx,uint8_t* base) {
 }
 void EngineAudioOutput::acquire(PPCContext& ctx,uint8_t* base) {
     auto& s=*state;std::lock_guard lock(s.mutex);auto& c=s.frame(ctx,base);
-    require(!s.native && !s.apartment && ctx.r3.u32==ctx.r1.u32+0x58 && ctx.r29.u32==c.owner+0x28 && !ctx.r30.u32,
+    require(!s.native && bool(s.preparedNative)==s.apartment && ctx.r3.u32==ctx.r1.u32+0x58 && ctx.r29.u32==c.owner+0x28 && !ctx.r30.u32,
             "Dac0 native engine acquisition callsite changed");
     c.mixer=PPC_LOAD_U32(c.owner+0x24);
     require(c.mixer && !(c.mixer&0x7F),"Dac0 CPU mixer allocation is missing or misaligned");
@@ -232,14 +276,10 @@ void EngineAudioOutput::acquire(PPCContext& ctx,uint8_t* base) {
             "Original Dac0 CPU setup differs from the verified default profile");
     if(s.runtime.graphicsStartupObserver)
         s.runtime.graphicsStartupObserver(0x823458C0,ctx,base);
-    // COM initialization/cleanup are host work too, including exceptional
-    // creation paths outside the backend's own floating-point scope.
-    HostFloatingPoint fp;
-    const HRESULT hr=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
-    if(FAILED(hr)) throw Audio::OutputError("Initialize Dac0 output MTA",hr);
-    s.apartment=true;
-    try {s.native=std::make_unique<Audio::NativeAudioOutput>(Audio::NativeAudioOutput::Options{.capacity=4,.muted=s.runtime.audioMuted,.deviceId={}});}
-    catch(...) {CoUninitialize();s.apartment=false;throw;}
+    // Only the fully validated original CPU owner may consume host preparation.
+    // Headless fixtures retain the same lazy endpoint acquisition path.
+    if(s.preparedNative) {s.unconfiguredEndpoint(*s.preparedNative);s.native=std::move(s.preparedNative);}
+    else s.native=s.createEndpoint();
     const auto endpoint=s.native->endpoint();
     std::fprintf(stderr,"[NATIVE AUDIO] Dac0 engine acquired owner=%08X root=%08X mixer=%08X generation=%llu endpoint_channels=%u mask=%08X muted=%u; source not configured\n",
         c.owner,c.root,c.mixer,static_cast<unsigned long long>(s.native->generation()),endpoint.channels,endpoint.channelMask,endpoint.muted);
@@ -426,7 +466,7 @@ void EngineAudioOutput::rootJoin(PPCContext& ctx,uint8_t* base) {
 void EngineAudioOutput::rootFinish(PPCContext& ctx,uint8_t* base) {
     auto& s=*state;std::lock_guard lock(s.mutex);s.caller(ctx,base,true);
     if(!s.construction) return;const auto& c=*s.construction;
-    require(c.joined && c.root==ctx.r31.u32 && !PPC_LOAD_U32(0x82E31BCC) && !s.processor && !s.native && !s.apartment,
+    require(c.joined && c.root==ctx.r31.u32 && !PPC_LOAD_U32(0x82E31BCC) && !s.processor && !s.native && !s.preparedNative && !s.apartment,
             "Dac0 native retirement did not precede original root free");
     std::fprintf(stderr,"[NATIVE AUDIO] original audio root freed; Dac0 native identity=%08X retired\n",c.id);
     s.construction.reset();

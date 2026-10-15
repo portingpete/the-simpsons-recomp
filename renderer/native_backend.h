@@ -1,5 +1,7 @@
 #pragma once
 #include <d3d11.h>
+#include "constant_buffer_bindings.h"
+#include "temporal_origins.h"
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 #include <array>
@@ -14,13 +16,62 @@
 namespace Simpsons::Graphics {
 struct Error : std::runtime_error {using std::runtime_error::runtime_error;};
 using Microsoft::WRL::ComPtr;
+namespace detail {
+// Direct draw descriptors retain the original zero disabled-stencil fields;
+// sceneDepthState deliberately uses a different full descriptor.
+class DirectDrawDepthStates {
+    ComPtr<ID3D11Device> owner;
+    std::array<ComPtr<ID3D11DepthStencilState>,32> states;
+public:
+    HRESULT get(ID3D11Device* device,uint32_t enable,uint32_t write,uint32_t compare,
+                ComPtr<ID3D11DepthStencilState>& result) {
+        if(!device)return E_POINTER;
+        if(enable>1||write>1||compare>7)return E_INVALIDARG;
+        if(owner.Get()!=device){for(auto& state:states)state.Reset();owner=device;}
+        const size_t index=(enable?16u:0u)|(write?8u:0u)|compare;
+        if(!states[index]){
+            D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthEnable=enable;
+            dd.DepthWriteMask=write?D3D11_DEPTH_WRITE_MASK_ALL:D3D11_DEPTH_WRITE_MASK_ZERO;
+            dd.DepthFunc=D3D11_COMPARISON_FUNC(compare+1);
+            ComPtr<ID3D11DepthStencilState> created;
+            const HRESULT hr=device->CreateDepthStencilState(&dd,&created);
+            if(FAILED(hr))return hr;
+            if(!created)return E_UNEXPECTED;
+            states[index]=std::move(created);
+        }
+        result=states[index];return S_OK;
+    }
+};
+}
 // R8 is scalar red-channel UNORM storage; it specifies no luminance swizzle.
 enum class TextureFormat {RGBA8, BC1, BC2, BC3, BGRX8, R8};
 enum class TargetFormat {RGBA8, RGB10A2, RGBA16Float, RGBA32Float};
-enum class TargetScale {Fixed, Scene};
-enum class Antialiasing {Original=0, FXAA=1, FXAAOriginal=2, SSAA4x=3};
+// Shadow follows the Video menu shadow quality (0.5x..4x of the original 1024 maps).
+enum class TargetScale {Fixed, Scene, Output, Shadow};
+// Persisted IDs3 and6 belonged to removed SSAA modes and stay retired. IDs8..10
+// belonged to removed MSAA modes; saved preferences migrate them to SMAA.
+enum class Antialiasing {Original=0, FXAA=1, FXAAOriginal=2, FXAALow=4, FXAAHigh=5,
+    SMAA=7, DLAA=11, DLSSQuality=12, DLSSBalanced=13, DLSSPerformance=14, DLSSUltraPerformance=15, TAA=16};
+constexpr bool validAntialiasing(Antialiasing mode) noexcept {
+    const auto value=uint32_t(mode);return (value<=7 && value!=3 && value!=6) || mode==Antialiasing::TAA;
+}
+// Native camera-reprojected temporal AA: jittered world projection, resolved
+// before original post effects and the HUD. Independent of the legacy research path.
+constexpr bool nativeTemporalAntialiasing(Antialiasing mode) noexcept {return mode==Antialiasing::TAA;}
+// Material texture filter override applied to linear game samplers.
+enum class TextureFilter {Original=0, Nearest=1, Bilinear=2, Trilinear=3};
+// Legacy temporal IDs remain named for preserved research sources only.
+// Normal rendering has no temporal admission or NVIDIA runtime dependency.
+constexpr bool temporalAntialiasing(Antialiasing) noexcept {return false;}
+constexpr bool replacesOriginalSmoothing(Antialiasing mode) noexcept {
+    return mode!=Antialiasing::Original && mode!=Antialiasing::FXAAOriginal;
+}
 enum class BufferKind {Vertex, Index16};
 class NativeBackend;
+class NvidiaDlss;
+class TemporalScenePipeline;
+class TemporalGeometryDraw;
+class NativeImmutableMipFactory;
 class NativeCopySubmission;
 class NativeRecordingContext;
 class NativeRecordingPayload;
@@ -39,6 +90,16 @@ using NativeRecordingPrepare=std::function<void(ID3D11DeviceContext*,const std::
 class DeviceAvailability;
 struct ScreenPipeline;
 struct AntialiasingPipeline;
+struct NativeTemporalPipeline;
+struct ScenePostPipeline;
+struct PresentationExtrasPipeline;
+struct AmbientOcclusionPipeline;
+struct LiveRenderingPipeline;
+class NativeUiCompositeBundle;
+class NativeSceneFeedbackFrame;
+struct SceneFeedbackPipeline;
+struct UiCompositePipeline;
+struct UiCompositeCopyRoles;
 struct Im2DPipeline;
 struct Im2DBatch;
 struct Im2DDraw;
@@ -59,6 +120,7 @@ struct BufferDescriptorProof {
 };
 class Texture {
     friend class NativeBackend;
+    friend class NativeImmutableMipFactory;
     friend struct NativeWritableTextureProbe;
     friend struct NativeMipTextureProbe;
     ComPtr<ID3D11Texture2D> texture;
@@ -86,8 +148,28 @@ public:
     TextureFormat format{};
     uint32_t levelCount() const {return mipLevels;}
 };
+// Optional device-only creation capability. Acquired on the backend owner after
+// actual context/device and concurrent-create qualification. It retains no
+// backend, context, guest data or DXGI object. Callers keep every input level
+// alive through creation; the returned immutable resource owns its pixels.
+class NativeImmutableMipFactory {
+    friend class NativeBackend;
+    friend struct NativeMipTextureProbe;
+    friend struct NativeImmutableMipFactoryTestProbe;
+    const ComPtr<ID3D11Device> device;
+    explicit NativeImmutableMipFactory(const ComPtr<ID3D11Device>& owner):device(owner){}
+    static std::shared_ptr<Texture> createOnDevice(const ComPtr<ID3D11Device>&,
+        uint32_t width,uint32_t height,TextureFormat,std::span<const std::span<const uint8_t>> levels);
+public:
+    NativeImmutableMipFactory(const NativeImmutableMipFactory&)=delete;
+    NativeImmutableMipFactory& operator=(const NativeImmutableMipFactory&)=delete;
+    std::shared_ptr<Texture> createMipChain(uint32_t width,uint32_t height,TextureFormat,
+        std::span<const std::span<const uint8_t>> levels) const;
+};
 class RenderTarget {
     friend class NativeBackend;
+    friend struct NativeRecordingProbe;
+    friend struct NativeUiCompositeProbe;
     friend struct NativeRenderResolutionProbe;
     friend struct NativeAntialiasingProbe;
     friend struct NativeUltrawideProbe;
@@ -96,6 +178,8 @@ class RenderTarget {
     ComPtr<ID3D11ShaderResourceView> sampledView;
     uint32_t rowBytes{};
     uint32_t physicalWidth{},physicalHeight{};
+    // Creation role; live rendering changes re-back Scene/Output storage.
+    TargetScale scaleRole=TargetScale::Fixed;
     // Exact proofs (same contract as Texture::StorageProof): validateFrontTarget's full check,
     // and the owning device plus descriptor of `texture` for attachment checks. Strong references
     // pin the validated objects; any change of object, device or captured field re-checks.
@@ -137,6 +221,7 @@ public:
 };
 class DepthTarget {
     friend class NativeBackend;
+    friend struct NativeUiCompositeProbe;
     friend struct NativeRenderResolutionProbe;
     friend struct NativeAntialiasingProbe;
     friend struct NativeUltrawideProbe;
@@ -145,6 +230,7 @@ class DepthTarget {
     ComPtr<ID3D11ShaderResourceView> depthView,stencilView;
     uint32_t width{},height{};
     uint32_t physicalWidth{},physicalHeight{};
+    TargetScale scaleRole=TargetScale::Fixed;
     // Exact proof of validateDepthCopyTarget's full check (same contract as RenderTarget::FrontProof).
     struct CopyProof {
         ComPtr<ID3D11Texture2D> texture;
@@ -197,7 +283,9 @@ using ShadowDepthConstants=std::array<std::array<float,4>,244>;
 class NativeZPrepassCommit;
 class NativeZPrepassMesh;
 struct ZPrepassMeshUploadCache;
+struct ZPrepassZeroStream;
 struct SkinMeshUploadCache;
+class SkinDetailWorker;
 struct ZPrepassVertex;
 using ZPrepassConstants=std::array<std::array<float,4>,244>;
 using ZPrepassBooleans=std::array<uint32_t,4>;
@@ -316,6 +404,7 @@ public:
 class NativeBackend {
 public:
     explicit NativeBackend(bool software=false,bool vsync=true);
+    ~NativeBackend();
     NativeBackend(const NativeBackend&)=delete;
     NativeBackend& operator=(const NativeBackend&)=delete;
     // Freeze before allocating engine targets/recorded draw commands. Original
@@ -324,12 +413,129 @@ public:
     static bool supportsRendering(uint32_t width,uint32_t height,uint32_t anisotropy,
         Antialiasing aa=Antialiasing::Original,uint32_t renderScalePercent=100) noexcept;
     void configureRendering(uint32_t width,uint32_t height,uint32_t anisotropy,
-        Antialiasing aa=Antialiasing::Original,uint32_t renderScalePercent=100);
+        Antialiasing aa=Antialiasing::Original,uint32_t renderScalePercent=100,TextureFilter filter=TextureFilter::Original,
+        uint32_t shadowQuality=1);
+    // Live Video menu change of the same settings after allocation. Every live
+    // Scene/Output/Geometry target keeps its owner object and logical extent but
+    // receives new storage at the new extent/coverage; color, depth and stencil
+    // contents are stretched across. Current engine bindings, viewport/scissor,
+    // the swapchain extent and sealed recording payloads follow the new storage.
+    // Call between presentations. Unsupported settings reject before mutation;
+    // an active recording session defers the change (returns false, no mutation).
+    bool reconfigureRendering(uint32_t width,uint32_t height,uint32_t anisotropy,
+        Antialiasing aa=Antialiasing::Original,uint32_t renderScalePercent=100,TextureFilter filter=TextureFilter::Original,
+        uint32_t shadowQuality=1);
+    bool renderingMatches(uint32_t width,uint32_t height,uint32_t anisotropy,
+        Antialiasing aa,uint32_t renderScalePercent,TextureFilter filter=TextureFilter::Original,uint32_t shadowQuality=1) const noexcept;
+    uint32_t shadowQuality() const noexcept {return shadowQualityLevel;}
+    TextureFilter textureFilter() const noexcept {return textureFilterMode;}
+    // Re-backed color/depth owners and re-recorded payloads of the last change.
+    struct LiveRenderingReceipt {uint32_t colors{},depths{},payloads{};};
+    LiveRenderingReceipt lastLiveRendering() const noexcept {return liveReceipt;}
+    uint32_t anisotropy() const noexcept {return textureAnisotropy;}
+    uint32_t renderScale() const noexcept {return renderScalePercent;}
+    std::array<uint32_t,2> renderBaseExtent() const noexcept {return {renderBaseWidth,renderBaseHeight};}
     // Isolated full-screen filter; restores the actual complete engine context.
-    // Original returns its source. SSAA resolves four scene pixels per output.
+    // Original returns its source.
     std::shared_ptr<RenderTarget> resolveAntialiasing(const std::shared_ptr<RenderTarget>& front);
     std::shared_ptr<RenderTarget> presentedFront() const {return lastPresentedFront;}
+    // The image actually copied to the swap chain (canvas, upscale, counter).
+    std::shared_ptr<RenderTarget> displayedImage() const {return lastDisplayedImage;}
     Antialiasing antialiasing() const {return antialiasingMode;}
+    std::array<uint32_t,2> configureTemporalRendering(Antialiasing,uint32_t outputWidth,uint32_t outputHeight);
+    // Configure SDK-selected render dimensions before allocation. Output and
+    // camera aspect retain the full configured dimensions independently.
+    void configureSceneExtent(uint32_t renderWidth,uint32_t renderHeight);
+    std::array<uint32_t,2> outputExtent() const {return {outputWidth,outputHeight};}
+    std::shared_ptr<NativeUiCompositeBundle> promoteUiComposite(const std::shared_ptr<RenderTarget>& sceneColor,
+        const std::shared_ptr<DepthTarget>& sceneDepth,const std::shared_ptr<RenderTarget>& reconstructedColor,
+        std::array<float,2> sourceJitter={});
+    std::shared_ptr<RenderTarget> routeColor(const std::shared_ptr<RenderTarget>& originalOwner) const;
+    std::shared_ptr<DepthTarget> routeDepth(const std::shared_ptr<DepthTarget>& originalOwner) const;
+    void clearUiComposite();
+    // Captured raw owner -> original Scene continuity, never presentation filters.
+    std::shared_ptr<NativeSceneFeedbackFrame> captureSceneFeedback(uint64_t frameSerial,
+        const std::shared_ptr<NativeCopySubmission>& actualRawFrontCopy);
+    std::shared_ptr<NativeCopySubmission> commitSceneFeedback(const std::shared_ptr<NativeSceneFeedbackFrame>&);
+    std::shared_ptr<NativeCopySubmission> alignSceneFeedback(const std::shared_ptr<RenderTarget>&,
+        const std::shared_ptr<DepthTarget>&,std::array<float,2> actualNextJitter,uint32_t preserveMask);
+
+    void registerUiCompositeCopyRoles(const std::shared_ptr<RenderTarget>& originalSceneColorCopy,
+        const std::shared_ptr<DepthTarget>& originalSceneDepthCopy);
+    uint64_t uiCompositeCopyGeneration() const;
+    void registerTemporalWorldTargets(const std::shared_ptr<RenderTarget>&,const std::shared_ptr<DepthTarget>&);
+    // Snapshot actual submitted writes, including accepted pending Im2D packets.
+    NativeTemporalSceneOrigins temporalSceneOrigins();
+    // Common proven raster grid of all original components; Uniform is invariant.
+    // Drains pending Im2D, rejects Unknown/mixed grids, and returns render pixels.
+    std::array<float,2> temporalSceneOriginGrid(const std::shared_ptr<RenderTarget>&,
+        const std::shared_ptr<DepthTarget>&);
+    void requireTemporalSceneOrigin(const std::shared_ptr<RenderTarget>&,
+        const std::shared_ptr<DepthTarget>&,std::array<float,2> sourceJitter);
+    void beginTemporalScene(const std::shared_ptr<RenderTarget>&,const std::shared_ptr<DepthTarget>&,uint64_t cameraIdentity,uint64_t cameraGeneration,bool reset=false);
+    std::shared_ptr<RenderTarget> reconstructTemporalScene(const std::shared_ptr<RenderTarget>&,const std::shared_ptr<DepthTarget>&);
+    std::shared_ptr<RenderTarget> prepareTemporalUiBackground(const std::shared_ptr<RenderTarget>&,const std::shared_ptr<DepthTarget>&,std::array<float,2> sourceJitter={});
+    // Actual current frame jitter in render pixels; requires active, qualified,
+    // unreconstructed coverage. Call before NGX evaluation or UI-only reset.
+    std::array<float,2> temporalSceneJitter() const;
+    bool temporalSceneActive() const;
+    bool temporalSceneHasGeometry() const;
+    bool temporalSceneOwnsTargets(const std::shared_ptr<RenderTarget>&,const std::shared_ptr<DepthTarget>&) const;
+    void rejectUntrackedTemporalWorldDraw(const std::shared_ptr<RenderTarget>&,const std::shared_ptr<DepthTarget>&,const char* kind);
+    void finishTemporalFrame();
+    void resetTemporalHistory();
+    // Native TAA (Antialiasing::TAA). The caller jitters the world projection
+    // and supplies the matrix from current jittered NDC to previous unjittered
+    // clip space. Resolves the selected scene color in place before post
+    // effects, keeping its alpha; history follows the color's physical extent.
+    struct NativeTemporalFrame {
+        std::array<std::array<float,4>,4> reprojection{}; // rows: previous = dot(row, ndc)
+        std::array<float,2> historyJitter{}; // uv shift to the history pixel centre
+        bool historyValid=false;
+    };
+    void resolveNativeTemporal(const std::shared_ptr<RenderTarget>& color,const std::shared_ptr<DepthTarget>& depth,
+        const NativeTemporalFrame& frame);
+    void resetNativeTemporal() noexcept;
+    bool nativeTemporalHistory() const noexcept;
+    uint64_t nativeTemporalResolveCount() const noexcept {return nativeTemporalResolves;}
+    // Ink outlines in the original edgeAA composite: RGB target and fade
+    // (0 original strength .. 1 none). Black at fade 0 is the original pass.
+    void configureInk(std::array<float,3> color,float fade);
+    // Character detail 0 Off, 1 Low, 2 Medium, 3 High: PN-triangle smoothing of
+    // skin meshes uploaded afterwards (set once at startup).
+    void configureCharacterDetail(uint32_t level) {characterDetail_=level<=3?level:0;}
+    uint32_t characterDetail() const noexcept {return characterDetail_;}
+    uint64_t skinDetailDrawCount() const noexcept {return skinDetailDraws;}
+    // Video menu "Character eyes": Clean lets the base skin family's rim flag
+    // count from 0.5. Live; re-records sealed skin draws. False while a
+    // recording session is active (retry at a later boundary).
+    bool configureCleanEyes(bool clean);
+    bool cleanEyes() const noexcept {return cleanEyes_;}
+    // Depth-only screen-space ambient occlusion over the finished world image.
+    // projection = row-vector P00, P11, P22, P32; offsets = P20, P21.
+    struct AmbientOcclusionFrame {
+        std::array<float,4> projection{};
+        std::array<float,2> offsets{};
+        uint32_t quality=1; // 1 Low, 2 High.
+        uint64_t frame{};
+    };
+    void applyAmbientOcclusion(const std::shared_ptr<RenderTarget>& color,const std::shared_ptr<DepthTarget>& depth,
+        const AmbientOcclusionFrame& frame);
+    // On-screen frame-rate counter, and edge-adaptive upscaling to the window
+    // (1) instead of DXGI's bilinear stretch (0) when the window is larger.
+    void configurePresentationExtras(bool fpsCounter,uint32_t upscaling);
+    double presentationFps() const noexcept {return fpsValue;}
+    // Colour look over the finished world image, before the HUD. look = exposure
+    // gain, saturation scale, vibrance, contrast scale. Alpha is kept.
+    void applyWorldLook(const std::shared_ptr<RenderTarget>& color,std::array<float,4> look);
+    // Copy a color target aside, then put that copy back (photo mode HUD removal).
+    void stashColor(const std::shared_ptr<RenderTarget>& color);
+    bool restoreStashedColor(const std::shared_ptr<RenderTarget>& color);
+    void configureSharpening(uint32_t percent);
+    void warmPresentationFilters();
+    uint32_t sharpening() const {return presentationSharpening;}
+    void configureFrameLatency(uint32_t frames);
+    uint32_t frameLatency() const {return maximumFrameLatency;}
     D3D11_SAMPLER_DESC materialSampling(D3D11_SAMPLER_DESC desc) const;
     D3D11_VIEWPORT renderViewport(const std::shared_ptr<RenderTarget>&,D3D11_VIEWPORT) const;
     D3D11_VIEWPORT contentViewport(const std::shared_ptr<RenderTarget>&,D3D11_VIEWPORT) const;
@@ -339,13 +545,15 @@ public:
     // Matching RGB10A2 swapchain, alpha ignored, explicit full-range SDR G22/P709.
     // No fallback/conversion; desktop output/gamma/scanout equivalence is unproven.
     void attachWindow(HWND window,uint32_t width,uint32_t height);
+    // Opt-in GPU timestamp attribution for this device (SIMPSONS_GPU_PROFILE=1).
+    void enableGpuTimeline();
     void configureVideoPresentation(bool vsync,uint32_t width,uint32_t height);
     // Packed RGB10A2 copies only. The original resolve source must be actual
     // OM color zero. Tokens own both resources; completion is not display acceptance.
     void validateFrontCopy(const std::shared_ptr<RenderTarget>& source,const std::shared_ptr<RenderTarget>& front) const;
     std::shared_ptr<NativeCopySubmission> copyFront(const std::shared_ptr<RenderTarget>& source,const std::shared_ptr<RenderTarget>& front);
-    // Exact full-subresource depth/stencil transfer. The source must be the
-    // actual selected DSV. No rounding, clear, sampling, draw or rebinding.
+    // Copies the exact full subresource; the original source must remain the
+    // actual selected DSV.
     void validateDepthCopy(const std::shared_ptr<DepthTarget>& source,const std::shared_ptr<DepthTarget>& destination) const;
     std::shared_ptr<NativeCopySubmission> copyDepth(const std::shared_ptr<DepthTarget>& source,const std::shared_ptr<DepthTarget>& destination);
     bool copyComplete(const std::shared_ptr<NativeCopySubmission>& submission);
@@ -384,6 +592,9 @@ public:
         std::span<NativeRecordingReceipt> receipts) const;
     void finishRecordingPayload(const std::shared_ptr<NativeRecordingPayload>&);
     void executeRecordingPayload(const std::shared_ptr<NativeRecordingPayload>&);
+    // Complete only this sealed payload's latest submitted execution before
+    // invalidating its replay owners. No new trailing-context event is added.
+    void waitRecordingPayload(const std::shared_ptr<NativeRecordingPayload>&);
     void releaseRecordingPayload(const std::shared_ptr<NativeRecordingPayload>&);
     uint64_t recordingDrawCount() const;
     uint64_t recordingExecutedDrawCount() const;
@@ -394,6 +605,13 @@ public:
     // supplied by the caller; D3D11 performs no mip generation or filtering.
     std::shared_ptr<Texture> createTextureMipChain(uint32_t width,uint32_t height,TextureFormat format,
         std::span<const std::span<const uint8_t>> levels);
+    // Optional background-create capability. Unsupported driver concurrency or
+    // installed diagnostic counters disables preparation, not synchronous use.
+    std::shared_ptr<const NativeImmutableMipFactory> immutableMipPreparationFactory() const;
+    // Main-owner admission: null/foreign/replaced identities return false;
+    // owner, immediate-context and device-availability errors still propagate.
+    // A matching capability does not replace actual validateTexture admission.
+    bool matchesImmutableMipPreparationFactory(const std::shared_ptr<const NativeImmutableMipFactory>&) const;
     // RGBA8/R8 only: allocate single-level DEFAULT storage with undefined initial
     // pixels. Writes replace the whole image using tightly packed rows: four
     // bytes per RGBA8 pixel, one per R8 pixel. R8 specifies no movie/YUV rendering.
@@ -462,6 +680,7 @@ public:
     // supported; general depth writes/rounding are not yet implemented.
     void clearDepthTarget(const std::shared_ptr<DepthTarget>& target,float depth,uint8_t stencil,
                           bool clearDepth=true,bool clearStencil=true);
+    // Snapshot one corresponding depth/stencil sample; ordinary targets use0.
     std::vector<uint8_t> readbackDepthTarget(const std::shared_ptr<DepthTarget>& target);
     std::vector<uint8_t> readbackTarget(const std::shared_ptr<RenderTarget>& target);
     void clearTarget(const std::shared_ptr<RenderTarget>& target,const std::array<float,4>& color);
@@ -541,6 +760,10 @@ public:
     ZPrepassConstants readbackZPrepassConstants(const std::shared_ptr<NativeZPrepassCommit>&);
     ZPrepassBooleans readbackZPrepassBooleans(const std::shared_ptr<NativeZPrepassCommit>&);
     std::shared_ptr<NativeZPrepassMesh> uploadZPrepassMesh(std::span<const ZPrepassVertex>,std::span<const uint16_t>);
+    // Cacheable successful misses consume the private decoded vector and all
+    // caller views of its storage. Hits, uncached results and exceptions leave
+    // it intact. GPU bytes/layout and the legacy span snapshot path are identical.
+    std::shared_ptr<NativeZPrepassMesh> uploadZPrepassMeshOwned(std::vector<ZPrepassVertex>&,std::span<const uint16_t>);
     void bindZPrepassMeshVertices(const std::shared_ptr<NativeZPrepassMesh>&);
     void bindZPrepassMeshDeclaration(const std::shared_ptr<NativeZPrepassMesh>&);
     void bindZPrepassMeshIndices(const std::shared_ptr<NativeZPrepassMesh>&);
@@ -585,6 +808,7 @@ public:
     RigidVertexConstants readbackRigidVertexConstants(const std::shared_ptr<NativeRigidCommit>&);
     RigidPixelConstants readbackRigidPixelConstants(const std::shared_ptr<NativeRigidCommit>&);
     std::shared_ptr<NativeRigidMesh> uploadRigidMesh(std::span<const RigidVertex>,std::span<const uint16_t>);
+    std::shared_ptr<NativeRigidMesh> uploadRigidMeshOwned(std::vector<RigidVertex>&,std::span<const uint16_t>);
     void bindRigidMeshVertices(const std::shared_ptr<NativeRigidMesh>&);
     void bindRigidMeshDeclaration(const std::shared_ptr<NativeRigidMesh>&);
     void bindVfxRigidMeshDeclaration(const std::shared_ptr<NativeRigidMesh>&);
@@ -703,10 +927,16 @@ public:
     uint64_t edgeAADrawCount() const {return edgeAADraws;}
     void clear(const std::array<float,4>& color);
     bool present(); // False means occluded; it does not count as a shown frame.
+    // DXGI's count of the latest Present and the statistics of the latest flip that
+    // reached the display (SyncQPCTime is a QueryPerformanceCounter value).
+    struct FlipStatistics {uint32_t present=0;bool valid=false;uint32_t displayedPresent=0;uint64_t syncQpc=0;};
+    FlipStatistics flipStatistics() const;
     uint64_t presentationCount() const {return presentations;}
     D3D_FEATURE_LEVEL level() const {return featureLevel;}
 private:
+    friend struct NativeUiCompositeProbe;
     friend struct NativeWritableTextureProbe;
+    friend struct NativeMipTextureProbe;
     friend struct EngineBindingResetProbe;
     friend struct NativePresentationProbe;
     friend struct NativeRecordingProbe;
@@ -717,12 +947,17 @@ private:
     friend struct NativeUltrawideProbe;
     friend struct NativeMovieProbe;
     friend struct NativeBufferUploadProbe;
+    friend struct NativeConstantArenaProbe;
     void requireOwner() const;
     void validateBufferWrite(const std::shared_ptr<Buffer>& buffer,uint32_t offset,std::span<const uint8_t> bytes) const;
     void uploadBuffer(ID3D11Buffer* buffer,uint32_t offset,std::span<const uint8_t> bytes);
     void flushIm2DBufferWrites();
     void drawIm2DImpl(const std::shared_ptr<RenderTarget>& target,const std::shared_ptr<DepthTarget>& depth,
                      const Im2DDraw& draw,bool allowBatch);
+    void drawImmediateImpl(const std::shared_ptr<RenderTarget>& target,const std::shared_ptr<DepthTarget>& depth,
+                           const ImmediateDraw& draw,bool directUNorm);
+    void drawParticlesImpl(const std::shared_ptr<RenderTarget>& target,const std::shared_ptr<DepthTarget>& depth,
+                           const ParticleDraw& draw,bool sparseSnapshots);
     void drawScreenImpl(const std::shared_ptr<RenderTarget>& target,const ScreenDraw& draw,
                         const std::shared_ptr<DepthTarget>& depth,bool original,bool depthWrite,uint32_t depthCompare,bool postDepthEnable);
     void invalidateScreenReplacement();
@@ -733,10 +968,51 @@ private:
     void rigidShaderObjects(const CompiledMaterial&,const CompiledMaterial&,ComPtr<ID3D11VertexShader>&,ComPtr<ID3D11PixelShader>&) const;
     void monoShaderObjects(const CompiledMaterial&,const CompiledMaterial&,ComPtr<ID3D11VertexShader>&,ComPtr<ID3D11PixelShader>&) const;
     ID3D11DeviceContext* checkedRecordingPayloadContext(const std::shared_ptr<NativeRecordingPayload>&) const;
+    // refresh re-derives a draw's storage views, physical viewport/scissor and
+    // filtered samplers from its owners before a live re-recording.
     void recordRecordingDraw(const std::shared_ptr<NativeRecordingPayload>&,std::span<const uint8_t>,
-        const std::shared_ptr<void>&,NativeRecordingPrepare,const std::function<void(ID3D11DeviceContext*)>&);
+        const std::shared_ptr<void>&,NativeRecordingPrepare,const std::function<void(ID3D11DeviceContext*)>&,
+        const std::function<void()>& submitted={},std::function<void()> refresh={});
+    // Live rendering changes. Old->new views of every re-backed target and the
+    // physical scale ratio between its storages.
+    struct LiveViewRemap {
+        struct Color {
+            ComPtr<ID3D11RenderTargetView> from,to;
+            ComPtr<ID3D11ShaderResourceView> sampledFrom,sampledTo;
+            std::array<float,2> scale{1,1};
+        };
+        struct Depth {
+            ComPtr<ID3D11DepthStencilView> from,to;
+            ComPtr<ID3D11ShaderResourceView> depthFrom,depthTo,stencilFrom,stencilTo;
+            std::array<float,2> scale{1,1};
+        };
+        std::vector<Color> colors;
+        std::vector<Depth> depths;
+        ID3D11RenderTargetView* map(ID3D11RenderTargetView*) const;
+        ID3D11DepthStencilView* map(ID3D11DepthStencilView*) const;
+        ID3D11ShaderResourceView* map(ID3D11ShaderResourceView*) const;
+        const std::array<float,2>* scale(ID3D11RenderTargetView*,ID3D11DepthStencilView*) const;
+        bool empty() const noexcept {return colors.empty()&&depths.empty();}
+    };
+    std::vector<std::weak_ptr<RenderTarget>> liveColorTargets;
+    std::vector<std::weak_ptr<DepthTarget>> liveDepthTargets;
+    std::vector<std::weak_ptr<NativeRecordingPayload>> liveRecordingPayloads;
+    template<class T> static void registerLive(std::vector<std::weak_ptr<T>>& registry,const std::shared_ptr<T>& value) {
+        // Drop expired owners once the registry doubles, keeping registration amortized O(1).
+        if(registry.size()>=64&&registry.size()==registry.capacity())
+            std::erase_if(registry,[](const std::weak_ptr<T>& entry){return entry.expired();});
+        registry.push_back(value);
+    }
+    bool recordingSessionActive() const;
+    uint32_t rerecordRecordingPayloads(const LiveViewRemap&);
+    LiveRenderingReceipt liveReceipt;
+    void remapEngineBindings(const LiveViewRemap&,std::array<float,2> oldScale);
+    std::shared_ptr<LiveRenderingPipeline> liveRenderingPipeline;
+    void stretchColor(const std::shared_ptr<RenderTarget>& source,const std::shared_ptr<RenderTarget>& destination);
+    void stretchDepth(const std::shared_ptr<DepthTarget>& source,const std::shared_ptr<DepthTarget>& destination);
     void retireRecordingPayloads();
     bool retireRecordingPayload(const std::shared_ptr<NativeRecordingPayload>&);
+    ComPtr<ID3D11Query> recordingCompletionQuery(const std::shared_ptr<NativeRecordingPayload>&) const;
     // In-flight payloads in the submission order of their CURRENT completion events (a
     // re-executed payload moves to the back), so retirement can stop at the first
     // incomplete event: events on the one immediate context signal in submission order.
@@ -755,7 +1031,23 @@ private:
     const D3D11_TEXTURE2D_DESC* provenDescriptor(ID3D11Texture2D* texture,TextureDescriptorProof& proof) const;
     void validateEdgeAAInputs(const EdgeAAInputs& inputs) const;
     std::shared_ptr<NativeCopySubmission> submitCopy(const std::shared_ptr<void>& sourceOwner,
-        const std::shared_ptr<void>& destinationOwner,ID3D11Texture2D* source,ID3D11Texture2D* destination);
+        const std::shared_ptr<void>& destinationOwner,ID3D11Texture2D* source,ID3D11Texture2D* destination,
+        const std::shared_ptr<RenderTarget>& copiedColor={},const std::shared_ptr<DepthTarget>& copiedDepth={});
+    std::shared_ptr<NativeUiCompositeBundle> promoteUiCompositeImpl(const std::shared_ptr<RenderTarget>& sceneColor,
+        const std::shared_ptr<DepthTarget>& sceneDepth,const std::shared_ptr<RenderTarget>& reconstructedColor,bool forceStencilFallback,
+        std::array<float,2> sourceJitter={});
+    ComPtr<ID3D11Buffer> uiCompositeTransferConstants() const;
+    void validateUiCompositeOwners() const;
+    void validateUiCompositeCopyRoles() const;
+    std::shared_ptr<NativeCopySubmission> submitSceneFeedback(const std::shared_ptr<RenderTarget>& sourceColor,
+        const std::shared_ptr<DepthTarget>& sourceDepth,const std::shared_ptr<RenderTarget>& destinationColor,
+        const std::shared_ptr<DepthTarget>& destinationDepth,std::array<float,2> jitter,uint32_t mask,
+        bool forceStencilFallback=false,std::shared_ptr<void> extraLease={});
+    bool sceneFeedbackViewsUnchanged(const std::shared_ptr<NativeSceneFeedbackFrame>&) const;
+    ComPtr<ID3D11Buffer> sceneFeedbackTransferConstants() const;
+    std::array<ComPtr<ID3D11Texture2D>,2> sceneFeedbackScratchResources() const;
+    std::array<ComPtr<ID3D11Texture2D>,2> sceneFeedbackCapturedResources() const;
+
     std::shared_ptr<NativeCopySubmission> submitFrontPresentation(const std::shared_ptr<RenderTarget>& front);
     bool pollCopy(const std::shared_ptr<NativeCopySubmission>& submission);
     void retireCopies();
@@ -767,7 +1059,8 @@ private:
     ComPtr<ID3D11RasterizerState> sceneRasterState(uint32_t cull,uint32_t scissorEnable);
     ComPtr<ID3D11BlendState> sceneBlendState(uint32_t enable,uint32_t word,uint32_t mask);
     ComPtr<ID3D11SamplerState> sceneSamplerState(const D3D11_SAMPLER_DESC& desc);
-    ComPtr<ID3D11Buffer> sceneDepthConstantBuffer(uint32_t reverse,uint32_t constantBits,uint32_t slopeBits);
+    // reserved: skin draw flags (bit 0 clean character eyes); 0 elsewhere.
+    ComPtr<ID3D11Buffer> sceneDepthConstantBuffer(uint32_t reverse,uint32_t constantBits,uint32_t slopeBits,uint32_t reserved=0);
     // Backend-owned DYNAMIC constant banks for per-draw material commits. Each
     // changed publish rewrites every byte through Map(WRITE_DISCARD): the driver renames
     // the storage, so already-queued draws keep exactly the bytes they were
@@ -777,13 +1070,24 @@ private:
     // generation; a commit is valid only while it
     // holds its bank's latest generation, so a stale commit still rejects.
     enum ConstantBankId : size_t {ZPrepassBank,MonoBank,ShadowDepthBank,RigidVertexBank,RigidPixelBank,
-        SkinVertexBank,SkinPixelBank,SkyVertexBank,SkyPixelBank,ConstantBankCount};
+        SkinVertexBank,SkinPixelBank,SkyVertexBank,SkyPixelBank,ImmediateVertexBank,ImmediatePixelBank,ConstantBankCount};
     struct ConstantBank {ComPtr<ID3D11Buffer> buffer;ComPtr<ID3D11Device> device;UINT bytes{};uint64_t generation{};
-        mutable BufferDescriptorProof proof;std::vector<uint8_t> contents;bool contentsValid=false;};
+        mutable BufferDescriptorProof proof;std::vector<uint8_t> contents;bool contentsValid=false;
+        detail::ConstantBufferSlice latestSlice;
+        UINT arenaCursor{};bool publicationValid{};
+        uint64_t arenaDiscardMaps{},arenaNoOverwriteMaps{};};
     std::array<ConstantBank,ConstantBankCount> constantBanks;
     // Fully validated caller bytes only; returns the new generation.
     uint64_t publishConstants(ConstantBankId bank,const void* bytes,UINT size,ComPtr<ID3D11Buffer>& published);
     void requireConstantBank(ConstantBankId bank,ID3D11Buffer* buffer,uint64_t generation,UINT size,const char* what) const;
+    detail::ConstantBufferSlice publishConstantSlice(ConstantBankId bank,const void* bytes,UINT size);
+    void requireConstantSlice(ConstantBankId bank,const detail::ConstantBufferSlice& slice,UINT expectedBytes,const char* what) const;
+    void readConstantSlice(ConstantBankId bank,const detail::ConstantBufferSlice& slice,std::span<uint8_t> output) const;
+    ComPtr<ID3D11DeviceContext1> constantBindingContext() const;
+    mutable ComPtr<ID3D11DeviceContext> constantBindingBaseContext;
+    mutable ComPtr<ID3D11Device> constantBindingDevice;
+    mutable ComPtr<ID3D11DeviceContext1> constantBindingContext1;
+    mutable bool constantArenaSupported{};
     // Immutable EDGE/AA constants: bounded exact-byte reuse on this device.
     // Commit generations still reject stale owners even when their bytes match.
     struct EdgeConstantEntry {UINT bytes{};std::array<uint8_t,sizeof(EdgeAAConstants)> contents{};ComPtr<ID3D11Buffer> buffer;};
@@ -806,7 +1110,10 @@ private:
     DWORD owner{};
     bool vsyncEnabled=true;
     uint32_t internalWidth=1280,internalHeight=720,textureAnisotropy=1;
-    uint32_t renderBaseWidth=1280,renderBaseHeight=720;
+    TextureFilter textureFilterMode=TextureFilter::Original;
+    uint32_t shadowQualityLevel=1; // 0..3: 512, 1024 (original), 2048, 4096 shadow maps.
+    uint32_t outputWidth=1280,outputHeight=720;
+    uint32_t renderBaseWidth=1280,renderBaseHeight=720,renderScalePercent=100;
     struct ViewportReceipt {
         D3D11_VIEWPORT physical{},logical{};std::array<float,2> scale{};bool valid=false;
     } viewportReceipt;
@@ -814,8 +1121,74 @@ private:
         D3D11_RECT physical{};std::array<uint32_t,4> logical{};std::array<float,2> scale{};bool valid=false;
     } scissorReceipt;
     Antialiasing antialiasingMode=Antialiasing::Original;
+    uint32_t presentationSharpening=0,maximumFrameLatency=1;
+    std::shared_ptr<NvidiaDlss> nvidiaDlss;
+    std::shared_ptr<TemporalScenePipeline> temporalScene;
+    std::shared_ptr<RenderTarget> temporalOutput;
+    std::vector<std::array<float,4>> temporalVertexConstants() const;
+    std::shared_ptr<TemporalGeometryDraw> temporalGeometryDraw(const std::shared_ptr<RenderTarget>&,
+        const std::shared_ptr<DepthTarget>&,const ShadowMeshDraw&,uint32_t shader,uint32_t kind,bool recorded=false);
     std::shared_ptr<AntialiasingPipeline> antialiasingPipeline;
-    std::shared_ptr<RenderTarget> antialiasingOutput,lastPresentedFront;
+    std::shared_ptr<NativeTemporalPipeline> nativeTemporalPipeline;
+    std::shared_ptr<ScenePostPipeline> scenePostPipeline;
+    std::shared_ptr<PresentationExtrasPipeline> presentationExtrasPipeline;
+    std::shared_ptr<AmbientOcclusionPipeline> ambientOcclusionPipeline;
+    std::shared_ptr<RenderTarget> overlayCanvas;
+    bool fpsOverlayEnabled=false;
+    uint32_t presentationUpscaling=0;
+    double fpsValue=0;
+    int64_t fpsWindowStart=0;
+    uint64_t fpsFrames=0;
+    void notePresentationForCounter() noexcept;
+    PresentationExtrasPipeline& presentationExtras();
+    void drawFpsOverlay(const std::shared_ptr<RenderTarget>& target);
+    void drawUpscaled(const std::shared_ptr<RenderTarget>& source,const std::shared_ptr<RenderTarget>& canvas,std::array<float,4> rectangle);
+    uint64_t nativeTemporalResolves{};
+    std::array<float,8> inkValues{};
+    ComPtr<ID3D11Texture2D> colorStash,colorStashSource;
+    ComPtr<ID3D11Buffer> inkConstants;
+    // One registered main Scene pair; private/shadow/output targets do not
+    // acquire its receipts by dimensions or guest camera alias.
+    std::optional<NativeTemporalSceneOrigins> temporalOrigins;
+    struct TemporalOriginPins {
+        ComPtr<ID3D11Device> device;
+        ComPtr<ID3D11DeviceContext> context;
+        ComPtr<ID3D11Texture2D> colorTexture,depthTexture;
+        ComPtr<ID3D11RenderTargetView> colorView;
+        ComPtr<ID3D11DepthStencilView> depthView;
+    };
+    std::optional<TemporalOriginPins> temporalOriginPins;
+    void validateTemporalSceneOriginOwners() const;
+    void noteTemporalSceneClear(const std::shared_ptr<RenderTarget>&,
+        const std::shared_ptr<DepthTarget>&,uint32_t componentMask);
+    void noteTemporalSceneDraw(const std::shared_ptr<RenderTarget>&,
+        const std::shared_ptr<DepthTarget>&,uint32_t colorMask,bool depthWrite,bool stencilWrite,
+        std::optional<std::array<float,2>> rasterJitter={});
+    void noteTemporalSceneCopy(ID3D11Texture2D* source,ID3D11Texture2D* destination);
+    // Bounded strong copy snapshots. Tokens never expose caller-set origins.
+    std::array<std::shared_ptr<NativeCopySubmission>,8> temporalCopiedOrigins{};
+    uint64_t temporalCopyEpoch{};
+    size_t temporalCopiedOriginNext{};
+    void captureTemporalCopiedOrigin(const std::shared_ptr<NativeCopySubmission>&,
+        const std::shared_ptr<RenderTarget>&,const std::shared_ptr<DepthTarget>&);
+    void publishTemporalCopiedOrigin(const std::shared_ptr<NativeCopySubmission>&);
+    void invalidateTemporalCopiedOrigin(ID3D11Texture2D* destination) noexcept;
+    std::shared_ptr<NativeCopySubmission> temporalCopiedOrigin(ID3D11Texture2D*,uint32_t component) const;
+    TemporalRasterOrigin requireTemporalCopiedOrigin(const std::shared_ptr<NativeCopySubmission>&,
+        ID3D11Texture2D*,uint32_t component) const;
+    void publishTemporalFilterColor(const NativeTemporalSceneOrigins&,const TemporalRasterOrigin&);
+    // Feedback is published by the actual owned transfer implementation only.
+    // Both checks are CPU-only and modify no pixels; callers validate BEFORE
+    // transfer and publish AFTER submission on this same immediate context.
+    void validateTemporalSceneFeedback(const NativeTemporalSceneOrigins& expected,uint32_t mask) const;
+    void publishTemporalSceneFeedback(const NativeTemporalSceneOrigins& expected,uint32_t mask,
+        std::array<float,2> destinationJitter);
+    std::shared_ptr<SceneFeedbackPipeline> sceneFeedbackPipeline;
+    std::shared_ptr<UiCompositePipeline> uiCompositePipeline;
+    std::shared_ptr<NativeUiCompositeBundle> uiComposite;
+    std::shared_ptr<UiCompositeCopyRoles> uiCompositeCopyRoles;
+    uint64_t uiCompositeCopyEpoch{};
+    std::shared_ptr<RenderTarget> antialiasingOutput,lastPresentedFront,lastDisplayedImage;
     std::shared_ptr<RenderTarget> presentationCanvas;
     bool renderingAllocated=false;
     std::array<uint32_t,2> renderExtent(uint32_t width,uint32_t height,TargetScale) const;
@@ -825,7 +1198,7 @@ private:
     uint32_t presentationSourceWidth=0,presentationSourceHeight=0;
     uint32_t presentationLogicalWidth=0,presentationLogicalHeight=0;
     std::array<uint32_t,2> presentationExtent(uint32_t sourceWidth,uint32_t sourceHeight,uint32_t clientWidth,uint32_t clientHeight,
-        uint32_t logicalWidth,uint32_t logicalHeight) const;
+        uint32_t logicalWidth,uint32_t logicalHeight,bool upscale=true) const;
     bool tearingEnabled=false;
     uint64_t presentations=0;
     uint64_t screenDraws=0;
@@ -891,8 +1264,16 @@ private:
     // rigid_mesh.cpp / shadow_mesh.cpp / sky_mesh.cpp; shared_ptr tolerates the
     // incomplete type at teardown.
     std::shared_ptr<ZPrepassMeshUploadCache> zprepassMeshCache_;
+    // Shared static +0 attributes survive geometry cache resets. Live meshes
+    // pin their own bank; device replacement publishes a new device-owned bank.
+    std::shared_ptr<const ZPrepassZeroStream> zprepassZeroStream_;
     std::shared_ptr<MonoMeshUploadCache> monoMeshCache_;
     std::shared_ptr<SkinMeshUploadCache> skinMeshCache_;
+    uint32_t characterDetail_{};
+    bool cleanEyes_{};
+    uint64_t skinDetailDraws{};
+    uint32_t skinDetailUploads_{}; // Smoothed ranges uploaded since the last present.
+    std::shared_ptr<SkinDetailWorker> skinDetailWorker_;
     std::shared_ptr<RigidMeshUploadCache> rigidMeshCache_;
     std::shared_ptr<ShadowMeshUploadCache> shadowMeshCache_;
     std::shared_ptr<SkyMeshUploadCache> skyMeshCache_;
@@ -921,9 +1302,11 @@ private:
     struct SceneSamplerEntry { bool used=false; D3D11_SAMPLER_DESC desc{}; ComPtr<ID3D11SamplerState> state; };
     std::array<SceneSamplerEntry,16> sceneSamplers;
     size_t sceneSamplerNext=0;
-    struct SceneDepthConstantEntry { bool used=false; uint32_t reverse=0,constantBits=0,slopeBits=0; ComPtr<ID3D11Buffer> buffer; };
+    struct SceneDepthConstantEntry { bool used=false; uint32_t reverse=0,constantBits=0,slopeBits=0,reserved=0; ComPtr<ID3D11Buffer> buffer; };
     std::array<SceneDepthConstantEntry,8> sceneDepthConstants;
     size_t sceneDepthConstantNext=0;
     void resetSceneStateCacheForDevice();
+    std::shared_ptr<NativeZPrepassMesh> uploadZPrepassMeshImpl(std::span<const ZPrepassVertex>,std::span<const uint16_t>,std::vector<ZPrepassVertex>*);
+    std::shared_ptr<NativeRigidMesh> uploadRigidMeshImpl(std::span<const RigidVertex>,std::span<const uint16_t>,std::vector<RigidVertex>*);
 };
 }

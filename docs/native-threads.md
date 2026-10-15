@@ -63,6 +63,11 @@ delay, following the completion distinction in
 APC enqueue/delivery is still unsupported: alertable calls use the native empty
 queue; an unknown native APC wake fails explicitly. Nonzero waits also listen
 for the runtime cancellation event, so worker failure does not strand a sleeper.
+Nonzero delays use a per-thread high-resolution waitable timer: a guest
+`Sleep(1)` took about 1 ms on the console, but a wait timeout follows the host's
+timer resolution (15.6 ms by default), which turned occasional main-thread
+`Sleep(1)` calls into 10-15 ms frames. The process-wide timer resolution is
+unchanged. `NativeMemoryContract` checks a 1 ms delay's median and an absolute expiry.
 
 Affinity uses the verified Xbox three-argument ABI: thread object, new mask,
 optional previous-mask pointer; the result is NTSTATUS. Single-bit masks for

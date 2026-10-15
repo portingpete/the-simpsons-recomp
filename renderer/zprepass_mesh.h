@@ -4,7 +4,8 @@
 
 namespace Simpsons::Graphics {
 // Original FETCH order, already decoded by the CPU owner. All nine attributes
-// exist even in the bounded static profile, whose eight unused inputs are zero.
+// exist in the logical/cache/readback profile. Static GPU storage packs position
+// separately and fetches the eight validated +0 inputs from one immutable bank.
 struct ZPrepassVertex {
     std::array<float,3> position{};
     std::array<float,4> weights{},indices{};

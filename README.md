@@ -3,7 +3,7 @@
 A development port of the US Xbox 360 version of The Simpsons Game, title
 `45410809`, for Windows x64. The project uses offline PowerPC-to-C++ translation
 compiled ahead of time, handwritten native platform services, and a native
-Direct3D 11 renderer.
+renderer that runs on Direct3D 11 or, optionally, [Vulkan](docs/native-vulkan-renderer.md).
 
 This repository contains the current native port project: application, runtime,
 renderer, audio, build tools, tests, configuration, documentation, custom input
@@ -13,8 +13,15 @@ art, and vendored translator dependencies.
 
 The existing local build loads all levels. Full gameplay testing across those
 levels is still incomplete. The port includes movement and jumping, native
-mouse and keyboard input, native video settings, first-mission completion, and
-rendering and crash fixes. The port is still in development; progression,
+mouse and keyboard input with rebindable controls and button prompts, a free
+camera and photo mode, a master volume control, first-mission completion, and
+rendering and crash fixes. The [Video menu](docs/native-video-settings.md) adds
+windowed, borderless and exclusive fullscreen modes, display resolution and
+refresh rate, VSync and frame limits, internal resolution that matches the
+display, FXAA/SMAA/TAA, texture filtering and anisotropy, shadow quality,
+ambient occlusion, colour looks, ink outline and eye options, smoothed
+character meshes, switches for each original screen effect, an FPS counter,
+intro skipping and the New Game starting episode. The port is still in development; progression,
 stability, visual fidelity, and performance need further testing and refinement.
 
 Sound is enabled by default. Use `--mute-audio` for muted diagnostic runs.

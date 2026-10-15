@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include "VSZPrepass.h"
+#include "VSZPrepassTemporal.h"
 #include "../renderer/zprepass_mesh.h"
 #include <limits>
 #include "GSZPrepassProbe.h"
@@ -44,13 +45,14 @@ std::array<double,4> expected(const Vertex& v,const Constants& c,uint32_t skin) 
 }
 struct Fixture {
     ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;
-    ComPtr<ID3D11VertexShader> vertex;ComPtr<ID3D11GeometryShader> probe;
-    ComPtr<ID3D11InputLayout> layout;ComPtr<ID3D11Buffer> constants,booleans;
+    ComPtr<ID3D11VertexShader> vertex,temporalVertex;ComPtr<ID3D11GeometryShader> probe;
+    ComPtr<ID3D11InputLayout> layout;ComPtr<ID3D11Buffer> constants,booleans,temporalControls;
     Fixture(bool hardware) {
         D3D_FEATURE_LEVEL level{};
         hr(D3D11CreateDevice(nullptr,hardware?D3D_DRIVER_TYPE_HARDWARE:D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,&level,&context),"device");
         std::printf("Z-prepass VS %s feature_level=%X\n",hardware?"hardware":"WARP",unsigned(level));
         hr(device->CreateVertexShader(kVSZPrepass,sizeof(kVSZPrepass),nullptr,&vertex),"actual vertex shader");
+        hr(device->CreateVertexShader(kVSZPrepassTemporal,sizeof(kVSZPrepassTemporal),nullptr,&temporalVertex),"jitter-only vertex wrapper");
         std::array<D3D11_INPUT_ELEMENT_DESC,9> inputs{};
         inputs[0]={"TEXCOORD",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0};
         inputs[1]={"TEXCOORD",1,DXGI_FORMAT_R32G32B32A32_FLOAT,0,12,D3D11_INPUT_PER_VERTEX_DATA,0};
@@ -63,11 +65,19 @@ struct Fixture {
         D3D11_BUFFER_DESC desc{};desc.ByteWidth=sizeof(Constants);desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
         hr(device->CreateBuffer(&desc,nullptr,&constants),"original constant bank");
         desc.ByteWidth=16;hr(device->CreateBuffer(&desc,nullptr,&booleans),"independent Boolean bank");
+        hr(device->CreateBuffer(&desc,nullptr,&temporalControls),"jitter-only control bank");
         context->IASetInputLayout(layout.Get());context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
         context->VSSetShader(vertex.Get(),nullptr,0);context->GSSetShader(probe.Get(),nullptr,0);context->PSSetShader(nullptr,nullptr,0);
         ID3D11Buffer* cb[]={constants.Get(),booleans.Get()};context->VSSetConstantBuffers(0,2,cb);
     }
-    void verify(const std::vector<Vertex>& input,const Constants& c,uint32_t skin) {
+    void verify(const std::vector<Vertex>& input,const Constants& c,uint32_t skin,
+                bool temporal=false,const std::array<float,4>& sample={}) {
+        context->VSSetShader(temporal?temporalVertex.Get():vertex.Get(),nullptr,0);
+        if(temporal) {
+            need(sample[2]>0&&sample[3]>0,"Temporal vertex oracle requires physical extents");
+            context->UpdateSubresource(temporalControls.Get(),0,nullptr,sample.data(),0,0);
+            auto* buffer=temporalControls.Get();context->VSSetConstantBuffers(11,1,&buffer);
+        }
         const std::array<uint32_t,4> flags={skin,0,0,0};context->UpdateSubresource(booleans.Get(),0,nullptr,flags.data(),0,0);
         context->UpdateSubresource(constants.Get(),0,nullptr,c.data(),0,0);
         D3D11_BUFFER_DESC desc{};desc.ByteWidth=UINT(input.size()*sizeof(Vertex));desc.BindFlags=D3D11_BIND_VERTEX_BUFFER;
@@ -88,7 +98,13 @@ struct Fixture {
              statistics.PrimitivesStorageNeeded==input.size(),"Actual VS output count differs");
         ++draws;observedVertices+=input.size();
         for(size_t i=0;i<input.size();++i) {
-            const auto want=expected(input[i],c,skin);const auto& got=observed[i];
+            auto want=expected(input[i],c,skin);const auto& got=observed[i];
+            // Independent screen-space oracle: preserve original perspective
+            // division, then translate raster X/Y by the render-pixel sample.
+            if(temporal) {
+                want[0]=(want[0]/want[3]+2*double(sample[0])/sample[2])*want[3];
+                want[1]=(want[1]/want[3]-2*double(sample[1])/sample[3])*want[3];
+            }
             for(size_t lane=0;lane<4;++lane) {
                 const auto tolerance=0.0001+std::abs(want[lane])*0.000003;
                 if(!std::isfinite(got.position[lane]) || std::abs(got.position[lane]-want[lane])>tolerance) {
@@ -136,6 +152,11 @@ int main(int argc,char** argv)try {
         f.verify(one,c,1);
     }
     f.verify(vertices,c,0xFFFFFFFFu);
+    // Nonzero clip W, both signed axes, DLAA-sized and lower-resolution Scene
+    // extents. The wrapper must preserve exact Z/W and original Boolean path.
+    for(const auto extent:std::array<std::array<float,2>,3>{{{1280,720},{853,480},{426,240}}})
+        for(const auto jitter:std::array<std::array<float,2>,3>{{{.375f,-.25f},{-.25f,.375f},{0,0}}})
+            f.verify(vertices,c,0,true,{jitter[0],jitter[1],extent[0],extent[1]});
     // When the Boolean bank is false, even NaNs in every unused FETCH and
     // float register must be ignored. c40.x cannot turn on shadow-style skinning.
     const float nan=std::numeric_limits<float>::quiet_NaN();auto dead=vertices;auto unused=c;

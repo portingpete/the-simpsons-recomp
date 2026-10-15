@@ -31,7 +31,7 @@ void NativeBackend::bindTargets(const std::array<std::shared_ptr<RenderTarget>,4
         if(!proven) throw Error("Native target binding belongs to another graphics device");
         const D3D11_TEXTURE2D_DESC desc=*proven;
         if(desc.SampleDesc.Count!=1 || desc.SampleDesc.Quality || desc.ArraySize!=1 || desc.MipLevels!=1)
-            throw Error("Native target binding exceeds the single-sample engine profile");
+            throw Error("Native target binding differs from the owned single-sample profile");
         if(width && (width!=desc.Width || height!=desc.Height)) throw Error("Native target attachment dimensions differ");
         width=desc.Width;height=desc.Height;
     };

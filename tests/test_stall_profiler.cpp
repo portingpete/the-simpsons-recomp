@@ -67,6 +67,13 @@ int64_t total(const SP::Testing::Snapshot& snapshot) noexcept {
     return result;
 }
 
+struct ContributorLimitOverride {
+    explicit ContributorLimitOverride(unsigned limit) noexcept { SP::Testing::setContributorLimit(limit); }
+    ~ContributorLimitOverride() noexcept { SP::Testing::setContributorLimit(0); }
+    ContributorLimitOverride(const ContributorLimitOverride&) = delete;
+    ContributorLimitOverride& operator=(const ContributorLimitOverride&) = delete;
+};
+
 PPCContext context(uint32_t pc, uint32_t caller) {
     PPCContext result{};
     result.lastFunction = pc;
@@ -290,11 +297,117 @@ void tableSaturation() {
     check(contains("untracked_contributor_ms=") && !contains("untracked_contributor_ms=0.000"), "Table saturation was silent");
 }
 
+void contributorLimitParsing() {
+    struct Case { const char* value; unsigned expected; };
+    constexpr Case cases[] = {
+        {nullptr,8},{"",8},{"8",8},{"9",9},{"10",10},{"16",16},{"31",31},{"32",32},
+        {"0",8},{"7",8},{"33",8},{"99",8},{"-8",8},{"+8",8},{" 8",8},{"8 ",8},
+        {"8x",8},{"08",8},{"032",8},{"320",8},{"4294967295",8},{"8\n",8}
+    };
+    for (const auto& item : cases) {
+        setHost();
+        const unsigned actual = SP::Testing::parseContributorLimit(item.value);
+        preserved("Contributor limit parser altered host state");
+        check(actual == item.expected, "Contributor limit parser accepted a noncanonical/out-of-range value");
+    }
+}
+
+struct RankedFrame {
+    SP::Testing::Snapshot first{}, second{};
+    std::array<std::array<char,512>,32> rows{};
+    unsigned rowCount{}, clockCount{};
+    int64_t emittedTicks{};
+};
+
+RankedFrame rankedFrame(unsigned limit) {
+    const ContributorLimitOverride overrideLimit(limit);
+    clearLog(); timestamp = 0; clockReads = 0; logCost = 7;
+    std::array<std::array<char,24>,40> names{};
+    for (unsigned index = 0; index < names.size(); ++index)
+        std::snprintf(names[index].data(), names[index].size(), "Rank%02u", index);
+    PPCContext ctx = context(0x82090000, 0x82090104);
+    std::array<uint8_t,sizeof(PPCContext)> original{};
+    std::memcpy(original.data(), &ctx, sizeof(ctx));
+    RankedFrame result;
+    setHost();
+    {
+        SP::ThreadScope owner(&ctx,true);
+        for (unsigned index = 0; index < names.size(); ++index) {
+            SP::Scope scope(SP::Section::Runtime,names[index].data(),&ctx,index,0x1234);
+            timestamp += int64_t(index + 1) * 1000;
+        }
+        preserved("Contributor collection altered host state");
+        const int64_t beforeEmission = timestamp;
+        SP::frameBoundary(&ctx);
+        preserved("Expanded contributor emission altered host state");
+        result.emittedTicks = timestamp - beforeEmission;
+        result.first = SP::Testing::completedFrame();
+        timestamp += 1000;
+        SP::frameBoundary(&ctx);
+        preserved("Expanded logging accounting altered host state");
+        result.second = SP::Testing::completedFrame();
+    }
+    preserved("Contributor fixture teardown altered host state");
+    check(std::memcmp(original.data(),&ctx,sizeof(ctx)) == 0, "Expanded contributor logging changed guest context/padding");
+    result.clockCount = clockReads;
+    check(ticks(result.first,SP::Section::Runtime) == 820000 && result.first.diagnosticTicks == 38 * 7,
+          "Contributor limit changed collected work or inclusive-call diagnostic accounting");
+    check(total(result.first) == result.first.frameTicks && result.first.frameTicks == 820000 + 38 * 7,
+          "Expanded contributor selection changed owner interval accounting");
+    check(ticks(result.second,SP::Section::Guest) == 1000 && result.second.diagnosticTicks == result.emittedTicks &&
+          total(result.second) == result.second.frameTicks,
+          "Expanded row emission leaked into next-frame guest work or lost diagnostic cost");
+    check(contains("untracked_contributor_ms=0.000"), "Rank fixture lost contributors to table saturation");
+    const char* cursor = logBytes.data();
+    while ((cursor = std::strstr(cursor,"[STALL] frame="))) {
+        const char* end = std::strchr(cursor,'\n');
+        check(end != nullptr, "Contributor row was truncated");
+        const char* rank = std::strstr(cursor," rank=");
+        if (rank && rank < end) {
+            unsigned number{};
+            char name[24]{};
+            double exclusive{}, slice{};
+            check(sscanf_s(rank," rank=%u contributor=%23s section=runtime exclusive_ms=%lf largest_slice_ms=%lf",
+                           &number,name,unsigned(sizeof(name)),&exclusive,&slice) == 4,
+                  "Contributor row schema changed");
+            check(number == result.rowCount + 1 && number <= limit, "Contributor ranks were missing, duplicated, or out of bounds");
+            char expected[24]{};
+            std::snprintf(expected,sizeof(expected),"Rank%02u",40 - number);
+            check(std::strcmp(name,expected) == 0 && exclusive == double(41 - number) && slice == exclusive,
+                  "Expanded selection failed the independent descending-rank/tick oracle");
+            const size_t length = size_t(end - cursor);
+            check(length < result.rows[result.rowCount].size(), "Contributor line exceeded fixture storage");
+            std::memcpy(result.rows[result.rowCount].data(),cursor,length);
+            ++result.rowCount;
+        }
+        cursor = end + 1;
+    }
+    check(result.rowCount == limit, "Contributor limit did not emit the complete selected inventory");
+    return result;
+}
+
+void expandedContributorRanking() {
+    const auto normal = rankedFrame(8);
+    const auto expanded = rankedFrame(32);
+    for (unsigned index = 0; index < normal.rowCount; ++index)
+        check(normal.rows[index] == expanded.rows[index], "Default eight contributor rows changed ordering, schema, or details");
+    for (unsigned index = 0; index < static_cast<unsigned>(SP::Section::Count); ++index)
+        check(normal.first.sections[index] == expanded.first.sections[index] &&
+              normal.second.sections[index] == expanded.second.sections[index],
+              "Contributor limit changed exclusive section accounting");
+    check(normal.first.frameTicks == expanded.first.frameTicks && normal.first.diagnosticTicks == expanded.first.diagnosticTicks,
+          "Contributor limit changed accounting before its own output");
+    check(expanded.emittedTicks - normal.emittedTicks == 24 * 7,
+          "Additional row logging was not charged as exactly its diagnostic cost");
+    check(normal.clockCount == expanded.clockCount, "Expanded contributors added per-row clock reads");
+}
+
 void disabledFastPath() {
     check(!SP::enabled, "Disabled fixture requires SIMPSONS_STALL_PROFILE=0");
     clearLog(); timestamp = 0; clockReads = 0;
     PPCContext ctx = context(0x82080000, 0x82080104);
     const PPCContext original = ctx;
+    const ContributorLimitOverride expanded(32);
     setHost();
     {
         SP::ThreadScope owner(&ctx, true);
@@ -307,6 +420,84 @@ void disabledFastPath() {
     check(clockReads == 0 && logSize == 0 && !SP::Testing::snapshot().registered,
           "Disabled profiler read clock, logged, or created TLS registration");
     check(std::memcmp(&ctx, &original, sizeof(ctx)) == 0, "Disabled profiler changed guest context");
+}
+
+struct ClockRecord {
+    unsigned long pid{}, tid{};
+    unsigned long long generation{}, frame{};
+    long long begin{}, end{}, frequency{};
+};
+
+ClockRecord clockRecord() {
+    const char* line = std::strstr(logBytes.data(), "[STACK FRAME CLOCK]");
+    check(line != nullptr, "Sampled process frame clock record missing");
+    ClockRecord result;
+    const int values = sscanf_s(line,
+        "[STACK FRAME CLOCK] schema=1 pid=%lu tid=%lu generation=%llu frame=%llu owner=1 begin_qpc=%lld end_qpc=%lld frequency=%lld",
+        &result.pid, &result.tid, &result.generation, &result.frame,
+        &result.begin, &result.end, &result.frequency);
+    check(values == 7, "Sampled process frame clock metadata malformed");
+    return result;
+}
+
+void sampledProcessFrameClocks() {
+    check(SP::enabled && GetEnvironmentVariableA("SIMPSONS_STACK_SAMPLE", nullptr, 0) > 1,
+          "Clock fixture requires profiler and sampler opt-in");
+    clearLog(); timestamp = 1000; clockReads = 0;
+    PPCContext ctx = context(0x82081000, 0x82081104);
+    const PPCContext original = ctx;
+    uint64_t generation{};
+    setHost();
+    {
+        SP::ThreadScope owner(&ctx, true);
+        logCost = 100; timestamp = 1500;
+        SP::frameBoundary(&ctx);
+        preserved("Sampled frame clock logging altered host state");
+        check(!contains("[STALL] frame=") && occurrences("[STACK FRAME CLOCK]") == 1,
+              "Fast sampled frame omitted clock or emitted slow-frame summary");
+        auto first = clockRecord();
+        generation = first.generation;
+        check(first.pid == GetCurrentProcessId() && first.tid == GetCurrentThreadId() &&
+              first.frame == 1 && generation > 0 && first.frequency == 1000000 &&
+              first.begin == 1000 && first.end == 1500,
+              "Frame clock used another process/thread/frame/clock domain");
+        auto completed = SP::Testing::completedFrame();
+        check(completed.frameTicks == 500 && ticks(completed, SP::Section::Guest) == 500 &&
+              total(completed) == 500 && clockReads == 3,
+              "Frame clock changed completed work or reread its boundary timestamp");
+        clearLog(); timestamp = 2500;
+        SP::frameBoundary(&ctx);
+        preserved("Following sampled frame altered host state");
+        auto second = clockRecord();
+        check(second.frame == 2 && second.generation == generation && second.begin == 1500 &&
+              second.end == 2500, "Frame clock IDs/intervals do not form consecutive owner frames");
+        completed = SP::Testing::completedFrame();
+        check(completed.frameTicks == 1000 && completed.diagnosticTicks == 100 &&
+              ticks(completed, SP::Section::Guest) == 900 && total(completed) == 1000,
+              "Clock record logger cost was charged as guest work or lost");
+        check(std::memcmp(&ctx, &original, sizeof(ctx)) == 0, "Frame clock changed guest context");
+    }
+    preserved("Sampled owner teardown altered host state");
+    clearLog(); timestamp = 10000;
+    {
+        SP::ThreadScope reused(&ctx, true);
+        timestamp = 10100; SP::frameBoundary();
+        auto reset = clockRecord();
+        check(reset.frame == 1 && reset.generation != generation && reset.begin == 10000 &&
+              reset.end == 10100, "Reused owner clock retained old interval/frame identity");
+    }
+    clearLog(); timestamp = 20000;
+    {
+        SP::ThreadScope worker(&ctx, false);
+        const unsigned reads = clockReads;
+        timestamp = 30000; SP::frameBoundary();
+        check(clockReads == reads && logSize == 0,
+              "Worker emitted owner frame metadata or sampled another clock");
+    }
+    clearLog();
+    const unsigned reads = clockReads;
+    SP::frameBoundary();
+    check(clockReads == reads && logSize == 0, "Unregistered frame emitted sample correlation metadata");
 }
 
 void benchmark() {
@@ -340,6 +531,7 @@ int main(int argc, char** argv) {
         SP::Testing::setLogSink(capture);
         if (argc > 1 && std::strcmp(argv[1], "--benchmark") == 0) { benchmark(); return 0; }
         if (argc > 1 && std::strcmp(argv[1], "--disabled") == 0) disabledFastPath();
+        else if (argc > 1 && std::strcmp(argv[1], "--clock-records") == 0) sampledProcessFrameClocks();
         else {
             check(SP::enabled, "Enabled fixture requires SIMPSONS_STALL_PROFILE=1");
             thresholdsAndPreservation();
@@ -349,6 +541,8 @@ int main(int argc, char** argv) {
             threadIsolationAndReuse();
             exceptionsAndUnregisteredCalls();
             tableSaturation();
+            contributorLimitParsing();
+            expandedContributorRanking();
         }
         PPCFPSCRRegister::restoreHostCSR(PPCFPSCRRegister::DefaultCSR);
         std::printf("Stall profiler tests: %zu checks passed\n", checks);

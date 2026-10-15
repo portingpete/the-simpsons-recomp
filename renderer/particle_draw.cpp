@@ -2,6 +2,11 @@
 #include "VSParticle.h"
 #include "VSParticleType5.h"
 #include "PSParticleDraw.h"
+#include "PSParticleSnapshotDraw.h"
+#include "PSParticleUNormDraw.h"
+#include "PSParticleProjectedUNormDraw.h"
+#include "PSParticleDualUNormDraw.h"
+#include "PSParticleDualProjectedUNormDraw.h"
 #include "PSParticleProjectedDraw.h"
 #include "PSParticleDualDraw.h"
 #include "PSParticleDualProjectedDraw.h"
@@ -9,6 +14,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 namespace Simpsons::Graphics {
 namespace {
@@ -23,20 +29,30 @@ ComPtr<ID3D11Buffer> upload(ID3D11Device* device,const void* bytes,UINT size,UIN
 // bindings so its retained native owners remain valid after submission.
 struct Restore {
     ID3D11DeviceContext* c;
+    ComPtr<ID3D11DeviceContext1> ranged;
     ComPtr<ID3D11VertexShader> vs;ComPtr<ID3D11PixelShader> ps;
-    ComPtr<ID3D11Buffer> vb,ib,vc,pc1,pc2;ComPtr<ID3D11InputLayout> layout;
+    ComPtr<ID3D11Buffer> vb,ib;ComPtr<ID3D11InputLayout> layout;
+    detail::ConstantBufferBinding vc,pc1,pc2;
     ComPtr<ID3D11ShaderResourceView> textures[4];ComPtr<ID3D11SamplerState> samplers[3];
     ComPtr<ID3D11DepthStencilState> depth;ComPtr<ID3D11BlendState> blend;ComPtr<ID3D11RasterizerState> raster;
     ComPtr<ID3D11RenderTargetView> target;ComPtr<ID3D11DepthStencilView> dsv;
     std::array<D3D11_VIEWPORT,16> viewports{};D3D11_PRIMITIVE_TOPOLOGY topology{};DXGI_FORMAT format{};
     UINT stride{},offset{},indexOffset{},stencil{},sampleMask{},viewportCount{16};FLOAT factors[4]{};
-    explicit Restore(ID3D11DeviceContext* context):c(context){
+    Restore(ID3D11DeviceContext* context,ComPtr<ID3D11DeviceContext1> rangedContext):c(context),ranged(std::move(rangedContext)){
         c->VSGetShader(&vs,nullptr,nullptr);c->PSGetShader(&ps,nullptr,nullptr);
-        c->VSGetConstantBuffers(0,1,&vc);c->PSGetConstantBuffers(1,1,&pc1);c->PSGetConstantBuffers(2,1,&pc2);
+        vc=detail::captureConstantBuffer(c,ranged.Get(),detail::ConstantBufferStage::Vertex,0);
+        pc1=detail::captureConstantBuffer(c,ranged.Get(),detail::ConstantBufferStage::Pixel,1);
+        pc2=detail::captureConstantBuffer(c,ranged.Get(),detail::ConstantBufferStage::Pixel,2);
         c->IAGetVertexBuffers(0,1,&vb,&stride,&offset);c->IAGetIndexBuffer(&ib,&format,&indexOffset);
         c->IAGetInputLayout(&layout);c->IAGetPrimitiveTopology(&topology);
-        for(UINT i=0;i<4;++i)c->PSGetShaderResources(i,1,textures[i].ReleaseAndGetAddressOf());
-        for(UINT i=0;i<3;++i)c->PSGetSamplers(i,1,samplers[i].ReleaseAndGetAddressOf());
+        // Get adds one reference per non-null slot; Attach adopts it. Capture
+        // the same exact ranges, including null slots, in two context calls.
+        std::array<ID3D11ShaderResourceView*,4> views{};
+        std::array<ID3D11SamplerState*,3> samples{};
+        c->PSGetShaderResources(0,UINT(views.size()),views.data());
+        c->PSGetSamplers(0,UINT(samples.size()),samples.data());
+        for(size_t i=0;i<views.size();++i)textures[i].Attach(views[i]);
+        for(size_t i=0;i<samples.size();++i)samplers[i].Attach(samples[i]);
         c->OMGetDepthStencilState(&depth,&stencil);c->OMGetBlendState(&blend,factors,&sampleMask);c->RSGetState(&raster);
         c->RSGetViewports(&viewportCount,viewports.data());c->OMGetRenderTargets(1,&target,&dsv);
     }
@@ -44,11 +60,17 @@ struct Restore {
         ID3D11ShaderResourceView* nulls[4]{};c->PSSetShaderResources(0,4,nulls);
         auto* rt=target.Get();c->OMSetRenderTargets(1,&rt,dsv.Get());
         c->VSSetShader(vs.Get(),nullptr,0);c->PSSetShader(ps.Get(),nullptr,0);
-        auto* b=vc.Get();c->VSSetConstantBuffers(0,1,&b);b=pc1.Get();c->PSSetConstantBuffers(1,1,&b);b=pc2.Get();c->PSSetConstantBuffers(2,1,&b);
-        b=vb.Get();c->IASetVertexBuffers(0,1,&b,&stride,&offset);c->IASetIndexBuffer(ib.Get(),format,indexOffset);
+        detail::bindConstantBuffer(c,ranged.Get(),detail::ConstantBufferStage::Vertex,0,vc);
+        detail::bindConstantBuffer(c,ranged.Get(),detail::ConstantBufferStage::Pixel,1,pc1);
+        detail::bindConstantBuffer(c,ranged.Get(),detail::ConstantBufferStage::Pixel,2,pc2);
+        auto* b=vb.Get();c->IASetVertexBuffers(0,1,&b,&stride,&offset);c->IASetIndexBuffer(ib.Get(),format,indexOffset);
         c->IASetInputLayout(layout.Get());c->IASetPrimitiveTopology(topology);
-        for(UINT i=0;i<4;++i){auto* view=textures[i].Get();c->PSSetShaderResources(i,1,&view);}
-        for(UINT i=0;i<3;++i){auto* sample=samplers[i].Get();c->PSSetSamplers(i,1,&sample);}
+        std::array<ID3D11ShaderResourceView*,4> views{};
+        std::array<ID3D11SamplerState*,3> samples{};
+        for(size_t i=0;i<views.size();++i)views[i]=textures[i].Get();
+        for(size_t i=0;i<samples.size();++i)samples[i]=samplers[i].Get();
+        c->PSSetShaderResources(0,UINT(views.size()),views.data());
+        c->PSSetSamplers(0,UINT(samples.size()),samples.data());
         c->OMSetDepthStencilState(depth.Get(),stencil);c->OMSetBlendState(blend.Get(),factors,sampleMask);
         c->RSSetState(raster.Get());c->RSSetViewports(viewportCount,viewports.data());
     }
@@ -56,11 +78,48 @@ struct Restore {
 }
 struct ParticlePipeline {
     ComPtr<ID3D11VertexShader> vertex,type5Vertex;ComPtr<ID3D11PixelShader> pixel,projectedPixel,dualPixel,dualProjectedPixel;ComPtr<ID3D11InputLayout> layout;
+    ComPtr<ID3D11PixelShader> snapshotPixel;
+    ComPtr<ID3D11PixelShader> unormPixel,unormProjectedPixel,unormDualPixel,unormDualProjectedPixel;
+    ComPtr<ID3D11DepthStencilState> snapshotDepth;
+    ComPtr<ID3D11BlendState> snapshotBlend;
+    ComPtr<ID3D11ShaderResourceView> packedSampled;
+    ComPtr<ID3D11RenderTargetView> destinationOutput;
     ComPtr<ID3D11Buffer> indices;
+    ComPtr<ID3D11Device> ownerDevice;
+    detail::DirectDrawDepthStates depths;
+    ComPtr<ID3D11Buffer> streamedVertices,streamedVertexConstants,streamedPixelConstants;
+    UINT vertexCapacity=0,vertexConstantCapacity=0,pixelConstantCapacity=0;
+    void requireDevice(ID3D11Device* device) const {
+        need(ownerDevice.Get()==device,"Particle pipeline belongs to a different device");
+    }
+    ComPtr<ID3D11Buffer> writeStream(ID3D11Device* device,ID3D11DeviceContext* context,
+        const void* bytes,UINT size,UINT bind,ComPtr<ID3D11Buffer>& buffer,UINT& capacity,UINT maximum) {
+        requireDevice(device);
+        need(context&&bytes&&size&&size<=maximum,"Particle streamed upload extent is invalid");
+        need(bind==D3D11_BIND_VERTEX_BUFFER||bind==D3D11_BIND_CONSTANT_BUFFER,"Particle streamed upload binding is invalid");
+        auto written=buffer;UINT nextCapacity=capacity;
+        if(!written||capacity<size){
+            // Grow for accepted packets only; constant buffer extents stay exact.
+            const UINT rounded=bind==D3D11_BIND_VERTEX_BUFFER?std::bit_ceil(size):size;
+            nextCapacity=rounded>maximum?maximum:rounded;
+            D3D11_BUFFER_DESC bd{};bd.ByteWidth=nextCapacity;bd.BindFlags=bind;
+            bd.Usage=D3D11_USAGE_DYNAMIC;bd.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
+            ComPtr<ID3D11Buffer> created;
+            check(device->CreateBuffer(&bd,nullptr,&created),"stream allocation");
+            need(bool(created),"Particle stream allocation returned no buffer");written=std::move(created);
+        }
+        // DISCARD preserves earlier submitted versions; there is no application
+        // cursor, published-range reuse, or NO_OVERWRITE authority.
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        check(context->Map(written.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped),"stream map");
+        if(!mapped.pData){context->Unmap(written.Get(),0);throw Error("Particle stream Map returned no storage");}
+        std::memcpy(mapped.pData,bytes,size);context->Unmap(written.Get(),0);
+        buffer=written;capacity=nextCapacity;return written;
+    }
     ComPtr<ID3D11Texture2D> packed,destination;
     ComPtr<ID3D11RenderTargetView> output;ComPtr<ID3D11ShaderResourceView> sampled;
     UINT width{},height{};
-    explicit ParticlePipeline(ID3D11Device* device){
+    explicit ParticlePipeline(ID3D11Device* device):ownerDevice(device){
         check(device->CreateVertexShader(kVSParticle,sizeof(kVSParticle),nullptr,&vertex),"vertex shader");
         check(device->CreateVertexShader(kVSParticleType5,sizeof(kVSParticleType5),nullptr,&type5Vertex),"type-5 vertex shader");
         check(device->CreatePixelShader(kPSParticleDraw,sizeof(kPSParticleDraw),nullptr,&pixel),"pixel shader");
@@ -77,21 +136,48 @@ struct ParticlePipeline {
         check(device->CreateInputLayout(elements,6,kVSParticle,sizeof(kVSParticle),&layout),"input layout");
         constexpr uint16_t corners[]={0,1,2,0,2,3};indices=upload(device,corners,sizeof(corners),D3D11_BIND_INDEX_BUFFER);
     }
+    void ensureSparseSnapshots(ID3D11Device* device){
+        if(snapshotPixel)return;
+        ComPtr<ID3D11PixelShader> pixel,ordinary,projected,dual,dualProjected;ComPtr<ID3D11DepthStencilState> depth;ComPtr<ID3D11BlendState> blend;
+        check(device->CreatePixelShader(kPSParticleSnapshotDraw,sizeof(kPSParticleSnapshotDraw),nullptr,&pixel),"quad snapshot shader");
+        check(device->CreatePixelShader(kPSParticleUNormDraw,sizeof(kPSParticleUNormDraw),nullptr,&ordinary),"UNORM particle shader ordinary");
+        check(device->CreatePixelShader(kPSParticleProjectedUNormDraw,sizeof(kPSParticleProjectedUNormDraw),nullptr,&projected),"UNORM particle shader projected");
+        check(device->CreatePixelShader(kPSParticleDualUNormDraw,sizeof(kPSParticleDualUNormDraw),nullptr,&dual),"UNORM particle shader dual");
+        check(device->CreatePixelShader(kPSParticleDualProjectedUNormDraw,sizeof(kPSParticleDualProjectedUNormDraw),nullptr,&dualProjected),"UNORM particle shader dualProjected");
+        D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthEnable=FALSE;dd.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;dd.DepthFunc=D3D11_COMPARISON_ALWAYS;
+        check(device->CreateDepthStencilState(&dd,&depth),"quad snapshot depth state");
+        D3D11_BLEND_DESC bd{};bd.RenderTarget[0].BlendEnable=FALSE;
+        bd.RenderTarget[0].SrcBlend=D3D11_BLEND_ONE;bd.RenderTarget[0].DestBlend=D3D11_BLEND_ZERO;bd.RenderTarget[0].BlendOp=D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].SrcBlendAlpha=D3D11_BLEND_ONE;bd.RenderTarget[0].DestBlendAlpha=D3D11_BLEND_ZERO;bd.RenderTarget[0].BlendOpAlpha=D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
+        check(device->CreateBlendState(&bd,&blend),"quad snapshot color state");
+        // Publish the complete direct-path pack only after every creation succeeds.
+        snapshotPixel=std::move(pixel);snapshotDepth=std::move(depth);snapshotBlend=std::move(blend);
+        unormPixel=std::move(ordinary);unormProjectedPixel=std::move(projected);
+        unormDualPixel=std::move(dual);unormDualProjectedPixel=std::move(dualProjected);
+    }
     void surfaces(ID3D11Device* device,UINT w,UINT h){
         if(width==w&&height==h)return;
-        D3D11_TEXTURE2D_DESC d{};d.Width=w;d.Height=h;d.MipLevels=d.ArraySize=1;d.SampleDesc.Count=1;
-        d.Format=DXGI_FORMAT_R10G10B10A2_TYPELESS;d.BindFlags=D3D11_BIND_RENDER_TARGET;
-        ComPtr<ID3D11Texture2D> p,t;ComPtr<ID3D11RenderTargetView> r;ComPtr<ID3D11ShaderResourceView> s;
+        D3D11_TEXTURE2D_DESC d{};d.Width=w;d.Height=h;d.MipLevels=d.ArraySize=1;d.SampleDesc={1,0};
+        d.Format=DXGI_FORMAT_R10G10B10A2_TYPELESS;d.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
+        ComPtr<ID3D11Texture2D> p,t;ComPtr<ID3D11RenderTargetView> r,destinationRtv;ComPtr<ID3D11ShaderResourceView> s,packedSrv;
         check(device->CreateTexture2D(&d,nullptr,&p),"packed output");
-        d.BindFlags=D3D11_BIND_SHADER_RESOURCE;check(device->CreateTexture2D(&d,nullptr,&t),"sampled destination");
+        d.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET;check(device->CreateTexture2D(&d,nullptr,&t),"sampled destination");
         D3D11_RENDER_TARGET_VIEW_DESC rd{};rd.Format=DXGI_FORMAT_R10G10B10A2_UINT;rd.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;
         check(device->CreateRenderTargetView(p.Get(),&rd,&r),"packed output view");
-        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=DXGI_FORMAT_R10G10B10A2_UINT;sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;sd.Texture2D.MipLevels=1;
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=DXGI_FORMAT_R10G10B10A2_UINT;sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels=1;
         check(device->CreateShaderResourceView(t.Get(),&sd,&s),"destination view");
-        packed=std::move(p);destination=std::move(t);output=std::move(r);sampled=std::move(s);width=w;height=h;
+        check(device->CreateShaderResourceView(p.Get(),&sd,&packedSrv),"packed snapshot source view");
+        check(device->CreateRenderTargetView(t.Get(),&rd,&destinationRtv),"quad snapshot output view");
+        packed=std::move(p);destination=std::move(t);output=std::move(r);sampled=std::move(s);
+        packedSampled=std::move(packedSrv);destinationOutput=std::move(destinationRtv);width=w;height=h;
     }
 };
 void NativeBackend::drawParticles(const std::shared_ptr<RenderTarget>& target,const std::shared_ptr<DepthTarget>& depth,const ParticleDraw& d){
+    drawParticlesImpl(target,depth,d,true);
+}
+void NativeBackend::drawParticlesImpl(const std::shared_ptr<RenderTarget>& target,const std::shared_ptr<DepthTarget>& depth,const ParticleDraw& d,bool sparseSnapshots){
     validateSubmissionContext();validateFrontTarget(target);validateDepthCopyTarget(depth);validateTexture(d.texture);
     need(target->format==TargetFormat::RGB10A2,"Particles require original RGB10A2 color");
     need(d.vertices.size()&&!(d.vertices.size()%4)&&d.vertices.size()<=16384,"Particle quad extent is invalid");
@@ -155,35 +241,49 @@ void NativeBackend::drawParticles(const std::shared_ptr<RenderTarget>& target,co
     context->OMGetRenderTargetsAndUnorderedAccessViews(0,nullptr,nullptr,0,outputCount,outputs.data());
     bool hasUnorderedOutput=false;for(auto* output:outputs)if(output){hasUnorderedOutput=true;output->Release();}
     need(!hasUnorderedOutput,"Particle submission has unrelated output UAVs");
-    if(!particlePipeline)particlePipeline=std::make_shared<ParticlePipeline>(device.Get());auto& p=*particlePipeline;p.surfaces(device.Get(),target->pixelWidth(),target->pixelHeight());
+    if(!particlePipeline)particlePipeline=std::make_shared<ParticlePipeline>(device.Get());auto& p=*particlePipeline;
+    p.requireDevice(device.Get());
+    p.surfaces(device.Get(),target->pixelWidth(),target->pixelHeight());
+    const bool sparse=sparseSnapshots;if(sparse)p.ensureSparseSnapshots(device.Get());
     const uint32_t depthWords[]={uint32_t(d.viewport[4]!=0),0,0,0};
     const uint32_t drawWords[]={d.blendWord,std::bit_cast<uint32_t>(float(d.alphaReference)/255.0f),d.blendEnable,0};
-    auto vertices=upload(device.Get(),d.vertices.data(),UINT(d.vertices.size()*sizeof(ParticleVertex)),D3D11_BIND_VERTEX_BUFFER);
-    auto vc=upload(device.Get(),d.constants.data(),sizeof(d.constants),D3D11_BIND_CONSTANT_BUFFER);
-    auto dc=upload(device.Get(),depthWords,sizeof(depthWords),D3D11_BIND_CONSTANT_BUFFER);
-    auto pc=upload(device.Get(),drawWords,sizeof(drawWords),D3D11_BIND_CONSTANT_BUFFER);
-    ComPtr<ID3D11DepthStencilState> depthState;D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthEnable=d.depthEnable;
-    dd.DepthWriteMask=d.depthWrite?D3D11_DEPTH_WRITE_MASK_ALL:D3D11_DEPTH_WRITE_MASK_ZERO;dd.DepthFunc=D3D11_COMPARISON_FUNC(d.depthCompare+1);
-    check(device->CreateDepthStencilState(&dd,&depthState),"depth state");
-    ComPtr<ID3D11BlendState> blend;D3D11_BLEND_DESC bd{};bd.RenderTarget[0].BlendEnable=FALSE;
-    bd.RenderTarget[0].SrcBlend=D3D11_BLEND_ONE;bd.RenderTarget[0].DestBlend=D3D11_BLEND_ZERO;
-    bd.RenderTarget[0].BlendOp=D3D11_BLEND_OP_ADD;bd.RenderTarget[0].SrcBlendAlpha=D3D11_BLEND_ONE;
-    bd.RenderTarget[0].DestBlendAlpha=D3D11_BLEND_ZERO;bd.RenderTarget[0].BlendOpAlpha=D3D11_BLEND_OP_ADD;
-    bd.RenderTarget[0].RenderTargetWriteMask=UINT8(d.colorMask);
-    check(device->CreateBlendState(&bd,&blend),"packed color state");
-    ComPtr<ID3D11RasterizerState> raster;D3D11_RASTERIZER_DESC rd{};rd.FillMode=D3D11_FILL_SOLID;rd.CullMode=D3D11_CULL_NONE;rd.DepthClipEnable=TRUE;rd.ScissorEnable=d.scissorEnable;
-    check(device->CreateRasterizerState(&rd,&raster),"raster state");ComPtr<ID3D11SamplerState> sampler;
-    check(device->CreateSamplerState(&d.sampler,&sampler),"texture sampler");
+    ComPtr<ID3D11Buffer> vertices,vc,dc,pc;
+    ComPtr<ID3D11DepthStencilState> depthState;
+    if(sparseSnapshots){
+        vertices=p.writeStream(device.Get(),context.Get(),d.vertices.data(),UINT(d.vertices.size()*sizeof(ParticleVertex)),
+            D3D11_BIND_VERTEX_BUFFER,p.streamedVertices,p.vertexCapacity,UINT(sizeof(ParticleVertex)*16384));
+        vc=p.writeStream(device.Get(),context.Get(),d.constants.data(),sizeof(d.constants),
+            D3D11_BIND_CONSTANT_BUFFER,p.streamedVertexConstants,p.vertexConstantCapacity,sizeof(d.constants));
+        dc=sceneDepthConstantBuffer(uint32_t(d.viewport[4]!=0),0,0);
+        pc=p.writeStream(device.Get(),context.Get(),drawWords,sizeof(drawWords),
+            D3D11_BIND_CONSTANT_BUFFER,p.streamedPixelConstants,p.pixelConstantCapacity,sizeof(drawWords));
+        check(p.depths.get(device.Get(),d.depthEnable,d.depthWrite,d.depthCompare,depthState),"depth state");
+    }else{
+        // Keep a real dedicated immutable upload/state-creation oracle.
+        vertices=upload(device.Get(),d.vertices.data(),UINT(d.vertices.size()*sizeof(ParticleVertex)),D3D11_BIND_VERTEX_BUFFER);
+        vc=upload(device.Get(),d.constants.data(),sizeof(d.constants),D3D11_BIND_CONSTANT_BUFFER);
+        dc=upload(device.Get(),depthWords,sizeof(depthWords),D3D11_BIND_CONSTANT_BUFFER);
+        pc=upload(device.Get(),drawWords,sizeof(drawWords),D3D11_BIND_CONSTANT_BUFFER);
+        D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthEnable=d.depthEnable;
+        dd.DepthWriteMask=d.depthWrite?D3D11_DEPTH_WRITE_MASK_ALL:D3D11_DEPTH_WRITE_MASK_ZERO;dd.DepthFunc=D3D11_COMPARISON_FUNC(d.depthCompare+1);
+        check(device->CreateDepthStencilState(&dd,&depthState),"depth state");
+    }
+    auto blend=sceneBlendState(0,0x10001,d.colorMask);
+    auto raster=sceneRasterState(0,d.scissorEnable);ComPtr<ID3D11SamplerState> sampler;
+    sampler=sceneSamplerState(d.sampler);
     ComPtr<ID3D11SamplerState> shadowSampler,secondarySampler;
-    if(projected)check(device->CreateSamplerState(&d.shadowSampler,&shadowSampler),"shadow sampler");
-    if(dual)check(device->CreateSamplerState(&d.secondarySampler,&secondarySampler),"secondary sampler");
+    if(projected)shadowSampler=sceneSamplerState(d.shadowSampler);
+    if(dual)secondarySampler=sceneSamplerState(d.secondarySampler);
     {
-        Restore restore(context.Get());
+        Restore restore(context.Get(),constantBindingContext());
         auto* vb=vertices.Get();UINT stride=sizeof(ParticleVertex),offset=0;context->IASetVertexBuffers(0,1,&vb,&stride,&offset);
         context->IASetInputLayout(p.layout.Get());context->IASetIndexBuffer(p.indices.Get(),DXGI_FORMAT_R16_UINT,0);context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         context->VSSetShader(type5?p.type5Vertex.Get():p.vertex.Get(),nullptr,0);
-        context->PSSetShader(projected?(dual?p.dualProjectedPixel.Get():p.projectedPixel.Get()):
-                            (dual?p.dualPixel.Get():p.pixel.Get()),nullptr,0);
+        auto* realPixel=projected?(dual?p.dualProjectedPixel.Get():p.projectedPixel.Get()):
+                                    (dual?p.dualPixel.Get():p.pixel.Get());
+        if(sparse)realPixel=projected?(dual?p.unormDualProjectedPixel.Get():p.unormProjectedPixel.Get()):
+                                        (dual?p.unormDualPixel.Get():p.unormPixel.Get());
+        context->PSSetShader(realPixel,nullptr,0);
         auto* cb=vc.Get();context->VSSetConstantBuffers(0,1,&cb);cb=dc.Get();context->PSSetConstantBuffers(1,1,&cb);cb=pc.Get();context->PSSetConstantBuffers(2,1,&cb);
         auto* texture=d.texture->view.Get();context->PSSetShaderResources(0,1,&texture);auto* sample=sampler.Get();context->PSSetSamplers(0,1,&sample);
         auto* secondary=dual?d.secondaryTexture->view.Get():nullptr;context->PSSetShaderResources(3,1,&secondary);
@@ -194,14 +294,34 @@ void NativeBackend::drawParticles(const std::shared_ptr<RenderTarget>& target,co
         context->RSSetState(raster.Get());context->OMSetDepthStencilState(depthState.Get(),0);context->OMSetBlendState(blend.Get(),nullptr,d.multisampleMask);
         // Quads may overlap, so every particle reads the preceding particle's
         // packed output. Both triangles of a quad share the same snapshot.
-        context->OMSetRenderTargets(0,nullptr,nullptr);context->CopyResource(p.packed.Get(),target->texture.Get());
+        context->OMSetRenderTargets(0,nullptr,nullptr);
+        if(!sparse)context->CopyResource(p.packed.Get(),target->texture.Get());
         for(UINT first=0;first<d.vertices.size();first+=4){
             ID3D11ShaderResourceView* nullView=nullptr;context->PSSetShaderResources(1,1,&nullView);
-            context->OMSetRenderTargets(0,nullptr,nullptr);context->CopyResource(p.destination.Get(),p.packed.Get());
-            auto* view=p.sampled.Get();context->PSSetShaderResources(1,1,&view);auto* output=p.output.Get();context->OMSetRenderTargets(1,&output,depth->view.Get());
+            context->OMSetRenderTargets(0,nullptr,nullptr);
+            if(sparse){
+                // The original VS/rasterizer cover every possible real fragment.
+                // Ignore depth/alpha/write-mask rejection while recovering exact
+                // codes from the typed target; both triangles share pre-quad history.
+                auto* source=target->sampledView.Get();context->PSSetShaderResources(1,1,&source);
+                context->PSSetShader(p.snapshotPixel.Get(),nullptr,0);
+                context->OMSetDepthStencilState(p.snapshotDepth.Get(),0);context->OMSetBlendState(p.snapshotBlend.Get(),nullptr,d.multisampleMask);
+                auto* snapshot=p.destinationOutput.Get();context->OMSetRenderTargets(1,&snapshot,nullptr);
+                context->DrawIndexed(6,0,INT(first));
+                // Unbind target SRV and destination RTV before target becomes
+                // an RTV and destination an SRV; restore actual depth/write mask.
+                context->PSSetShaderResources(1,1,&nullView);context->OMSetRenderTargets(0,nullptr,nullptr);
+                context->PSSetShader(realPixel,nullptr,0);
+                context->OMSetDepthStencilState(depthState.Get(),0);context->OMSetBlendState(blend.Get(),nullptr,d.multisampleMask);
+            }else context->CopyResource(p.destination.Get(),p.packed.Get());
+            auto* view=p.sampled.Get();context->PSSetShaderResources(1,1,&view);
+            auto* output=sparse?target->view.Get():p.output.Get();context->OMSetRenderTargets(1,&output,depth->view.Get());
             context->DrawIndexed(6,0,INT(first));
         }
-        context->OMSetRenderTargets(0,nullptr,nullptr);context->CopyResource(target->texture.Get(),p.packed.Get());++particleDraws;
+        context->OMSetRenderTargets(0,nullptr,nullptr);
+        if(!sparse)context->CopyResource(target->texture.Get(),p.packed.Get());
+        ++particleDraws;
+        noteTemporalSceneDraw(target,depth,d.colorMask,d.depthEnable&&d.depthWrite,false);
     }
     requireOwner();
 }

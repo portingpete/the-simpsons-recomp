@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <vector>
 #include <array>
+#include <optional>
 struct PPCContext;
 namespace Simpsons {
 class Runtime;
@@ -17,13 +18,36 @@ class EngineITXDTextures;
 class EngineViewportSurfaces;
 class EngineSceneCopies;
 class EngineParticles;
-namespace Graphics {class RenderTarget;class DepthTarget;class Texture;class EngineState;struct ImmediateDraw;}
+namespace Graphics {class RenderTarget;class DepthTarget;class Texture;class EngineState;struct ImmediateDraw;struct NativeTemporalSceneOrigins;}
 struct NativeCameraBinding {
     uint32_t camera{},colorRaster{},depthRaster{},colorIdentity{},depthIdentity{};
     // Raster fields describe the original camera association; identities name
     // the actual attachments, which a mode-zero reset can restore to defaults.
     // Camera selection uses logical depth1->0; changed-target reset uses0->1.
     std::array<uint32_t,6> viewport{};
+};
+// Typed original camera-base events, distinct from allocator span provenance.
+enum class NativeCameraLifetimePhase {Constructed,Closing,Freed,PluginRollback};
+struct NativeCameraLifetime {
+    uint32_t camera{},context{};
+    uint64_t generation{};
+    NativeCameraLifetimePhase phase=NativeCameraLifetimePhase::PluginRollback;
+};
+// Completed original Beam events. Bank spans validate storage, never slot birth.
+enum class NativeBeamLifetimePhase {Constructed,Retired,Closing,Closed,Freed};
+struct NativeBeamStorageSpan {
+    uint32_t address{},extent{};
+    uint64_t generation{};
+    bool operator==(const NativeBeamStorageSpan&) const=default;
+};
+struct NativeBeamLifetime {
+    uint32_t owner{},context{},parent{},parentData{},record{},index{},definition{},texture{},raster{},sampling{},factory{};
+    uint32_t allocator{},allocatorVtable{},allocateCallback{},freeCallback{},creationCaller{};
+    uint64_t generation{};
+    NativeBeamLifetimePhase phase=NativeBeamLifetimePhase::Retired;
+    NativeBeamStorageSpan storage{},parentStorage{},recordStorage{},definitionStorage{},textureStorage{};
+    std::array<uint8_t,104> definitionBytes{};
+    bool operator==(const NativeBeamLifetime&) const=default;
 };
 // Native request-2/request-3 lifetime. Resources live through the original
 // engine plugin constructors/destructors; unsupported engine draws still fail.
@@ -36,6 +60,15 @@ public:
     void start(const PPCContext&,uint8_t* base);
     void stop(const PPCContext&,uint8_t* base);
     bool started() const;
+    // Verified original instruction boundaries; observations never write PPC state.
+    void observeCameraLifetime(const PPCContext&,uint8_t* base,uint32_t pc);
+    // Original completed row-zero setup; never a clear-time recapture.
+    void observeMainCameraPublication(const PPCContext&,uint8_t* base);
+    std::optional<NativeCameraLifetime> observedCameraLifetime(uint32_t camera) const;
+    // Original Beam storage/birth/retirement observations, never motion admission.
+    void observeBeamLifetime(const PPCContext&,uint8_t* base,uint32_t pc);
+    std::optional<NativeBeamLifetime> observedBeamLifetime(uint32_t owner) const;
+    NativeBeamLifetime requireBeamLifetime(const NativeBeamLifetime& expected) const;
     // Original 823EE8F8 cache reset plus a real native-backend identity.
     // The identity is never a guest pointer or a console SDK device object.
     uint32_t refreshContext(const PPCContext&,uint8_t* base);
@@ -106,9 +139,23 @@ public:
     void preflightCameraPass(uint8_t* base,uint32_t camera,bool begin) const;
     void clearCamera(uint8_t* base,uint32_t camera,uint32_t rgba,uint32_t selector);
     NativeCameraBinding cameraBinding() const;
+    // Called only after the existing 82751750 depth-copy frame/destination guards.
+    // Reconstruct the tracked main world before original phase12 entry post work.
+    void prepareTemporalPostOutput();
     double renderAspect() const;
+    // Native TAA. The jitter hook needs the scene's physical extent (zero when
+    // TAA is not the active mode) and the presentation serial it belongs to.
+    std::array<uint32_t,2> nativeTemporalJitterExtent() const;
+    uint64_t presentationSerial() const;
+    // Called at the original post depth copy, before original post effects.
+    void resolveNativeTemporal();
+    void applyNativeAmbientOcclusion();
+    // Photo mode: stash the main scene before the HUD render, restore after.
+    void photoHud(bool begin);
+    // Whether this graphics device qualifies the coverage of an AA choice.
     void setUiDrawing(bool);
     uint64_t cameraClearCount() const;
+    Graphics::NativeTemporalSceneOrigins temporalSceneOrigins();
     void copyCameraTargets(const PPCContext&,uint8_t* base,uint32_t colorDestination,uint32_t depthDestination,uint32_t camera);
     uint64_t cameraCopyCount() const;
     std::shared_ptr<Graphics::RenderTarget> sampledColorCopy(uint32_t id,uint32_t camera) const;
@@ -150,6 +197,7 @@ public:
     void immediateEffectOperation(PPCContext&,uint8_t*,uint32_t site);
     void decalOperation(PPCContext&,uint8_t*,uint32_t site);
     uint64_t immediateDrawCount() const;
+    uint64_t nativeBufferUploadCount() const;
     void postFilterOperation(PPCContext&,uint8_t*,uint32_t site);
     void radialOperation(PPCContext&,uint8_t*,uint32_t operation);
     uint64_t movieDrawCount() const;

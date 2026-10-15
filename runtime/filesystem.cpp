@@ -356,9 +356,12 @@ Object openAsset(Simpsons::Runtime& rt,Name name,uint32_t access,uint32_t share,
          (equalPath(parts[0],L"simpsons_chars")&&equalPath(parts[1],L"simpsons_chars_global.str")));
     const bool pcText=(name.root==0||name.root==0xfffffffdu)&&parts.size()==3&&!rt.nativeFrontendRoot.empty()&&
         equalPath(parts[1],L"text")&&equalPath(parts[2],L"e172a05c.str");
+    const bool gameflow=(name.root==0||name.root==0xfffffffdu)&&parts.size()==1&&!rt.nativeGameflowRoot.empty()&&
+        equalPath(parts[0],L"simpsons_gameflow.lua");
+    if(gameflow)std::fprintf(stderr,"[NATIVE GAMEFLOW] loaded the derived New Game episode script\n");
     if(videoFrontend)std::fprintf(stderr,"[NATIVE VIDEO ASSET] loaded native Options package for %s\n",name.path.c_str());
     if(pcText)std::fprintf(stderr,"[NATIVE PC TEXT] loaded native English wording for %s\n",name.path.c_str());
-    auto root=rootObject(rt,rootPath,(videoFrontend||pcText)?rt.nativeFrontendRoot:std::filesystem::path{});
+    auto root=rootObject(rt,rootPath,gameflow?rt.nativeGameflowRoot:(videoFrontend||pcText)?rt.nativeFrontendRoot:std::filesystem::path{});
     std::vector<Object> pins{root};
     Object current=root;
     if(name.root!=0 && name.root!=0xfffffffdu) {

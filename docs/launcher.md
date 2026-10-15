@@ -50,10 +50,22 @@ The `.cmd` file locates the helper relative to its own folder.
 See [native input prompts](native-input-prompts.md) and
 [controller setup](native-controllers.md) for input bindings and device behavior.
 Use **Options → Controls** for [keyboard/mouse bindings and mouse options](native-control-settings.md).
-The game loads saved [Video preferences](native-video-settings.md).
+The game loads saved [Video preferences](native-video-settings.md); its
+Renderer row selects [D3D11 or Vulkan](native-vulkan-renderer.md) for the next launch.
 Choose **Exit Game** from the main menu, then **Yes** to close the game.
 **No** or **Back** returns to the menu.
 [Steam Input](steam-input.md) describes the supported Steam configuration.
+
+## Save backups
+
+Before each normal or stall-profiling launch, the launcher copies the profile
+store, the saves folder and the native `.video.cfg`, `.controls.cfg` and
+`.audio.cfg` settings to `save-backups\Saves-<UTC time>` in the project folder,
+and keeps the newest 20 of those folders (other folders there are never
+removed). The game log names the backup. If the copy fails, the log says why
+and the game still starts. Mission test launches use private copies and make
+no backup. To restore, close the game and copy a backup's `profile` and
+`content` folders back over `build\mainmenu-profile-204` and `saves`.
 
 ## Logs and errors
 

@@ -1,9 +1,15 @@
 #include "immediate_draw.h"
+#include "immediate_copy_region.h"
+#include "temporal_scene.h"
 #include "VSImmediate.h"
 #include "PSImmediateDraw.h"
 #include "PSImmediateDualDraw.h"
+#include "PSImmediateUNormDraw.h"
+#include "PSImmediateDualUNormDraw.h"
+#include "PSImmediateSnapshotDraw.h"
 #include "VSRadial.h"
 #include "PSRadialDraw.h"
+#include "PSRadialUNormDraw.h"
 #include "VSImmediateProjected.h"
 #include "PSImmediateProjectedDraw.h"
 #include "PSImmediateProjectedDualDraw.h"
@@ -11,6 +17,8 @@
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <algorithm>
 
 namespace Simpsons::Graphics {
 namespace {
@@ -25,51 +33,105 @@ ComPtr<ID3D11Buffer> upload(ID3D11Device* device,const void* bytes,UINT size,UIN
 // bindings so its retained native owners remain valid after submission.
 struct Restore {
     ID3D11DeviceContext* c;
+    ComPtr<ID3D11DeviceContext1> ranged;
     ComPtr<ID3D11VertexShader> vs;ComPtr<ID3D11PixelShader> ps;
-    ComPtr<ID3D11Buffer> vb,ib,vc,projection,pc1,pc2;ComPtr<ID3D11InputLayout> layout;
-    ComPtr<ID3D11ShaderResourceView> textures[4];ComPtr<ID3D11SamplerState> sampler,querySampler,projectionSampler;
+    ComPtr<ID3D11Buffer> vb,ib;ComPtr<ID3D11InputLayout> layout;
+    detail::ConstantBufferBinding vc,projection,pc1,pc2;
+    ComPtr<ID3D11ShaderResourceView> textures[4];ComPtr<ID3D11SamplerState> samplers[3];
     ComPtr<ID3D11DepthStencilState> depth;ComPtr<ID3D11BlendState> blend;ComPtr<ID3D11RasterizerState> raster;
-    ComPtr<ID3D11RenderTargetView> target;ComPtr<ID3D11DepthStencilView> dsv;
+    std::array<ComPtr<ID3D11RenderTargetView>,8> targets;ComPtr<ID3D11DepthStencilView> dsv;
     std::array<D3D11_VIEWPORT,16> viewports{};D3D11_PRIMITIVE_TOPOLOGY topology{};DXGI_FORMAT format{};
     UINT stride{},offset{},indexOffset{},stencil{},sampleMask{},viewportCount{16};FLOAT factors[4]{};
-    explicit Restore(ID3D11DeviceContext* context):c(context){
+    Restore(ID3D11DeviceContext* context,ComPtr<ID3D11DeviceContext1> rangedContext):c(context),ranged(std::move(rangedContext)){
         c->VSGetShader(&vs,nullptr,nullptr);c->PSGetShader(&ps,nullptr,nullptr);
-        c->VSGetConstantBuffers(0,1,&vc);c->PSGetConstantBuffers(1,1,&pc1);c->PSGetConstantBuffers(2,1,&pc2);
-        c->VSGetConstantBuffers(3,1,&projection);
+        vc=detail::captureConstantBuffer(c,ranged.Get(),detail::ConstantBufferStage::Vertex,0);
+        pc1=detail::captureConstantBuffer(c,ranged.Get(),detail::ConstantBufferStage::Pixel,1);
+        pc2=detail::captureConstantBuffer(c,ranged.Get(),detail::ConstantBufferStage::Pixel,2);
+        projection=detail::captureConstantBuffer(c,ranged.Get(),detail::ConstantBufferStage::Vertex,3);
         c->IAGetVertexBuffers(0,1,&vb,&stride,&offset);c->IAGetIndexBuffer(&ib,&format,&indexOffset);
         c->IAGetInputLayout(&layout);c->IAGetPrimitiveTopology(&topology);
-        for(UINT i=0;i<4;++i)c->PSGetShaderResources(i,1,textures[i].ReleaseAndGetAddressOf());
-        c->PSGetSamplers(0,1,&sampler);
-        c->PSGetSamplers(1,1,&querySampler);
-        c->PSGetSamplers(2,1,&projectionSampler);
+        // Each non-null Get result owns one reference, adopted without another
+        // AddRef. Preserve holes and the exact slots in two context calls.
+        std::array<ID3D11ShaderResourceView*,4> views{};
+        std::array<ID3D11SamplerState*,3> samples{};
+        c->PSGetShaderResources(0,UINT(views.size()),views.data());
+        c->PSGetSamplers(0,UINT(samples.size()),samples.data());
+        for(size_t i=0;i<views.size();++i)textures[i].Attach(views[i]);
+        for(size_t i=0;i<samples.size();++i)samplers[i].Attach(samples[i]);
         c->OMGetDepthStencilState(&depth,&stencil);c->OMGetBlendState(&blend,factors,&sampleMask);c->RSGetState(&raster);
-        c->RSGetViewports(&viewportCount,viewports.data());c->OMGetRenderTargets(1,&target,&dsv);
+        c->RSGetViewports(&viewportCount,viewports.data());
+        std::array<ID3D11RenderTargetView*,8> raw{};c->OMGetRenderTargets(8,raw.data(),&dsv);
+        for(size_t i=0;i<raw.size();++i)targets[i].Attach(raw[i]);
     }
     ~Restore(){
         ID3D11ShaderResourceView* nulls[4]{};c->PSSetShaderResources(0,4,nulls);
-        auto* rt=target.Get();c->OMSetRenderTargets(1,&rt,dsv.Get());
+        std::array<ID3D11RenderTargetView*,8> raw{};for(size_t i=0;i<raw.size();++i)raw[i]=targets[i].Get();
+        c->OMSetRenderTargets(8,raw.data(),dsv.Get());
         c->VSSetShader(vs.Get(),nullptr,0);c->PSSetShader(ps.Get(),nullptr,0);
-        auto* b=vc.Get();c->VSSetConstantBuffers(0,1,&b);b=pc1.Get();c->PSSetConstantBuffers(1,1,&b);b=pc2.Get();c->PSSetConstantBuffers(2,1,&b);
-        b=projection.Get();c->VSSetConstantBuffers(3,1,&b);
-        b=vb.Get();c->IASetVertexBuffers(0,1,&b,&stride,&offset);c->IASetIndexBuffer(ib.Get(),format,indexOffset);
+        detail::bindConstantBuffer(c,ranged.Get(),detail::ConstantBufferStage::Vertex,0,vc);
+        detail::bindConstantBuffer(c,ranged.Get(),detail::ConstantBufferStage::Pixel,1,pc1);
+        detail::bindConstantBuffer(c,ranged.Get(),detail::ConstantBufferStage::Pixel,2,pc2);
+        detail::bindConstantBuffer(c,ranged.Get(),detail::ConstantBufferStage::Vertex,3,projection);
+        auto* b=vb.Get();c->IASetVertexBuffers(0,1,&b,&stride,&offset);c->IASetIndexBuffer(ib.Get(),format,indexOffset);
         c->IASetInputLayout(layout.Get());c->IASetPrimitiveTopology(topology);
-        for(UINT i=0;i<4;++i){auto* view=textures[i].Get();c->PSSetShaderResources(i,1,&view);}auto* s=sampler.Get();c->PSSetSamplers(0,1,&s);
-        s=querySampler.Get();c->PSSetSamplers(1,1,&s);
-        s=projectionSampler.Get();c->PSSetSamplers(2,1,&s);
+        std::array<ID3D11ShaderResourceView*,4> views{};
+        std::array<ID3D11SamplerState*,3> samples{};
+        for(size_t i=0;i<views.size();++i)views[i]=textures[i].Get();
+        for(size_t i=0;i<samples.size();++i)samples[i]=samplers[i].Get();
+        c->PSSetShaderResources(0,UINT(views.size()),views.data());
+        c->PSSetSamplers(0,UINT(samples.size()),samples.data());
         c->OMSetDepthStencilState(depth.Get(),stencil);c->OMSetBlendState(blend.Get(),factors,sampleMask);
         c->RSSetState(raster.Get());c->RSSetViewports(viewportCount,viewports.data());
     }
 };
 }
 struct ImmediatePipeline {
+    // High-water DISCARD storage is owned by this exact pipeline/device.
+    // Earlier submitted draws retain their renamed storage; no range is reused
+    // through NO_OVERWRITE, and no Map occurs inside the triangle passes.
+    static constexpr UINT vertexStreamBytes=16384u*sizeof(ImmediateVertex);
+    ComPtr<ID3D11Device> owner;
+    ComPtr<ID3D11Buffer> vertexStream,quadIndices;
+    UINT vertexCapacity{};
+    detail::DirectDrawDepthStates depths;
+    void requireDevice(ID3D11Device* device)const{need(owner.Get()==device,"Native immediate pipeline belongs to another device");}
+    ComPtr<ID3D11Buffer> streamVertices(ID3D11DeviceContext* context,const void* bytes,UINT size){
+        need(size&&size<=vertexStreamBytes,"Native immediate vertex packet exceeds the upload stream");
+        if(size>vertexCapacity){
+            D3D11_BUFFER_DESC d{};d.ByteWidth=size;d.BindFlags=D3D11_BIND_VERTEX_BUFFER;
+            d.Usage=D3D11_USAGE_DYNAMIC;d.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
+            ComPtr<ID3D11Buffer> prepared;
+            check(owner->CreateBuffer(&d,nullptr,&prepared),"vertex stream allocation");
+            vertexStream=std::move(prepared);vertexCapacity=size;
+        }
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        check(context->Map(vertexStream.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped),"vertex stream map");
+        if(!mapped.pData){context->Unmap(vertexStream.Get(),0);throw Error("Native immediate vertex stream map returned no storage");}
+        // The source is already owned/canonicalized. memcpy cannot throw and
+        // writes without reading the driver's write-combined mapped storage.
+        std::memcpy(mapped.pData,bytes,size);context->Unmap(vertexStream.Get(),0);
+        return vertexStream;
+    }
+    ComPtr<ID3D11Buffer> streamIndices(std::span<const uint16_t> order){
+        static constexpr std::array<uint16_t,6> quad{0,1,2,2,1,3};
+        // Admission uses the actual finite-filtered order, never a guessed
+        // primitive/vertex count. Every other order keeps its exact upload.
+        if(order.size()!=quad.size()||!std::equal(order.begin(),order.end(),quad.begin()))
+            return upload(owner.Get(),order.data(),UINT(order.size()*sizeof(uint16_t)),D3D11_BIND_INDEX_BUFFER);
+        if(!quadIndices){auto prepared=upload(owner.Get(),quad.data(),sizeof(quad),D3D11_BIND_INDEX_BUFFER);quadIndices=std::move(prepared);}
+        return quadIndices;
+    }
     ComPtr<ID3D11VertexShader> vertex;ComPtr<ID3D11PixelShader> pixel,dualPixel;ComPtr<ID3D11InputLayout> layout;
     ComPtr<ID3D11VertexShader> radialVertex;ComPtr<ID3D11PixelShader> radialPixel;ComPtr<ID3D11InputLayout> radialLayout;
     ComPtr<ID3D11VertexShader> projectedVertex;ComPtr<ID3D11PixelShader> projectedPixel,projectedDualPixel;ComPtr<ID3D11InputLayout> projectedLayout;
     
+    ComPtr<ID3D11PixelShader> directPixel,directDualPixel,directRadialPixel,snapshotPixel;
+    ComPtr<ID3D11DepthStencilState> snapshotDepth;ComPtr<ID3D11BlendState> snapshotBlend;
+    ComPtr<ID3D11RenderTargetView> destinationOutput;
     ComPtr<ID3D11Texture2D> packed,destination;
     ComPtr<ID3D11RenderTargetView> output;ComPtr<ID3D11ShaderResourceView> sampled;
     UINT width{},height{};
-    explicit ImmediatePipeline(ID3D11Device* device){
+    explicit ImmediatePipeline(ID3D11Device* device):owner(device){
         check(device->CreateVertexShader(kVSImmediate,sizeof(kVSImmediate),nullptr,&vertex),"vertex shader");
         check(device->CreatePixelShader(kPSImmediateDraw,sizeof(kPSImmediateDraw),nullptr,&pixel),"pixel shader");
         check(device->CreatePixelShader(kPSImmediateDualDraw,sizeof(kPSImmediateDualDraw),nullptr,&dualPixel),"dual pixel shader");
@@ -87,21 +149,45 @@ struct ImmediatePipeline {
         check(device->CreatePixelShader(kPSImmediateProjectedDualDraw,sizeof(kPSImmediateProjectedDualDraw),nullptr,&projectedDualPixel),"projected dual pixel shader");
         check(device->CreateInputLayout(elements,3,kVSImmediateProjected,sizeof(kVSImmediateProjected),&projectedLayout),"projected input layout");
     }
+    void ensureDirectPixels(ID3D11Device* device){
+        if(directPixel)return;
+        ComPtr<ID3D11PixelShader> ordinary,dual,radial,snapshot;
+        ComPtr<ID3D11DepthStencilState> depth;ComPtr<ID3D11BlendState> blend;
+        check(device->CreatePixelShader(kPSImmediateUNormDraw,sizeof(kPSImmediateUNormDraw),nullptr,&ordinary),"direct UNORM pixel shader");
+        check(device->CreatePixelShader(kPSImmediateDualUNormDraw,sizeof(kPSImmediateDualUNormDraw),nullptr,&dual),"direct dual UNORM pixel shader");
+        check(device->CreatePixelShader(kPSRadialUNormDraw,sizeof(kPSRadialUNormDraw),nullptr,&radial),"direct radial UNORM pixel shader");
+        check(device->CreatePixelShader(kPSImmediateSnapshotDraw,sizeof(kPSImmediateSnapshotDraw),nullptr,&snapshot),"direct UNORM snapshot shader");
+        D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthEnable=FALSE;dd.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;dd.DepthFunc=D3D11_COMPARISON_ALWAYS;
+        check(device->CreateDepthStencilState(&dd,&depth),"direct snapshot depth state");
+        D3D11_BLEND_DESC bd{};bd.RenderTarget[0].BlendEnable=FALSE;
+        bd.RenderTarget[0].SrcBlend=D3D11_BLEND_ONE;bd.RenderTarget[0].DestBlend=D3D11_BLEND_ZERO;bd.RenderTarget[0].BlendOp=D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].SrcBlendAlpha=D3D11_BLEND_ONE;bd.RenderTarget[0].DestBlendAlpha=D3D11_BLEND_ZERO;bd.RenderTarget[0].BlendOpAlpha=D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
+        check(device->CreateBlendState(&bd,&blend),"direct snapshot color state");
+        // No partial pipeline publishes on any HRESULT failure.
+        directPixel=std::move(ordinary);directDualPixel=std::move(dual);directRadialPixel=std::move(radial);snapshotPixel=std::move(snapshot);
+        snapshotDepth=std::move(depth);snapshotBlend=std::move(blend);
+    }
     void surfaces(ID3D11Device* device,UINT w,UINT h){
         if(width==w&&height==h)return;
-        D3D11_TEXTURE2D_DESC d{};d.Width=w;d.Height=h;d.MipLevels=d.ArraySize=1;d.SampleDesc.Count=1;
+        D3D11_TEXTURE2D_DESC d{};d.Width=w;d.Height=h;d.MipLevels=d.ArraySize=1;d.SampleDesc={1,0};
         d.Format=DXGI_FORMAT_R10G10B10A2_TYPELESS;d.BindFlags=D3D11_BIND_RENDER_TARGET;
-        ComPtr<ID3D11Texture2D> p,t;ComPtr<ID3D11RenderTargetView> r;ComPtr<ID3D11ShaderResourceView> s;
+        ComPtr<ID3D11Texture2D> p,t;ComPtr<ID3D11RenderTargetView> r,destinationRtv;ComPtr<ID3D11ShaderResourceView> s;
         check(device->CreateTexture2D(&d,nullptr,&p),"packed output");
-        d.BindFlags=D3D11_BIND_SHADER_RESOURCE;check(device->CreateTexture2D(&d,nullptr,&t),"sampled destination");
+        d.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET;check(device->CreateTexture2D(&d,nullptr,&t),"sampled destination");
         D3D11_RENDER_TARGET_VIEW_DESC rd{};rd.Format=DXGI_FORMAT_R10G10B10A2_UINT;rd.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;
         check(device->CreateRenderTargetView(p.Get(),&rd,&r),"packed output view");
-        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=DXGI_FORMAT_R10G10B10A2_UINT;sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;sd.Texture2D.MipLevels=1;
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=DXGI_FORMAT_R10G10B10A2_UINT;sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels=1;
         check(device->CreateShaderResourceView(t.Get(),&sd,&s),"destination view");
-        packed=std::move(p);destination=std::move(t);output=std::move(r);sampled=std::move(s);width=w;height=h;
+        check(device->CreateRenderTargetView(t.Get(),&rd,&destinationRtv),"direct snapshot destination view");
+        destinationOutput=std::move(destinationRtv);packed=std::move(p);destination=std::move(t);output=std::move(r);sampled=std::move(s);width=w;height=h;
     }
 };
 void NativeBackend::drawImmediate(const std::shared_ptr<RenderTarget>& target,const std::shared_ptr<DepthTarget>& depth,const ImmediateDraw& d){
+    drawImmediateImpl(target,depth,d,true);
+}
+void NativeBackend::drawImmediateImpl(const std::shared_ptr<RenderTarget>& target,const std::shared_ptr<DepthTarget>& depth,const ImmediateDraw& d,bool directUNorm){
     validateSubmissionContext();validateFrontTarget(target);validateDepthCopyTarget(depth);
     need(!d.nullTexture||(!d.texture&&!d.texture2&&!d.radial&&!d.query),"Immediate null texture profile is inconsistent");
     if(!d.radial&&!d.nullTexture)validateTexture(d.texture);
@@ -196,19 +282,56 @@ void NativeBackend::drawImmediate(const std::shared_ptr<RenderTarget>& target,co
     bool hasUnorderedOutput=false;for(auto* output:outputs)if(output){hasUnorderedOutput=true;output->Release();}
     need(!hasUnorderedOutput,"Immediate submission has unrelated output UAVs");
     if(order.empty()){++immediateDraws;requireOwner();return;} // Every triangle used a non-finite position: nothing to rasterize.
-    if(!immediatePipeline)immediatePipeline=std::make_shared<ImmediatePipeline>(device.Get());auto& p=*immediatePipeline;p.surfaces(device.Get(),target->pixelWidth(),target->pixelHeight());
-    const uint32_t depthWords[]={uint32_t(d.viewport[4]!=0),d.depthBiasBits,d.slopeBiasBits,0};
+    if(!immediatePipeline)immediatePipeline=std::make_shared<ImmediatePipeline>(device.Get());auto& p=*immediatePipeline;
+    p.requireDevice(device.Get());
+    p.surfaces(device.Get(),target->pixelWidth(),target->pixelHeight());
+    // Only a separately authenticated original Beam producer supplies these
+    // native metadata fields. Unqualified world immediates still fail below.
+    std::shared_ptr<TemporalGeometryDraw> temporal;
+    if(d.temporalObject) {
+        need(!d.radial&&!d.projected&&!d.texture2&&!d.query&&!d.nullTexture&&d.primitive==6&&d.vertices.size()==8,
+             "Temporal Immediate requires the exact eight-vertex mode-zero Beam profile");
+        for(const auto& vertex:d.vertices)for(float value:vertex.position)
+            need(std::isfinite(value),"Temporal Immediate position is nonfinite");
+        ShadowMeshDraw temporalState=d;temporalState.temporalBlendEnable=0;temporalState.temporalBlendWord=0x00010001;
+        temporal=temporalGeometryDraw(target,depth,temporalState,0x821511D8,5,false);
+        if(temporal) {
+            std::array<TemporalRegister,13> current{};
+            std::copy(d.constants.begin(),d.constants.end(),current.begin());
+            for(size_t i=0;i<8;++i)current[5+i]={d.vertices[i].position[0],d.vertices[i].position[1],d.vertices[i].position[2],1};
+            temporal->packedOutput(p.output.Get(),bool(d.blendEnable)||!d.depthWrite);
+            temporal->prepare(context.Get(),current);
+        }
+    }
+    if((d.colorMask&7)&&!temporal)rejectUntrackedTemporalWorldDraw(target,depth,"immediate geometry");
+    const auto vp=renderViewport(target,{0,0,float(target->width),float(target->height),0,1});
+    const auto region=immediateCopyRegion(d,order,target->pixelWidth(),target->pixelHeight(),bool(temporal),vp);
+    if(region.left>=region.right || region.top>=region.bottom) {
+        // Coverage is empty only for qualified ordinary draws.
+        // Keep submission bookkeeping, but avoid uploads and native draw state.
+        ++immediateDraws;
+        noteTemporalSceneDraw(target,depth,d.colorMask,d.depthEnable&&d.depthWrite,false);
+        requireOwner();return;
+    }
+    const bool direct=directUNorm&&!temporal&&!d.projected;
+    if(direct)p.ensureDirectPixels(device.Get());
     const uint32_t drawWords[]={d.blendWord,std::bit_cast<uint32_t>(float(d.alphaReference)/255.0f),d.blendEnable,d.alphaTest|(d.query?2u:0u)};
     // Canonicalize only the native upload. Preserve the caller's snapshot and
     // the original ring bytes, including unwritten data from earlier batches.
     std::vector<ImmediateVertex> canonical;
     const auto* vertexData=d.vertices.data();
     if(unusedSecondUv){canonical=d.vertices;for(auto& vertex:canonical)vertex.uv[2]=vertex.uv[3]=0;vertexData=canonical.data();}
-    auto vertices=upload(device.Get(),vertexData,UINT(d.vertices.size()*sizeof(ImmediateVertex)),D3D11_BIND_VERTEX_BUFFER);
-    auto indices=upload(device.Get(),order.data(),UINT(order.size()*2),D3D11_BIND_INDEX_BUFFER);
-    auto vc=upload(device.Get(),d.constants.data(),sizeof(d.constants),D3D11_BIND_CONSTANT_BUFFER);
-    auto dc=upload(device.Get(),depthWords,sizeof(depthWords),D3D11_BIND_CONSTANT_BUFFER);
-    auto pc=upload(device.Get(),drawWords,sizeof(drawWords),D3D11_BIND_CONSTANT_BUFFER);
+    // The private retained reference continues to allocate dedicated immutable
+    // resources. Public submissions DISCARD exactly once before all passes.
+    auto vertices=directUNorm?p.streamVertices(context.Get(),vertexData,UINT(d.vertices.size()*sizeof(ImmediateVertex))):
+        upload(device.Get(),vertexData,UINT(d.vertices.size()*sizeof(ImmediateVertex)),D3D11_BIND_VERTEX_BUFFER);
+    auto indices=directUNorm?p.streamIndices(order):upload(device.Get(),order.data(),UINT(order.size()*2),D3D11_BIND_INDEX_BUFFER);
+    static_assert(sizeof(d.constants)==80 && sizeof(drawWords)==16);
+    const auto vc=publishConstantSlice(ImmediateVertexBank,d.constants.data(),sizeof(d.constants));
+    requireConstantSlice(ImmediateVertexBank,vc,sizeof(d.constants),"Native immediate vertex constants lack their publication");
+    auto dc=sceneDepthConstantBuffer(uint32_t(d.viewport[4]!=0),d.depthBiasBits,d.slopeBiasBits);
+    const auto pc=publishConstantSlice(ImmediatePixelBank,drawWords,sizeof(drawWords));
+    requireConstantSlice(ImmediatePixelBank,pc,sizeof(drawWords),"Native immediate pixel constants lack their publication");
     ComPtr<ID3D11Buffer> projection;
     if(d.projected){
         auto constants=d.projectionConstants;
@@ -216,48 +339,95 @@ void NativeBackend::drawImmediate(const std::shared_ptr<RenderTarget>& target,co
         constants[4][1]=constants[4][2]=constants[4][3]=0;
         projection=upload(device.Get(),constants.data(),sizeof(constants),D3D11_BIND_CONSTANT_BUFFER);
     }
-    ComPtr<ID3D11DepthStencilState> depthState;D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthEnable=d.depthEnable;
-    dd.DepthWriteMask=d.depthWrite?D3D11_DEPTH_WRITE_MASK_ALL:D3D11_DEPTH_WRITE_MASK_ZERO;dd.DepthFunc=D3D11_COMPARISON_FUNC(d.depthCompare+1);
-    check(device->CreateDepthStencilState(&dd,&depthState),"depth state");
-    ComPtr<ID3D11BlendState> blend;D3D11_BLEND_DESC bd{};bd.RenderTarget[0].BlendEnable=FALSE;
-    bd.RenderTarget[0].SrcBlend=D3D11_BLEND_ONE;bd.RenderTarget[0].DestBlend=D3D11_BLEND_ZERO;
-    bd.RenderTarget[0].BlendOp=D3D11_BLEND_OP_ADD;bd.RenderTarget[0].SrcBlendAlpha=D3D11_BLEND_ONE;
-    bd.RenderTarget[0].DestBlendAlpha=D3D11_BLEND_ZERO;bd.RenderTarget[0].BlendOpAlpha=D3D11_BLEND_OP_ADD;
-    bd.RenderTarget[0].RenderTargetWriteMask=UINT8(d.colorMask);
-    check(device->CreateBlendState(&bd,&blend),"packed color state");
-    ComPtr<ID3D11RasterizerState> raster;D3D11_RASTERIZER_DESC rd{};rd.FillMode=D3D11_FILL_SOLID;
-    rd.CullMode=d.cull?D3D11_CULL_BACK:D3D11_CULL_NONE;rd.FrontCounterClockwise=d.cull==2;
-    rd.DepthClipEnable=TRUE;rd.ScissorEnable=d.scissorEnable;
-    check(device->CreateRasterizerState(&rd,&raster),"raster state");ComPtr<ID3D11SamplerState> sampler;
-    if(!d.nullTexture)check(device->CreateSamplerState(&d.sampler,&sampler),"texture sampler");
+    ComPtr<ID3D11DepthStencilState> depthState;
+    if(directUNorm)check(p.depths.get(device.Get(),d.depthEnable,d.depthWrite,d.depthCompare,depthState),"depth state");
+    else{
+        D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthEnable=d.depthEnable;
+        dd.DepthWriteMask=d.depthWrite?D3D11_DEPTH_WRITE_MASK_ALL:D3D11_DEPTH_WRITE_MASK_ZERO;dd.DepthFunc=D3D11_COMPARISON_FUNC(d.depthCompare+1);
+        check(device->CreateDepthStencilState(&dd,&depthState),"depth state");
+    }
+    auto blend=sceneBlendState(0,0x10001,d.colorMask);
+    auto raster=sceneRasterState(d.cull,d.scissorEnable);ComPtr<ID3D11SamplerState> sampler;
+    if(!d.nullTexture)sampler=sceneSamplerState(d.sampler);
     ComPtr<ID3D11SamplerState> querySampler;D3D11_SAMPLER_DESC q{};q.Filter=D3D11_FILTER_MIN_MAG_MIP_POINT;
     q.AddressU=q.AddressV=q.AddressW=D3D11_TEXTURE_ADDRESS_MIRROR;q.MaxAnisotropy=1;q.ComparisonFunc=D3D11_COMPARISON_NEVER;
-    check(device->CreateSamplerState(d.projected?&d.projectionSampler:&q,&querySampler),"query/projection sampler");
+    querySampler=sceneSamplerState(d.projected?d.projectionSampler:q);
     {
-        Restore restore(context.Get());
+        Restore restore(context.Get(),constantBindingContext());
+        // Preserve the exact ranged temporal slots once around the original
+        // ordered triangle loop. The outer scope restores all original MRTs.
+        ScopedTemporalGeometryDraw temporalRestore(context.Get(),temporal);
         auto* vb=vertices.Get();UINT stride=sizeof(ImmediateVertex),offset=0;context->IASetVertexBuffers(0,1,&vb,&stride,&offset);
         context->IASetInputLayout(d.projected?p.projectedLayout.Get():(d.radial?p.radialLayout.Get():p.layout.Get()));context->IASetIndexBuffer(indices.Get(),DXGI_FORMAT_R16_UINT,0);context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         context->VSSetShader(d.projected?p.projectedVertex.Get():(d.radial?p.radialVertex.Get():p.vertex.Get()),nullptr,0);
-        context->PSSetShader(d.projected?(d.texture2?p.projectedDualPixel.Get():p.projectedPixel.Get()):(d.radial?p.radialPixel.Get():(d.texture2?p.dualPixel.Get():p.pixel.Get())),nullptr,0);
-        auto* cb=vc.Get();context->VSSetConstantBuffers(0,1,&cb);cb=dc.Get();context->PSSetConstantBuffers(1,1,&cb);cb=pc.Get();context->PSSetConstantBuffers(2,1,&cb);
+        context->PSSetShader(d.projected?(d.texture2?p.projectedDualPixel.Get():p.projectedPixel.Get()):
+                                         (d.radial?p.radialPixel.Get():(d.texture2?p.dualPixel.Get():p.pixel.Get())),nullptr,0);
+        detail::bindConstantBuffer(context.Get(),restore.ranged.Get(),detail::ConstantBufferStage::Vertex,0,vc.binding);
+        auto* cb=dc.Get();context->PSSetConstantBuffers(1,1,&cb);
+        detail::bindConstantBuffer(context.Get(),restore.ranged.Get(),detail::ConstantBufferStage::Pixel,2,pc.binding);
+        // Prove the actual bound owner/range before any draw. An ignored or
+        // malformed native setter must unwind through Restore, outside its
+        // noexcept binding helper. This validation has a real per-draw cost.
+        const auto boundVertex=detail::captureConstantBuffer(context.Get(),restore.ranged.Get(),detail::ConstantBufferStage::Vertex,0);
+        const auto boundPixel=detail::captureConstantBuffer(context.Get(),restore.ranged.Get(),detail::ConstantBufferStage::Pixel,2);
+        need(detail::constantBufferBindingMatches(boundVertex,vc.binding)&&
+             detail::constantBufferBindingMatches(boundPixel,pc.binding),"Native immediate constant binding differs from its publication");
         if(d.projected){cb=projection.Get();context->VSSetConstantBuffers(3,1,&cb);}
         auto* texture=d.texture?d.texture->view.Get():nullptr;context->PSSetShaderResources(0,1,&texture);auto* sample=sampler.Get();context->PSSetSamplers(0,1,&sample);
         auto* texture2=d.texture2?d.texture2->view.Get():nullptr;context->PSSetShaderResources(1,1,&texture2);
         auto* query=d.projected?d.projectionDepth->depthView.Get():(d.query?d.query->sampledView.Get():nullptr);context->PSSetShaderResources(2,1,&query);
         sample=d.texture2?sampler.Get():querySampler.Get();context->PSSetSamplers(1,1,&sample);
         if(d.projected){sample=querySampler.Get();context->PSSetSamplers(2,1,&sample);}
-        const auto vp=renderViewport(target,{0,0,float(target->width),float(target->height),0,1});context->RSSetViewports(1,&vp);
+        context->RSSetViewports(1,&vp);
         context->RSSetState(raster.Get());context->OMSetDepthStencilState(depthState.Get(),0);context->OMSetBlendState(blend.Get(),nullptr,d.multisampleMask);
         // Each original triangle reads preceding packed output, retaining order
         // even when a strip folds over itself or independent triangles overlap.
-        context->OMSetRenderTargets(0,nullptr,nullptr);context->CopyResource(p.packed.Get(),target->texture.Get());
-        for(UINT first=0;first<order.size();first+=3){
-            ID3D11ShaderResourceView* nullView=nullptr;context->PSSetShaderResources(3,1,&nullView);
-            context->OMSetRenderTargets(0,nullptr,nullptr);context->CopyResource(p.destination.Get(),p.packed.Get());
-            auto* view=p.sampled.Get();context->PSSetShaderResources(3,1,&view);auto* output=p.output.Get();context->OMSetRenderTargets(1,&output,depth->view.Get());
-            context->DrawIndexed(3,first,0);
+        const bool whole=region.left==0 && region.top==0 && region.right==target->pixelWidth() && region.bottom==target->pixelHeight();
+        const auto copy=[&](ID3D11Texture2D* destination,ID3D11Texture2D* source) {
+            if(whole)context->CopyResource(destination,source);
+            else context->CopySubresourceRegion(destination,0,region.left,region.top,0,source,0,&region);
+        };
+        // Direct snapshots and retained copies preserve original triangle order.
+        if(direct){
+            // Snapshot the preceding real target once per ORIGINAL triangle.
+            // Both snapshot and draw use the original VS/raster/scissor. The
+            // snapshot has no DSV/alpha rejection and writes every UINT lane.
+            for(UINT first=0;first<order.size();first+=3){
+                ID3D11ShaderResourceView* nullView=nullptr;context->PSSetShaderResources(3,1,&nullView);
+                context->OMSetRenderTargets(0,nullptr,nullptr);
+                auto* source=target->sampledView.Get();context->PSSetShaderResources(3,1,&source);
+                context->PSSetShader(p.snapshotPixel.Get(),nullptr,0);
+                context->OMSetDepthStencilState(p.snapshotDepth.Get(),0);
+                context->OMSetBlendState(p.snapshotBlend.Get(),nullptr,d.multisampleMask);
+                auto* snapshot=p.destinationOutput.Get();context->OMSetRenderTargets(1,&snapshot,nullptr);
+                context->DrawIndexed(3,first,0);
+                context->PSSetShaderResources(3,1,&nullView);context->OMSetRenderTargets(0,nullptr,nullptr);
+                context->PSSetShader(d.radial?p.directRadialPixel.Get():(d.texture2?p.directDualPixel.Get():p.directPixel.Get()),nullptr,0);
+                context->OMSetDepthStencilState(depthState.Get(),0);
+                context->OMSetBlendState(blend.Get(),nullptr,d.multisampleMask);
+                auto* view=p.sampled.Get();context->PSSetShaderResources(3,1,&view);
+                auto* output=target->view.Get();context->OMSetRenderTargets(1,&output,depth->view.Get());
+                context->DrawIndexed(3,first,0);
+            }
+            context->OMSetRenderTargets(0,nullptr,nullptr);
+        }else{
+            // Retain the old conservative box copies as the private oracle and
+            // fallback. All three transfers use the same physical coordinates;
+            // outside texels in the real target are never read or overwritten.
+            context->OMSetRenderTargets(0,nullptr,nullptr);copy(p.packed.Get(),target->texture.Get());
+            for(UINT first=0;first<order.size();first+=3){
+                ID3D11ShaderResourceView* nullView=nullptr;context->PSSetShaderResources(3,1,&nullView);
+                context->OMSetRenderTargets(0,nullptr,nullptr);copy(p.destination.Get(),p.packed.Get());
+                auto* view=p.sampled.Get();context->PSSetShaderResources(3,1,&view);
+                if(temporal)temporal->bind(context.Get());
+                else {auto* output=p.output.Get();context->OMSetRenderTargets(1,&output,depth->view.Get());}
+                context->DrawIndexed(3,first,0);
+            }
+            context->OMSetRenderTargets(0,nullptr,nullptr);copy(target->texture.Get(),p.packed.Get());
         }
-        context->OMSetRenderTargets(0,nullptr,nullptr);context->CopyResource(target->texture.Get(),p.packed.Get());++immediateDraws;
+        ++immediateDraws;
+        noteTemporalSceneDraw(target,depth,d.colorMask,d.depthEnable&&d.depthWrite,false,
+            temporal?std::optional{temporalSceneJitter()}:std::nullopt);
     }
     requireOwner();
 }

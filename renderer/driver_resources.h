@@ -13,6 +13,15 @@ public:
     virtual ~StartupResourceFactory()=default;
     virtual std::shared_ptr<RenderTarget> createTarget(uint32_t width,uint32_t height,TargetFormat format)=0;
     virtual std::shared_ptr<DepthTarget> createDepthTarget(uint32_t width,uint32_t height)=0;
+    virtual std::shared_ptr<RenderTarget> createGeometryTarget(uint32_t width,uint32_t height,TargetFormat format) {
+        return createTarget(width,height,format);
+    }
+    virtual std::shared_ptr<DepthTarget> createGeometryDepthTarget(uint32_t width,uint32_t height) {
+        return createDepthTarget(width,height);
+    }
+    virtual std::shared_ptr<RenderTarget> createPresentationTarget(uint32_t width,uint32_t height,TargetFormat format) {
+        return createTarget(width,height,format);
+    }
     virtual std::shared_ptr<Buffer> createBuffer(uint32_t size,BufferKind kind)=0;
 };
 

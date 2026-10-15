@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace Simpsons::StallProfiler {
@@ -12,6 +13,8 @@ namespace {
 constexpr unsigned sectionCount = static_cast<unsigned>(Section::Count);
 constexpr unsigned rowCount = 512; // Fixed storage, including on guest worker threads.
 constexpr unsigned waitCount = 8;
+constexpr unsigned defaultContributorLimit = 8;
+constexpr unsigned maximumContributorLimit = 32;
 constexpr const char* sectionNames[] = {"guest", "runtime", "rendering", "audio", "file_io", "wait", "present"};
 constexpr const char* guestName = "guest/recompiled";
 
@@ -27,6 +30,35 @@ bool environmentEnabled() noexcept {
     return GetEnvironmentVariableA("SIMPSONS_STALL_PROFILE",value,sizeof(value)) == 1 && value[0] == '1';
 }
 
+unsigned parseContributorLimit(const char* value) noexcept {
+    if (!value || value[0] < '1' || value[0] > '9') return defaultContributorLimit;
+    unsigned result = unsigned(value[0] - '0');
+    if (value[1]) {
+        if (value[1] < '0' || value[1] > '9' || value[2]) return defaultContributorLimit;
+        result = result * 10 + unsigned(value[1] - '0');
+    }
+    return result >= defaultContributorLimit && result <= maximumContributorLimit ? result : defaultContributorLimit;
+}
+
+unsigned environmentContributorLimit() noexcept {
+    if (!enabled) return defaultContributorLimit;
+    const HostState restore;
+    char value[4]{};
+    const DWORD length = GetEnvironmentVariableA("SIMPSONS_STALL_CONTRIBUTORS", value, sizeof(value));
+    if (!length || length >= sizeof(value)) return defaultContributorLimit;
+    return parseContributorLimit(value);
+}
+
+unsigned contributorLimit() noexcept;
+
+bool sampledProcessClockEnabled() noexcept {
+    const HostState restore;
+    // Presence is read once. Ordinary profiler traces gain no clock/logging
+    // work, and an empty sampler setting does not request correlation.
+    return GetEnvironmentVariableA("SIMPSONS_STACK_SAMPLE", nullptr, 0) > 1;
+}
+const bool sampledProcessClock = sampledProcessClockEnabled();
+
 int64_t nativeFrequency() noexcept {
     const HostState restore;
     LARGE_INTEGER value{};
@@ -38,6 +70,7 @@ const int64_t clockFrequency = nativeFrequency();
 int64_t (*testClock)() noexcept{};
 int64_t testFrequency{};
 void (*testSink)(const char*) noexcept{};
+unsigned testContributorLimit{};
 #endif
 
 int64_t frequency() noexcept {
@@ -139,7 +172,18 @@ void charge(int64_t timestamp) noexcept {
 
 double milliseconds(int64_t ticks) noexcept { return double(ticks) * 1000.0 / double(frequency()); }
 bool slowCall(int64_t ticks) noexcept { return ticks > (frequency() * 2) / 1000; }
-bool slowFrame(int64_t ticks) noexcept { return ticks > (frequency() * 1667) / 100000; }
+// SIMPSONS_STALL_FRAME_MS (1-1000, default 16.67) sets the slow-frame budget; 120 FPS
+// pacing studies use about 9.5 so frames that miss an 8.33 ms refresh are reported.
+int64_t frameBudgetMicroseconds() noexcept {
+    static const int64_t budget = [] {
+        char text[32]{};
+        const DWORD length = GetEnvironmentVariableA("SIMPSONS_STALL_FRAME_MS", text, sizeof(text));
+        const double value = length && length < sizeof(text) ? std::atof(text) : 0.0;
+        return value >= 1.0 && value <= 1000.0 ? int64_t(value * 1000.0 + 0.5) : int64_t(16670);
+    }();
+    return budget;
+}
+bool slowFrame(int64_t ticks) noexcept { return ticks > frequency() * frameBudgetMicroseconds() / 1000000; }
 
 void emit(const char* line) noexcept {
 #ifdef SIMPSONS_STALL_PROFILER_TESTING
@@ -174,24 +218,26 @@ void frameLines(int64_t duration, const PPCContext* context) noexcept {
     PPCFPSCRRegister::restoreHostCSR(PPCFPSCRRegister::DefaultCSR);
     char line[2048]{};
     std::snprintf(line, sizeof(line),
-        "[STALL] frame=%llu duration_ms=%.3f budget_ms=16.670 tid=%lu guest_pc=0x%08X caller=0x%08X pc_kind=function_entry sections_ms={guest:%.3f,runtime:%.3f,rendering:%.3f,audio:%.3f,file_io:%.3f,wait:%.3f,present:%.3f} diagnostic_ms=%.3f untracked_contributor_ms=%.3f accounting=owner_wall worker_calls=separate\n",
-        static_cast<unsigned long long>(state.frame), milliseconds(duration), static_cast<unsigned long>(state.thread),
+        "[STALL] frame=%llu duration_ms=%.3f budget_ms=%.3f tid=%lu guest_pc=0x%08X caller=0x%08X pc_kind=function_entry sections_ms={guest:%.3f,runtime:%.3f,rendering:%.3f,audio:%.3f,file_io:%.3f,wait:%.3f,present:%.3f} diagnostic_ms=%.3f untracked_contributor_ms=%.3f accounting=owner_wall worker_calls=separate\n",
+        static_cast<unsigned long long>(state.frame), milliseconds(duration), double(frameBudgetMicroseconds()) / 1000.0,
+        static_cast<unsigned long>(state.thread),
         guestPC(context), guestCaller(context), milliseconds(state.sections[0]), milliseconds(state.sections[1]),
         milliseconds(state.sections[2]), milliseconds(state.sections[3]), milliseconds(state.sections[4]),
         milliseconds(state.sections[5]), milliseconds(state.sections[6]), milliseconds(state.diagnosticTicks),
         milliseconds(state.untrackedTicks));
     emit(line);
-    std::array<const Row*, 8> largest{};
+    const unsigned limit = contributorLimit();
+    std::array<const Row*, maximumContributorLimit> largest{};
     for (const Row& row : state.rows) {
         if (!row.ticks) continue;
-        for (unsigned rank = 0; rank < largest.size(); ++rank) {
+        for (unsigned rank = 0; rank < limit; ++rank) {
             if (largest[rank] && largest[rank]->ticks >= row.ticks) continue;
-            for (unsigned move = unsigned(largest.size()) - 1; move > rank; --move) largest[move] = largest[move - 1];
+            for (unsigned move = limit - 1; move > rank; --move) largest[move] = largest[move - 1];
             largest[rank] = &row;
             break;
         }
     }
-    for (unsigned rank = 0; rank < largest.size() && largest[rank]; ++rank) {
+    for (unsigned rank = 0; rank < limit && largest[rank]; ++rank) {
         const Row& row = *largest[rank];
         PPCFPSCRRegister::restoreHostCSR(PPCFPSCRRegister::DefaultCSR);
         std::snprintf(line, sizeof(line),
@@ -202,6 +248,18 @@ void frameLines(int64_t duration, const PPCContext* context) noexcept {
             static_cast<unsigned long long>(row.object), static_cast<unsigned long long>(row.fence));
         emit(line);
     }
+}
+
+void frameClockLine(int64_t timestamp) noexcept {
+    PPCFPSCRRegister::restoreHostCSR(PPCFPSCRRegister::DefaultCSR);
+    char line[512]{};
+    std::snprintf(line, sizeof(line),
+        "[STACK FRAME CLOCK] schema=1 pid=%lu tid=%lu generation=%llu frame=%llu owner=1 begin_qpc=%lld end_qpc=%lld frequency=%lld\n",
+        static_cast<unsigned long>(GetCurrentProcessId()), static_cast<unsigned long>(state.thread),
+        static_cast<unsigned long long>(state.generation), static_cast<unsigned long long>(state.frame),
+        static_cast<long long>(state.frameStart), static_cast<long long>(timestamp),
+        static_cast<long long>(frequency()));
+    emit(line);
 }
 
 void excludeDiagnostic(int64_t started) noexcept {
@@ -239,6 +297,18 @@ Testing::Snapshot makeSnapshot(int64_t duration) noexcept {
 
 const bool enabled = environmentEnabled();
 
+namespace {
+// Immutable diagnostic configuration, initialized after the enable flag. The
+// disabled path returns eight before even querying the optional environment.
+const unsigned configuredContributorLimit = environmentContributorLimit();
+unsigned contributorLimit() noexcept {
+#ifdef SIMPSONS_STALL_PROFILER_TESTING
+    if (testContributorLimit) return testContributorLimit;
+#endif
+    return configuredContributorLimit;
+}
+}
+
 void Scope::begin(Section section, const char* function, const PPCContext* context,
                   uint64_t object, uint64_t fence) noexcept {
     const HostState restore;
@@ -267,6 +337,7 @@ void Scope::begin(Section section, const char* function, const PPCContext* conte
     active_ = true;
     state.top = this;
     ++state.scopeDepth;
+    if (const auto hook = gpuBoundaryHook.load(std::memory_order_relaxed)) hook(function_, section_, true);
 }
 
 void Scope::finish() noexcept {
@@ -285,6 +356,7 @@ void Scope::finish() noexcept {
         }
     }
     if (state.scopeDepth) --state.scopeDepth;
+    if (const auto hook = gpuBoundaryHook.load(std::memory_order_relaxed)) hook(function_, section_, false);
     const int64_t excluded = state.totalDiagnosticTicks - diagnosticStart_;
     const int64_t duration = timestamp > start_ + excluded ? timestamp - start_ - excluded : 0;
     if (slowCall(duration)) { callLine(*this, duration); excludeDiagnostic(timestamp); }
@@ -343,10 +415,11 @@ void frameBoundary(const PPCContext* context) noexcept {
 #endif
     const bool report = slowFrame(duration);
     if (report) frameLines(duration, context ? context : state.context);
+    if (sampledProcessClock) frameClockLine(timestamp);
     // Open scopes retain their inclusive start and remain on the stack. Their
     // exclusive accounting resumes in the next frame, including outer scopes.
     resetFrame(timestamp);
-    if (report) excludeDiagnostic(timestamp);
+    if (report || sampledProcessClock) excludeDiagnostic(timestamp);
 }
 
 void beginWait(const PPCContext* context, const char* function, uint64_t object, uint64_t fence) noexcept {
@@ -369,6 +442,10 @@ void setClock(int64_t (*clock)() noexcept, int64_t suppliedFrequency) noexcept {
     testFrequency = suppliedFrequency;
 }
 void setLogSink(void (*sink)(const char*) noexcept) noexcept { testSink = sink; }
+unsigned parseContributorLimit(const char* value) noexcept { return Simpsons::StallProfiler::parseContributorLimit(value); }
+void setContributorLimit(unsigned limit) noexcept {
+    testContributorLimit = limit >= defaultContributorLimit && limit <= maximumContributorLimit ? limit : 0;
+}
 Snapshot snapshot() noexcept { return makeSnapshot(state.last - state.frameStart); }
 Snapshot completedFrame() noexcept { return state.completed; }
 }

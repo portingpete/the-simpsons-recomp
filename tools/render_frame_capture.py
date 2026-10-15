@@ -13,9 +13,9 @@ def main():
     if not a.directory.is_dir():
         raise SystemExit(f"capture directory not found: {a.directory}")
     def chunk(kind,data):return struct.pack('>I',len(data))+kind+data+struct.pack('>I',zlib.crc32(kind+data)&0xffffffff)
-    raws=sorted([*a.directory.glob('native-frame-*.rgb10a2'),*a.directory.glob('native-movie-target-*.rgb10a2')])
+    raws=sorted([*a.directory.glob('native-frame-*.rgb10a2'),*a.directory.glob('native-display-*.rgb10a2'),*a.directory.glob('native-movie-target-*.rgb10a2')])
     if a.frame:
-        if not re.fullmatch(r'native-(?:frame|movie-target)-\d+', a.frame):
+        if not re.fullmatch(r'native-(?:frame|display|movie-target)-\d+', a.frame):
             raise SystemExit('Invalid exact native capture stem')
         raws=[raw for raw in raws if raw.stem==a.frame]
     if not raws:

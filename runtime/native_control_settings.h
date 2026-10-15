@@ -7,15 +7,21 @@
 namespace Simpsons {
 enum class ControlAction : uint32_t {
     MoveForward,MoveBackward,MoveLeft,MoveRight,Jump,Attack,Special,Action,
-    SwitchCharacter,TargetLock,LeftStick,RightStick,CharacterMenu,SpecialPower,LeftTrigger,Pause,Count
+    SwitchCharacter,TargetLock,LeftStick,RightStick,CharacterMenu,SpecialPower,LeftTrigger,Pause,
+    // Version 2: camera on keys, walking, free camera and photo mode.
+    LookUp,LookDown,LookLeft,LookRight,Walk,FreeCamera,PhotoMode,Count
 };
 // Physical Windows virtual keys, including mouse buttons, are persisted as
 // numbers. Zero means unbound. The two slots are interchangeable aliases.
+// The unassigned virtual-key codes 0x0A/0x0B stand for mouse wheel up/down.
 struct NativeControlSettings {
     static constexpr uint32_t actionCount=uint32_t(ControlAction::Count),slotCount=2;
+    static constexpr uint32_t version1ActionCount=16;
+    static constexpr uint32_t wheelUp=0x0A,wheelDown=0x0B;
     std::array<std::array<uint32_t,slotCount>,actionCount> bindings{{
         {{'W',0}},{{'S',0}},{{'A',0}},{{'D',0}},{{0x20,0x0D}},{{'J',0x01}},{{'K',0x02}},{{'E',0}},
-        {{'Q',0}},{{'R',0}},{{'F',0}},{{'G',0x04}},{{0x09,0x08}},{{0xA0,0}},{{0xA2,0xA3}},{{0x1B,0}}
+        {{'Q',0}},{{'R',0}},{{'F',0}},{{'G',0x04}},{{0x09,0x08}},{{0xA0,0}},{{0xA2,0xA3}},{{0x1B,0}},
+        {{0x68,0}},{{0x62,0}},{{0x64,0}},{{0x66,0}},{{'C',0}},{{0x76,0}},{{'P',0}}
     }};
     uint32_t mouseSensitivity=100; // Percentage: 25..300, in 25% steps.
     bool invertMouseX=false,invertMouseY=false;
