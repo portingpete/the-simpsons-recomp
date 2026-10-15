@@ -216,7 +216,8 @@ def shader_source(image):
     for i in range(5):
         values = ','.join('0x%08Xu' % v for v in LITERALS[i*4:i*4+4])
         lines.append('    const float4 k'+str(251+i)+'=asfloat(uint4('+values+'));')
-    lines += ['    precise float4 r0=float4(input.uv,0,0),r1=float4(input.uv1,0,0);',
+    # uv1 is the palette coordinate (rigidPaletteCoordinate, analyze_rigid_shader).
+    lines += ['    precise float4 r0=float4(input.uv,0,0),r1=float4(rigidPaletteCoordinate(input.uv1),0,0);',
               '    precise float4 r2=input.characterShadow,r3=input.worldShadow,r4=float4(input.normal,0);',
               '    precise float4 r5=input.color,r6=0,r7=0,output0=0;',
               '    precise float ps=0; bool p0=false;']
@@ -238,8 +239,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--verify", action="store_true")
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--write", action="store_true",
+                        help="Regenerate the local renderer/rigid_dualtextured_shader.hlsl first")
     args = parser.parse_args()
     image = (ROOT / "analysis/simpsons.pe").read_bytes()
+    if args.write:
+        (ROOT / "renderer/rigid_dualtextured_shader.hlsl").write_bytes(shader_source(image).encode("utf-8"))
     report = inspect(image)
     if args.verify:
         source = ROOT / "renderer/rigid_dualtextured_shader.hlsl"

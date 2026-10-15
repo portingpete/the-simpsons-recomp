@@ -6,7 +6,6 @@ namespace {
 uint32_t word(const uint8_t* p) {
     return uint32_t(p[0])<<24 | uint32_t(p[1])<<16 | uint32_t(p[2])<<8 | p[3];
 }
-bool finite(uint32_t bits) {return (bits&0x7F800000u)!=0x7F800000u;}
 constexpr auto normalizedColor=[] {
     std::array<float,256> values{};
     for(size_t i=0;i<values.size();++i)values[i]=float(i)/255.0f;
@@ -31,13 +30,13 @@ void validate(const DeclarationRecord& record) {
 }
 }
 std::vector<Im2DVertex> decodeIm2DVertices(const DeclarationRecord& record,
-    std::span<const uint8_t> source, bool textured) {
+    std::span<const uint8_t> source) {
     std::vector<Im2DVertex> output;
-    decodeIm2DVertices(record,source,textured,output);
+    decodeIm2DVertices(record,source,output);
     return output;
 }
 void decodeIm2DVertices(const DeclarationRecord& record,
-    std::span<const uint8_t> source, bool textured, std::vector<Im2DVertex>& output) {
+    std::span<const uint8_t> source, std::vector<Im2DVertex>& output) {
     validate(record);
     if(source.size()<3*28 || source.size()>9362*28 || source.size()%28)
         throw Im2DVertexError("Im2D input requires 3..9362 complete 28-byte vertices");
@@ -51,18 +50,16 @@ void decodeIm2DVertices(const DeclarationRecord& record,
         const auto* p=source.data()+i*28;
         auto& v=output[i];
         for(size_t c=0;c<4;++c) {
-            const auto bits=word(p+c*4);
-            if(c<3 && !finite(bits))throw Im2DVertexError("Nonfinite Im2D position is not qualified");
-            v.position[c]=std::bit_cast<float>(bits);
+            // Non-finite XYZ bits are kept: the backend drops every triangle
+            // using such a vertex, as the original GPU discards it.
+            v.position[c]=std::bit_cast<float>(word(p+c*4));
         }
         // Original 826D5690..826D5708 builds 0xAARRGGBB, stored BE as A,R,G,B.
         // D3DCOLOR fetch expands unsigned channels to normalized RGBA.
         v.color={normalizedColor[p[17]],normalizedColor[p[18]],normalizedColor[p[19]],normalizedColor[p[16]]};
-        for(size_t c=0;c<2;++c) {
-            const auto bits=word(p+20+c*4);
-            if(textured && !finite(bits))throw Im2DVertexError("Nonfinite textured Im2D UV is not qualified");
-            v.uv[c]=std::bit_cast<float>(bits);
-        }
+        // UV bits are kept as well; the backend rejects a non-finite textured
+        // UV only on a vertex that a drawn triangle consumes.
+        for(size_t c=0;c<2;++c)v.uv[c]=std::bit_cast<float>(word(p+20+c*4));
     }
 }
 }

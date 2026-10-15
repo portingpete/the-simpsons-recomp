@@ -97,9 +97,9 @@ void reportColumn(Timeline& t) {
         static_cast<unsigned long long>(probe.frame),probe.samples.size(),best,height,probe.x);
     // Per row: every scope that changed it, in order, with the value it left
     // (consecutive changes by one scope merge). A stray draw family stands out
-    // against neighbouring rows; runs of rows with the same writers are merged.
+    // against neighbouring rows; runs of rows with the same writers and values are merged.
     struct Write {const char* label;uint32_t value;};
-    std::vector<Write> run;std::vector<const char*> runNames;UINT runStart=0;
+    std::vector<Write> run;UINT runStart=0;
     const auto print=[&](UINT first,UINT last) {
         std::string text;
         for(const auto& write:run) {
@@ -122,9 +122,10 @@ void reportColumn(Timeline& t) {
             }
             previous=v;seen=true;
         }
-        std::vector<const char*> names;for(const auto& write:writes)names.push_back(write.label);
-        if(row>0 && names!=runNames){print(runStart,row-1);runStart=row;}
-        if(row==0 || names!=runNames){runNames=names;run=writes;}
+        const bool same=row>0 && writes.size()==run.size() &&
+            std::equal(writes.begin(),writes.end(),run.begin(),[](const Write& a,const Write& b){return a.label==b.label && a.value==b.value;});
+        if(row>0 && !same){print(runStart,row-1);runStart=row;}
+        if(!same)run=writes;
     }
     if(height)print(runStart,height-1);
     for(UINT slice=0;slice<used;++slice)t.context->Unmap(probe.staging.Get(),slice);

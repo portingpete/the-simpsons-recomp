@@ -296,7 +296,48 @@ void NativeBackend::drawIm2DImpl(const std::shared_ptr<RenderTarget>& target,con
     }
     if(draw.alphaTest && (draw.alphaCompare>7 || !std::isfinite(draw.alphaReference) || draw.alphaReference<0 || draw.alphaReference>1))
         throw Error("Invalid effective native Im2D alpha test/reference/comparison");
-    for(const auto& v:draw.vertices) {
+    // A vertex whose x, y or z is not finite cannot be rasterized: the original
+    // GPU discards every triangle that uses it, as for immediates. 2D sprites
+    // do emit such vertices (live eighty_bites: a four-vertex strip through
+    // 82409308 stopped the game). The remaining triangles are redrawn in order,
+    // with the strip winding the batch uses, as a triangle list validated like
+    // any packet (so everything a drawn triangle consumes must still be finite)
+    // and batched as usual. Only more than 3120 surviving triangles need several
+    // native lists. A packet with nothing left still has its state validated
+    // below and is counted once, without drawing or flushing a pending batch.
+    bool nothingToDraw=false;
+    if(!std::all_of(draw.vertices.begin(),draw.vertices.end(),finiteIm2DPosition)) {
+        Im2DDraw kept=draw;kept.primitiveType=3;kept.vertices.clear();
+        const size_t triangles=draw.primitiveType==3?draw.vertices.size()/3:draw.vertices.size()-2;
+        kept.vertices.reserve(3*triangles);
+        for(size_t triangle=0;triangle<triangles;++triangle) {
+            const size_t i=triangle+2;
+            const std::array<size_t,3> corners=draw.primitiveType==3?
+                std::array<size_t,3>{3*triangle,3*triangle+1,3*triangle+2}:
+                std::array<size_t,3>{i-(i&1?1:2),i-(i&1?2:1),i};
+            if(finiteIm2DPosition(draw.vertices[corners[0]]) && finiteIm2DPosition(draw.vertices[corners[1]]) &&
+               finiteIm2DPosition(draw.vertices[corners[2]]))
+                for(const size_t corner:corners)kept.vertices.push_back(draw.vertices[corner]);
+        }
+        if(!kept.vertices.empty() && kept.vertices.size()<=9360){drawIm2DImpl(target,depth,kept,allowBatch);return;}
+        if(!kept.vertices.empty()) {
+            if(allowBatch)flushIm2D();
+            const auto survivors=std::move(kept.vertices);
+            const auto before=im2dDraws;
+            try {
+                for(size_t first=0;first<survivors.size();first+=9360) {
+                    kept.vertices.assign(survivors.begin()+first,survivors.begin()+std::min(first+9360,survivors.size()));
+                    drawIm2DImpl(target,depth,kept,false);
+                }
+            } catch(...) {
+                if(im2dDraws>before)im2dDraws=before+1;
+                throw;
+            }
+            im2dDraws=before+1;requireOwner();return;
+        }
+        nothingToDraw=true;
+    }
+    if(!nothingToDraw)for(const auto& v:draw.vertices) {
         for(size_t i=0;i<3;++i) if(!std::isfinite(v.position[i])) throw Error("Nonfinite active native Im2D position");
         if(std::abs(v.position[0])>32767 || std::abs(v.position[1])>32767 || v.position[2]<0 || v.position[2]>1)
             throw Error("Native Im2D coordinate clipping outside the qualified range");
@@ -346,6 +387,11 @@ void NativeBackend::drawIm2DImpl(const std::shared_ptr<RenderTarget>& target,con
         // lookup. Removes one driver allocation per textured packet for
         // steadier gameplay/HUD frame times.
         sampler=sceneSamplerState(draw.sampler);
+    }
+    if(nothingToDraw) {
+        // Counted like a submitted packet; a pending batch counts it on flush.
+        if(allowBatch && pendingIm2D)++pendingIm2D->packets;else ++im2dDraws;
+        requireOwner();return;
     }
     if(!im2dPipeline) im2dPipeline=std::make_shared<Im2DPipeline>(device.Get());
     auto& pipeline=*im2dPipeline;

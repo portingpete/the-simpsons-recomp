@@ -1,6 +1,7 @@
 #pragma once
 #include "declaration_resources.h"
 #include <array>
+#include <cmath>
 
 namespace Simpsons::Graphics {
 
@@ -13,17 +14,23 @@ struct Im2DVertex {
     std::array<float,2> uv;
 };
 static_assert(sizeof(Im2DVertex)==40);
+// Whether the position that forms triangles (XYZ) is finite; RHW is unused.
+// The backend drops every triangle that uses a vertex failing this test.
+inline bool finiteIm2DPosition(const Im2DVertex& v) {
+    return std::isfinite(v.position[0]) && std::isfinite(v.position[1]) && std::isfinite(v.position[2]);
+}
 
 // Exact complete vertex range, not the entire dynamic buffer. Accepts the
 // verified Im2D declaration only, with 3..9362 vertices (triangle strip path).
-// Preserves unused RHW/UV bits; rejects nonfinite active XYZ or textured UV.
+// Preserves every position/UV bit, including non-finite XYZ and UV: the
+// backend drops triangles that use a non-finite XYZ and validates the rest.
 // Returns owned data and retains neither source nor declaration references.
 // No binding, device operation, render-state change or game draw is performed.
 std::vector<Im2DVertex> decodeIm2DVertices(const DeclarationRecord&,
-    std::span<const uint8_t> source, bool textured);
+    std::span<const uint8_t> source);
 // Same conversion into caller-owned reusable capacity. Source/output overlap
 // is rejected before resizing; after other failures output contents are unspecified.
 void decodeIm2DVertices(const DeclarationRecord&, std::span<const uint8_t> source,
-    bool textured, std::vector<Im2DVertex>& output);
+    std::vector<Im2DVertex>& output);
 
 }

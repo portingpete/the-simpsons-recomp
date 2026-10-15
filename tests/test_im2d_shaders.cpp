@@ -161,7 +161,7 @@ int main(int argc,char** argv)try {
         p[16]=73;p[17]=211;p[18]=29;p[19]=151;
         put(p+20,quad[i].uv[0]);put(p+24,quad[i].uv[1]);
     }
-    const auto owned=decodeIm2DVertices(*declaration,originalVertices,true);
+    const auto owned=decodeIm2DVertices(*declaration,originalVertices);
     originalVertices.fill(0); // GPU input must own the converted source.
     for(bool textured:{false,true}) {
         const auto pixels=f.pixels(owned,width,height,textured);

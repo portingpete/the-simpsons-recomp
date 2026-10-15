@@ -412,6 +412,7 @@ struct EngineDriver::State {
     std::shared_ptr<Graphics::Buffer> im2dStream;
     uint64_t im2dUploads{};
     uint64_t im2dPackets{};
+    uint64_t im2dNonfinitePackets{}; // Packets with a non-finite XYZ (triangles dropped by the backend).
     uint32_t im2dStaging{}; // Driver-owned CPU upload memory, borrowed only while locked.
     struct DirectSprite {
         uint32_t stack{},staging{};bool active{},locked{};
@@ -4690,6 +4691,17 @@ void EngineDriver::bindIm2DStream(PPCContext& c,uint8_t* base) {
         throw Failure("Original Im2D stream setter ABI or owner changed");
     s.im2dStream=input.buffer;c.r3.u64=0;c.lr=0x823EEC70;
 }
+// Big-endian words of the first eight original 28-byte Im2D vertices.
+static void logIm2DVertexWords(const char* tag,const std::vector<uint8_t>& bytes,uint32_t count) {
+    for(uint32_t vertex=0;vertex<std::min(count,8u) && 28*size_t(vertex)+28<=bytes.size();++vertex) {
+        std::fprintf(stderr,"%s index=%u words=",tag,vertex);
+        for(uint32_t word=0;word<7;++word) {
+            const auto* p=bytes.data()+28*vertex+4*word;
+            std::fprintf(stderr,"%s%08X",word?",":"",(uint32_t(p[0])<<24)|(uint32_t(p[1])<<16)|(uint32_t(p[2])<<8)|p[3]);
+        }
+        std::fputc('\n',stderr);
+    }
+}
 void EngineDriver::drawIm2D(PPCContext& c,uint8_t* base) {
     auto& s=*state;s.requireCaller(base);requireContext(PPC_LOAD_U32(0x82D5DA74));
     auto im2dTimer=s.timing.measure(FrameTiming::Im2D);
@@ -4755,15 +4767,7 @@ void EngineDriver::drawIm2D(PPCContext& c,uint8_t* base) {
             std::fprintf(stderr,"[IM2D REJECTED SCALAR] id=%03X value=%08X\n",field.id,effective.scalar(field.id));
         for(const auto& field:Graphics::samplerStateEvidence())
             std::fprintf(stderr,"[IM2D REJECTED SAMPLER0] id=%03X value=%08X\n",field.id,effective.sampler(0,field.id));
-        for(uint32_t vertex=0;vertex<std::min(u.count,8u);++vertex) {
-            std::fprintf(stderr,"[IM2D REJECTED VERTEX] index=%u words=",vertex);
-            for(uint32_t word=0;word<7;++word) {
-                const auto* bytes=input.bytes.data()+28*vertex+4*word;
-                const uint32_t bits=(uint32_t(bytes[0])<<24)|(uint32_t(bytes[1])<<16)|(uint32_t(bytes[2])<<8)|bytes[3];
-                std::fprintf(stderr,"%s%08X",word?",":"",bits);
-            }
-            std::fputc('\n',stderr);
-        }
+        logIm2DVertexWords("[IM2D REJECTED VERTEX]",input.bytes,u.count);
         dumpGuestStack(c);
         throw Failure(message);
     }
@@ -4780,7 +4784,16 @@ void EngineDriver::drawIm2D(PPCContext& c,uint8_t* base) {
             std::fprintf(stderr,"[IM2D REJECTED SAMPLER0] id=%03X value=%08X\n",field.id,effective.sampler(0,field.id));
         throw;
     }
-    Graphics::decodeIm2DVertices(*input.declaration,input.bytes,raster!=0,draw.vertices);
+    Graphics::decodeIm2DVertices(*input.declaration,input.bytes,draw.vertices);
+    // The backend drops every triangle that uses a non-finite position, as the
+    // original GPU discards it. Record the first producers: words and guest stack.
+    if(!std::all_of(draw.vertices.begin(),draw.vertices.end(),Graphics::finiteIm2DPosition) &&
+       ++s.im2dNonfinitePackets<=8) {
+        std::fprintf(stderr,"[NATIVE IM2D NONFINITE] packet=%llu primitive=%u vertices=%u raster=%08X lr=%08X; triangles using a non-finite position are dropped\n",
+            static_cast<unsigned long long>(s.im2dNonfinitePackets),u.primitive,u.count,raster,uint32_t(c.lr));
+        logIm2DVertexWords("[NATIVE IM2D NONFINITE VERTEX]",input.bytes,u.count);
+        dumpGuestStack(c);
+    }
     draw.primitiveType=u.primitive;draw.rasterWidth=PPC_LOAD_U32(0x82D503D8);draw.rasterHeight=PPC_LOAD_U32(0x82D503DC);
     draw.blendWord=effective.effectiveBlend(0);draw.alphaTest=checked.alphaTest;
     draw.expandedBlend=checked.expandedBlendRequested;

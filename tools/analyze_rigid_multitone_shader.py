@@ -167,7 +167,8 @@ def shader_source(image):
              '    float4 color:TEXCOORD2; float2 uv:TEXCOORD3; float2 uv1:TEXCOORD4; };',
              'struct MultitoneOutput { float4 position:SV_Position; float4 uv:TEXCOORD0;',
              '    float4 characterShadow:TEXCOORD1; float4 worldShadow:TEXCOORD2;',
-             '    float3 normal:TEXCOORD3; float2 noiseUV:TEXCOORD4; float4 color:TEXCOORD5; };']
+             '    float3 normal:TEXCOORD3; float2 noiseUV:TEXCOORD4; float4 color:TEXCOORD5; };',
+             rigid.PALETTE_COORDINATE]
     for stage, va, size, start, length, digest in PROFILES:
         vertex = stage == 'VS'
         lines.append('MultitoneOutput VSRigidMultitone(MultitoneInput input) {' if vertex else
@@ -186,7 +187,11 @@ def shader_source(image):
                       '    precise float4 r3=float4(input.position,1),r4=0,r5=0,r6=input.color,r7=0;',
                       '    precise float4 output62=0,output0=0,output1=0,output2=0,output3=0,output4=0,output5=0;']
         else:
-            lines += ['    precise float4 r0=input.uv,r1=input.characterShadow,r2=input.worldShadow;',
+            # uv.zw is the palette coordinate (uv1); slots 31 and 39 read it
+            # only through frac(), and nothing writes r0.zw before them.
+            # rigidPaletteCoordinate: see analyze_rigid_shader.PALETTE_COORDINATE.
+            lines += ['    precise float4 r0=float4(input.uv.xy,rigidPaletteCoordinate(input.uv.zw));',
+                      '    precise float4 r1=input.characterShadow,r2=input.worldShadow;',
                       '    precise float4 r3=float4(input.normal,0),r4=float4(input.noiseUV,0,0),r5=input.color;',
                       '    precise float4 r6=0,r7=0,r8=0,r9=0,r10=0,r11=0,r12=0,output0=0;']
         lines.append('    precise float ps=0; bool p0=false;')

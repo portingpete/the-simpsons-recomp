@@ -145,11 +145,13 @@ def shader_source(image):
     lines += ['    RigidGlossOutput result; result.position=output62; result.uv=output0; result.world=output1;',
         '    result.characterShadow=output2; result.worldShadow=output3; result.normal=output4.xyz;',
         '    result.color=output5; return result;', '}',
+        rigid.PALETTE_COORDINATE,
         'float4 PSRigidGloss(RigidGlossOutput input):SV_Target0 {']
     for i in range(5):
         lines.append('    const float4 k%d=asfloat(uint4(%s));' %
                      (251+i, ','.join('0x%08Xu'%v for v in LITERALS[4*i:4*i+4])))
-    lines += ['    precise float4 r0=input.uv,r1=input.world,r2=input.characterShadow,r3=input.worldShadow;',
+    # uv.zw is the palette coordinate (uv1); slots 15/16 read it only through frac().
+    lines += ['    precise float4 r0=float4(input.uv.xy,rigidPaletteCoordinate(input.uv.zw)),r1=input.world,r2=input.characterShadow,r3=input.worldShadow;',
         '    precise float4 r4=float4(input.normal,0),r5=input.color,r6=0,r7=0,r8=0,r9=0,r10=0,r11=0,r12=0,output0=0;',
         '    precise float ps=0; bool p0=false;']
     lines += emit_control(rows['PS'],'PS')
