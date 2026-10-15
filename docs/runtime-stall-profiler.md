@@ -482,7 +482,9 @@ attribution, not clean timing.
 history for one frame: at each outermost rendering scope boundary it copies rows
 `[y0,y1)` of column `x` (default: the centre column, rows 900-1300) of the bound
 single-sample RGB10A2 color target, then prints, per run of rows, every scope that
-changed those pixels with the value it left (`[GPU COLUMN PROBE]`). Draws inside
+changed those pixels with the value it left (`[GPU COLUMN PROBE]`). Rows merge
+into one run only when both the writers and the values they left match, so a value
+that alternates from row to row shows up as one line per row. Draws inside
 recorded command lists are attributed to the scope that executes the list.
 
 The D3D11 runtime keeps the immediate context's dispatch table inside the object
