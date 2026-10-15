@@ -514,6 +514,18 @@ add_custom_command(OUTPUT "${SIMPSONS_MONO_DRAW_HEADER}"
     /I "${SIMPSONS_SHADER_DIR}" /Fh "${SIMPSONS_MONO_DRAW_HEADER}" /Vn kPSMonoDraw "${CMAKE_SOURCE_DIR}/renderer/mono_draw.hlsl"
   DEPENDS renderer/mono_draw.hlsl renderer/shadow_mesh.hlsl "${SIMPSONS_MONO_SOURCE}" VERBATIM)
 set(SIMPSONS_RIGID_HEADERS)
+# The rigid, dual-textured and gloss translations are local (gitignored). Build
+# only from copies that match their analyzers; regenerate a stale copy with
+# analyze_rigid_shader.py / analyze_rigid_dualtextured_shader.py / analyze_rigid_gloss_shader.py --write.
+set(SIMPSONS_RIGID_PALETTE_CHECK "${SIMPSONS_SHADER_DIR}/rigid_palette_hlsl_verified.stamp")
+add_custom_command(OUTPUT "${SIMPSONS_RIGID_PALETTE_CHECK}"
+  COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_rigid_shader.py" --verify
+  COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_rigid_dualtextured_shader.py" --verify
+  COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/analyze_rigid_gloss_shader.py" --verify
+  COMMAND "${CMAKE_COMMAND}" -E touch "${SIMPSONS_RIGID_PALETTE_CHECK}"
+  DEPENDS tools/analyze_rigid_shader.py tools/analyze_rigid_dualtextured_shader.py tools/analyze_rigid_gloss_shader.py
+    tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py renderer/rigid_shader.hlsl
+    renderer/rigid_dualtextured_shader.hlsl renderer/rigid_gloss_shader.hlsl analysis/simpsons.pe VERBATIM)
 foreach(ENTRY VSRigid PSRigid GSRigidProbe VSRigidPixelProbe PSRigidNormalProbe)
   if(ENTRY MATCHES "^VS")
     set(PROFILE vs_5_0)
@@ -526,7 +538,7 @@ foreach(ENTRY VSRigid PSRigid GSRigidProbe VSRigidPixelProbe PSRigidNormalProbe)
   add_custom_command(OUTPUT "${HEADER}"
     COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 /T ${PROFILE} /E ${ENTRY}
       /Fh "${HEADER}" /Vn "k${ENTRY}" "${CMAKE_SOURCE_DIR}/renderer/rigid_shader.hlsl"
-    DEPENDS renderer/rigid_shader.hlsl VERBATIM)
+    DEPENDS "${SIMPSONS_RIGID_PALETTE_CHECK}" renderer/rigid_shader.hlsl VERBATIM)
   list(APPEND SIMPSONS_RIGID_HEADERS "${HEADER}")
 endforeach()
 set(SIMPSONS_SHADOW_MESH_HEADER "${SIMPSONS_SHADER_DIR}/PSShadowMeshDepth.h")
@@ -540,7 +552,7 @@ foreach(ENTRY VSRigidTextured PSRigidTextured)
   add_custom_command(OUTPUT "${HEADER}"
     COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 /T ${PROFILE} /E ${ENTRY}
       /Fh "${HEADER}" /Vn "k${ENTRY}" "${CMAKE_SOURCE_DIR}/renderer/rigid_textured_shader.hlsl"
-    DEPENDS renderer/rigid_textured_shader.hlsl renderer/rigid_shader.hlsl VERBATIM)
+    DEPENDS "${SIMPSONS_RIGID_PALETTE_CHECK}" renderer/rigid_textured_shader.hlsl renderer/rigid_shader.hlsl VERBATIM)
   list(APPEND SIMPSONS_RIGID_HEADERS "${HEADER}")
 endforeach()
 set(SIMPSONS_MULTITONE_SOURCE "${SIMPSONS_SHADER_DIR}/rigid_multitone_shader.hlsl")
@@ -583,7 +595,7 @@ foreach(ENTRY VSRigidGloss PSRigidGloss VSRigidGlossPixelProbe GSRigidGlossProbe
   add_custom_command(OUTPUT "${HEADER}"
     COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 /T ${PROFILE} /E ${ENTRY}
       /Fh "${HEADER}" /Vn "k${ENTRY}" "${CMAKE_SOURCE_DIR}/renderer/rigid_gloss_shader.hlsl"
-    DEPENDS renderer/rigid_gloss_shader.hlsl VERBATIM)
+    DEPENDS "${SIMPSONS_RIGID_PALETTE_CHECK}" renderer/rigid_gloss_shader.hlsl VERBATIM)
   list(APPEND SIMPSONS_RIGID_HEADERS "${HEADER}")
 endforeach()
 foreach(ENTRY VSRigidDualTextured PSRigidDualTextured GSRigidDualProbe VSRigidDualPixelProbe)
@@ -598,7 +610,7 @@ foreach(ENTRY VSRigidDualTextured PSRigidDualTextured GSRigidDualProbe VSRigidDu
   add_custom_command(OUTPUT "${HEADER}"
     COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /O3 /T ${PROFILE} /E ${ENTRY}
       /Fh "${HEADER}" /Vn "k${ENTRY}" "${CMAKE_SOURCE_DIR}/renderer/rigid_dualtextured_shader.hlsl"
-    DEPENDS renderer/rigid_dualtextured_shader.hlsl renderer/rigid_shader.hlsl VERBATIM)
+    DEPENDS "${SIMPSONS_RIGID_PALETTE_CHECK}" renderer/rigid_dualtextured_shader.hlsl renderer/rigid_shader.hlsl VERBATIM)
   list(APPEND SIMPSONS_RIGID_HEADERS "${HEADER}")
 endforeach()
 set(SIMPSONS_RIGID_UV_CHECK "${SIMPSONS_SHADER_DIR}/rigid_dualtextured_uv_verified.stamp")

@@ -185,7 +185,8 @@ noise.
 `tools/analyze_rigid_shader.py` owns `rigidPaletteCoordinate` (its
 `PALETTE_COORDINATE` text), which each palette PS applies to its palette
 coordinate before any other use: a component within 2^-16 (relative to
-max(|grid value|,1/64)) of a multiple of 1/64 snaps onto it. Only that grid can
+max(|grid value|,1/64), capped at 1/16384, a 256th of a palette cell) of a
+multiple of 1/64 snaps onto it. Only that grid can
 change `floor(64*frac(u))`, `floor(32*frac(2v))` or the `2v>=1` bit, so a shared
 grid value is exact again and a varying value moves by at most the tolerance.
 Base UVs, noise UVs and every other input are untouched; the temporal (TAA)
@@ -217,6 +218,11 @@ over 70 s wander routes in all 16 stage launchers and spr_hub:
 | dual-textured UV, normalmap | 3.6 k, 115 | 0 | |
 | skin, skin dual, gloss, flipbook | 5.0 M, 41 k, 26 k, 130 | 0 | |
 | chocolate opaque, skin dual UV | not drawn on these routes | | |
+
+The rigid, dual-textured and gloss translations under `renderer/` are local
+(gitignored); the build verifies all three against their analyzers before
+compiling them (`rigid_palette_hlsl_verified.stamp`), and `--write` on each
+analyzer regenerates a stale copy.
 
 Counts are unique draw ranges, so repeated draws are counted once. The snap is
 applied to the four families with at-risk triangles: plain rigid

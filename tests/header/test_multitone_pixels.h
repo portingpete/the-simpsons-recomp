@@ -124,8 +124,8 @@ void multitonePixels() {
     }
     // Palette snap bounds: half the tolerance from a grid line takes the grid
     // code; twice the tolerance keeps the unsnapped floor/frac result.
-    for(float grid:{0.f,.5f,1.f,.703125f,-2.f})for(float side:{-1.f,1.f})for(float scale:{.5f,2.f}) {
-        const float value=grid+side*scale*std::max(std::abs(grid),1.f/64)/65536;
+    for(float grid:{0.f,.5f,1.f,.703125f,-2.f,40.f})for(float side:{-1.f,1.f})for(float scale:{.5f,2.f}) {
+        const float value=grid+side*scale*std::min(std::max(std::abs(grid),1.f/64)/65536,1.f/16384);
         auto p=input;p[0][2]=p[0][3]=value;
         draw(p,constants,grids,"multitone palette grid snap bounds",base,noise);
     }

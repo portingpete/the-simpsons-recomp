@@ -239,8 +239,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--verify", action="store_true")
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--write", action="store_true",
+                        help="Regenerate the local renderer/rigid_dualtextured_shader.hlsl first")
     args = parser.parse_args()
     image = (ROOT / "analysis/simpsons.pe").read_bytes()
+    if args.write:
+        (ROOT / "renderer/rigid_dualtextured_shader.hlsl").write_bytes(shader_source(image).encode("utf-8"))
     report = inspect(image)
     if args.verify:
         source = ROOT / "renderer/rigid_dualtextured_shader.hlsl"

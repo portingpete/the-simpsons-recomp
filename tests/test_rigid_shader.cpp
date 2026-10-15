@@ -61,11 +61,11 @@ void nearValue(float actual,double expected,const char* name,size_t index,size_t
 double sat(double v){return std::clamp(v,0.0,1.0);}
 double frac(double v){return v-std::floor(v);}
 // The palette PSs snap their interpolated palette coordinate onto the 1/64
-// grid within 2^-16 of it (rigidPaletteCoordinate): a value Xenos interpolates
+// grid within 2^-16 of it, at most 1/16384 (rigidPaletteCoordinate): a value Xenos interpolates
 // exactly cannot wrap frac() on the host.
 double paletteSnap(float value) {
     const double grid=std::round(double(value)*64)/64;
-    return std::abs(double(value)-grid)<=std::max(std::abs(grid),1.0/64)/65536?grid:double(value);
+    return std::abs(double(value)-grid)<=std::min(std::max(std::abs(grid),1.0/64)/65536,1.0/16384)?grid:double(value);
 }
 double mix(double a,double b,double t){return a+(b-a)*t;}
 // Independent geometric oracle: conventional row matrices, not shader registers.
@@ -422,8 +422,8 @@ int main(int argc,char** argv)try {
         dual.pixels(p,c,grids,"dual fixed UV0/UV1 sample",false);
         // Palette snap bounds on UV1: half the tolerance from a grid line takes
         // the grid code; twice the tolerance keeps the unsnapped floor/frac result.
-        for(float grid:{0.f,.5f,1.f,.703125f,-2.f})for(float side:{-1.f,1.f})for(float scale:{.5f,2.f}) {
-            auto one=p;one[0][2]=one[0][3]=grid+side*scale*std::max(std::abs(grid),1.f/64)/65536;
+        for(float grid:{0.f,.5f,1.f,.703125f,-2.f,40.f})for(float side:{-1.f,1.f})for(float scale:{.5f,2.f}) {
+            auto one=p;one[0][2]=one[0][3]=grid+side*scale*std::min(std::max(std::abs(grid),1.f/64)/65536,1.f/16384);
             dual.pixels(one,c,grids,"dual palette grid snap bounds",false);
         }
     }
@@ -468,8 +468,8 @@ int main(int argc,char** argv)try {
     }
     for(float u:{-2.125f,0.f,.999f,3.625f}){auto one=probe;one[0][0]=u;one[0][1]=-1.375f;f.pixels(one,pc,grids,"UV wrap arithmetic",false);}
     // Palette snap bounds on UV0 (plain rigid packs it; textured ignores it).
-    for(float grid:{0.f,.5f,1.f,.703125f,-2.f})for(float side:{-1.f,1.f})for(float scale:{.5f,2.f}) {
-        auto one=probe;one[0][0]=one[0][1]=grid+side*scale*std::max(std::abs(grid),1.f/64)/65536;
+    for(float grid:{0.f,.5f,1.f,.703125f,-2.f,40.f})for(float side:{-1.f,1.f})for(float scale:{.5f,2.f}) {
+        auto one=probe;one[0][0]=one[0][1]=grid+side*scale*std::min(std::max(std::abs(grid),1.f/64)/65536,1.f/16384);
         f.pixels(one,pc,grids,"palette grid snap bounds",false);
     }
     if(textured)for(size_t channel=0;channel<4;++channel)for(float value:{-.5f,0.f,.125f,.5f,.96f,1.5f}) {
