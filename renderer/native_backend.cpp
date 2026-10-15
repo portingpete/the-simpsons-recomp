@@ -1,7 +1,12 @@
 #include "native_backend.h"
+#include "graphics_api.h"
+#if SIMPSONS_VULKAN
+#include "vulkan/vulkan_device_factory.h"
+#endif
 #include "device_availability.h"
 #include "presentation_window.h"
 #include "d3d_call_stats.h"
+#include "gpu_timeline.h"
 #include "runtime/stall_profiler.h"
 #include <dxgi1_5.h>
 #include <cstdio>
@@ -9,6 +14,7 @@
 #include <cmath>
 #include <algorithm>
 #include <bit>
+#include <new>
 
 namespace Simpsons::Graphics {
 namespace {
@@ -36,16 +42,39 @@ Layout layout(uint32_t width,uint32_t height,TextureFormat format,bool mip=false
 }
 }
 NativeBackend::NativeBackend(bool software,bool vsync):owner(GetCurrentThreadId()),vsyncEnabled(vsync) {
+    if(graphicsApi()==GraphicsApi::Vulkan) {
+#if SIMPSONS_VULKAN
+        // Same renderer and contracts on a native Vulkan device: the device and
+        // context implement the D3D11 interface subset this backend uses.
+        StallProfiler::Scope deviceProfile(StallProfiler::Section::Rendering,"Startup.VulkanCreateDevice",nullptr,0);
+        check(Vulkan::createDevice(&device,&featureLevel,&context),"Vulkan device creation");
+        availability=std::make_shared<DeviceAvailability>(device.Get());
+        if(software) fprintf(stderr,"[NATIVE GRAPHICS] WARP has no Vulkan equivalent; using the selected Vulkan adapter\n");
+        if(d3dCallStatsRequested()) fprintf(stderr,"[NATIVE GRAPHICS] D3D11 vtable call statistics are unavailable on Vulkan\n");
+        fprintf(stderr,"[NATIVE GRAPHICS] Vulkan %s feature_level=0x%X; no console command processor\n",
+            Vulkan::deviceDescription(device.Get()).c_str(),unsigned(featureLevel));
+        return;
+#else
+        throw Error("This build excludes the Vulkan renderer (configure with -DSIMPSONS_VULKAN=ON)");
+#endif
+    }
     D3D_FEATURE_LEVEL levels[]={D3D_FEATURE_LEVEL_11_1,D3D_FEATURE_LEVEL_11_0};
     D3D_DRIVER_TYPE driver=software?D3D_DRIVER_TYPE_WARP:D3D_DRIVER_TYPE_HARDWARE;
-    HRESULT result=D3D11CreateDevice(nullptr,driver,nullptr,D3D11_CREATE_DEVICE_BGRA_SUPPORT,levels,2,D3D11_SDK_VERSION,&device,&featureLevel,&context);
-    if(result==E_INVALIDARG)
+    HRESULT result;
+    {
+        StallProfiler::Scope deviceProfile(StallProfiler::Section::Rendering,"Startup.D3D11CreateDevice.initial",nullptr,uint64_t(driver));
+        result=D3D11CreateDevice(nullptr,driver,nullptr,D3D11_CREATE_DEVICE_BGRA_SUPPORT,levels,2,D3D11_SDK_VERSION,&device,&featureLevel,&context);
+    }
+    if(result==E_INVALIDARG) {
+        StallProfiler::Scope deviceProfile(StallProfiler::Section::Rendering,"Startup.D3D11CreateDevice.fallback11_0",nullptr,uint64_t(driver));
         result=D3D11CreateDevice(nullptr,driver,nullptr,D3D11_CREATE_DEVICE_BGRA_SUPPORT,levels+1,1,D3D11_SDK_VERSION,&device,&featureLevel,&context);
+    }
     check(result,"device creation");
     if(d3dCallStatsRequested())installD3DCallStats(context.Get(),device.Get());
     availability=std::make_shared<DeviceAvailability>(device.Get());
     fprintf(stderr,"[NATIVE GRAPHICS] D3D11 %s feature_level=0x%X; no console command processor\n",software?"WARP":"hardware",unsigned(featureLevel));
 }
+NativeBackend::~NativeBackend()=default;
 void NativeBackend::requireOwner() const {
     if(GetCurrentThreadId()!=owner) throw Error("Native graphics immediate context used from a different thread");
     availability->require();
@@ -72,6 +101,21 @@ void NativeBackend::validateSubmissionContext() const {
     validatedSubmissionContext=context;
     validatedSubmissionDevice=device;
 }
+ComPtr<ID3D11DeviceContext1> NativeBackend::constantBindingContext() const {
+    validateSubmissionContext();
+    if(constantBindingBaseContext.Get()==context.Get() && constantBindingDevice.Get()==device.Get())
+        return constantBindingContext1;
+    ComPtr<ID3D11DeviceContext1> ranged;
+    const HRESULT interfaceResult=context.As(&ranged);
+    D3D11_FEATURE_DATA_D3D11_OPTIONS options{};
+    const HRESULT optionResult=device->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS,&options,sizeof(options));
+    validateSubmissionContext();
+    constantBindingBaseContext=context;constantBindingDevice=device;
+    constantBindingContext1=SUCCEEDED(interfaceResult)?ranged:ComPtr<ID3D11DeviceContext1>{};
+    constantArenaSupported=constantBindingContext1 && SUCCEEDED(optionResult) &&
+        options.ConstantBufferOffsetting && options.MapNoOverwriteOnDynamicConstantBuffer;
+    return constantBindingContext1;
+}
 void NativeBackend::attachWindow(HWND window,uint32_t width,uint32_t height) {
     validateSubmissionContext();
     if(swapChain || !window || !IsWindow(window) || !width || !height || width>16384 || height>16384)
@@ -86,9 +130,8 @@ void NativeBackend::attachWindow(HWND window,uint32_t width,uint32_t height) {
     ComPtr<IDXGIAdapter> adapter;check(dxgiDevice->GetAdapter(&adapter),"adapter query");
     ComPtr<IDXGIFactory2> factory;check(adapter->GetParent(IID_PPV_ARGS(&factory)),"factory query");
     DXGI_SWAP_CHAIN_DESC1 desc{};
-    const auto extent=renderExtent(width,height,TargetScale::Scene);
-    const uint32_t samples=antialiasingMode==Antialiasing::SSAA4x?2:1;
-    const auto canvas=presentationExtent(extent[0]/samples,extent[1]/samples,width,height,width,height);
+    const auto extent=renderExtent(width,height,TargetScale::Output);
+    const auto canvas=presentationExtent(extent[0],extent[1],width,height,width,height);
     desc.Width=canvas[0];desc.Height=canvas[1];desc.Format=DXGI_FORMAT_R10G10B10A2_UNORM;
     desc.SampleDesc.Count=1;desc.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
     desc.BufferCount=2;desc.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;
@@ -122,7 +165,10 @@ void NativeBackend::attachWindow(HWND window,uint32_t width,uint32_t height) {
     ComPtr<ID3D11Texture2D> target;check(created->GetBuffer(0,IID_PPV_ARGS(&target)),"backbuffer query");
     ComPtr<ID3D11RenderTargetView> view;check(device->CreateRenderTargetView(target.Get(),nullptr,&view),"backbuffer view creation");
     swapChain=std::move(created);backbuffer=std::move(view);
-    presentationSourceWidth=extent[0]/samples;presentationSourceHeight=extent[1]/samples;
+    // Set the real DXGI queue bound explicitly; its driver default is three.
+    ComPtr<IDXGIDevice1> latencyDevice;check(device.As(&latencyDevice),"frame latency interface");
+    check(latencyDevice->SetMaximumFrameLatency(maximumFrameLatency),"initial frame queue limit");
+    presentationSourceWidth=extent[0];presentationSourceHeight=extent[1];
     presentationLogicalWidth=width;presentationLogicalHeight=height;
     tearingEnabled=useTearing;
     if(!vsyncEnabled && !tearingEnabled)
@@ -173,6 +219,74 @@ std::shared_ptr<Texture> NativeBackend::createTextureMipChain(uint32_t width,uin
     view.Texture2D.MipLevels=desc.MipLevels;
     check(device->CreateShaderResourceView(result->texture.Get(),&view,&result->view),"explicit mip chain view creation");
     validateTexture(result);return result;
+}
+std::shared_ptr<const NativeImmutableMipFactory> NativeBackend::immutableMipPreparationFactory() const {
+    validateSubmissionContext();
+    const ComPtr<ID3D11Device> owned=device;
+    const char* reason="available";
+    UINT flags{};HRESULT threadingResult{};D3D11_FEATURE_DATA_THREADING threading{};
+    bool flagsQueried=false,threadingQueried=false;
+    if(d3dCallStatsInstalled())reason="counterblocked";
+    else {
+        flags=owned->GetCreationFlags();flagsQueried=true;
+        if(flags&D3D11_CREATE_DEVICE_SINGLETHREADED)reason="singlethreaded";
+        else {
+            threadingResult=owned->CheckFeatureSupport(D3D11_FEATURE_THREADING,&threading,sizeof(threading));
+            threadingQueried=true;
+            if(FAILED(threadingResult))reason="queryfailed";
+            else if(threading.DriverConcurrentCreates!=TRUE)reason="noconcurrentcreates";
+        }
+    }
+    validateSubmissionContext();
+    if(owned.Get()!=device.Get())throw Error("Native immutable mip capability device changed during acquisition");
+    const auto report=[&](const char* status) {
+        if(!StallProfiler::enabled)return;
+        std::fprintf(stderr,"[NATIVE IMMUTABLE MIP FACTORY] status=%s flags_queried=%u creation_flags=0x%X threading_queried=%u threading_hr=0x%08lX driver_concurrent_creates=%u driver_command_lists=%u; unqueried fields are unavailable, GPU completion not implied\n",
+            status,unsigned(flagsQueried),flags,unsigned(threadingQueried),ULONG(threadingResult),
+            unsigned(threading.DriverConcurrentCreates),unsigned(threading.DriverCommandLists));
+    };
+    const bool eligible=threadingQueried&&SUCCEEDED(threadingResult)&&threading.DriverConcurrentCreates==TRUE;
+    if(!eligible){report(reason);return {};}
+    std::shared_ptr<const NativeImmutableMipFactory> factory;
+    try {factory=std::shared_ptr<const NativeImmutableMipFactory>(new NativeImmutableMipFactory(owned));}
+    catch(const std::bad_alloc&) {report("allocationfailed");return {};}
+    report("available");return factory;
+}
+bool NativeBackend::matchesImmutableMipPreparationFactory(const std::shared_ptr<const NativeImmutableMipFactory>& factory) const {
+    validateSubmissionContext();
+    return factory && factory->device.Get()==device.Get();
+}
+std::shared_ptr<Texture> NativeImmutableMipFactory::createMipChain(uint32_t width,uint32_t height,TextureFormat format,
+    std::span<const std::span<const uint8_t>> levels) const {
+    return createOnDevice(device,width,height,format,levels);
+}
+std::shared_ptr<Texture> NativeImmutableMipFactory::createOnDevice(const ComPtr<ID3D11Device>& device,
+    uint32_t width,uint32_t height,TextureFormat format,std::span<const std::span<const uint8_t>> levels) {
+    if(format!=TextureFormat::RGBA8 && format!=TextureFormat::BGRX8 &&
+       format!=TextureFormat::BC1 && format!=TextureFormat::BC2 && format!=TextureFormat::BC3)
+        throw Error("Native mip chains support only RGBA8/BGRX8/BC1/BC2/BC3");
+    const auto storage=layout(width,height,format);
+    const auto maximum=std::bit_width(std::max(width,height));
+    if(levels.empty() || levels.size()>maximum) throw Error("Invalid native texture mip level count");
+    std::vector<D3D11_SUBRESOURCE_DATA> sources;sources.reserve(levels.size());
+    for(uint32_t i=0;i<levels.size();++i) {
+        const auto mip=layout(std::max(1u,width>>i),std::max(1u,height>>i),format,i!=0);
+        if(uint64_t(mip.rowBytes)*mip.rows!=levels[i].size())throw Error("Native texture input byte count mismatch for mip level");
+        sources.push_back({levels[i].data(),mip.rowBytes,UINT(levels[i].size())});
+    }
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width=width;desc.Height=height;desc.MipLevels=UINT(levels.size());desc.ArraySize=1;
+    desc.Format=storage.format;desc.SampleDesc.Count=1;
+    desc.Usage=D3D11_USAGE_IMMUTABLE;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+    auto result=std::make_shared<Texture>();result->width=width;result->height=height;
+    result->format=format;result->rowBytes=storage.rowBytes;result->rows=storage.rows;result->mipLevels=desc.MipLevels;
+    check(device->CreateTexture2D(&desc,sources.data(),&result->texture),"explicit mip chain upload");
+    D3D11_SHADER_RESOURCE_VIEW_DESC view{};view.Format=desc.Format;view.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;
+    view.Texture2D.MipLevels=desc.MipLevels;
+    check(device->CreateShaderResourceView(result->texture.Get(),&view,&result->view),"explicit mip chain view creation");
+    // Worker publication leaves the mutable backend validation proof empty.
+    // The consuming owner validates the actual device, descriptors and view.
+    return result;
 }
 std::shared_ptr<Texture> NativeBackend::createWritableTexture(uint32_t width,uint32_t height,TextureFormat format) {
     requireOwner();
@@ -371,6 +485,16 @@ void NativeBackend::clear(const std::array<float,4>& color) {
     for(float value:color) if(!std::isfinite(value)) throw Error("Nonfinite native clear color");
     context->ClearRenderTargetView(backbuffer.Get(),color.data());
 }
+void NativeBackend::configureFrameLatency(uint32_t frames) {
+    validateSubmissionContext();
+    if(frames<1 || frames>3)throw Error("Native frame queue must contain one to three frames");
+    if(frames==maximumFrameLatency)return;
+    // The device-level API applies to this non-waitable flip-model chain.
+    // https://learn.microsoft.com/en-us/windows/win32/api/dxgi/nf-dxgi-idxgidevice1-setmaximumframelatency
+    ComPtr<IDXGIDevice1> latencyDevice;check(device.As(&latencyDevice),"frame latency interface");
+    check(latencyDevice->SetMaximumFrameLatency(frames),"frame queue limit");
+    maximumFrameLatency=frames;
+}
 bool NativeBackend::present() {
     flushIm2D();
     requireOwner();
@@ -384,8 +508,28 @@ bool NativeBackend::present() {
     requireOwner();
     if(result==DXGI_STATUS_OCCLUDED) return false;
     if(result!=S_OK) throw Error("Native presentation returned an unsupported display status");
-    ++presentations;
+    ++presentations;notePresentationForCounter();skinDetailUploads_=0;
+    GpuTimeline::frame(device.Get());
     return true;
+}
+NativeBackend::FlipStatistics NativeBackend::flipStatistics() const {
+    requireOwner();
+    FlipStatistics out;
+    if(!swapChain)return out;
+    UINT last=0;
+    if(SUCCEEDED(swapChain->GetLastPresentCount(&last)))out.present=last;
+    // Flip-model chains report statistics in windowed and fullscreen modes; a
+    // disjoint or not-yet-available result simply leaves `valid` false.
+    // https://learn.microsoft.com/en-us/windows/win32/api/dxgi/nf-dxgi-idxgiswapchain-getframestatistics
+    DXGI_FRAME_STATISTICS stats{};
+    if(SUCCEEDED(swapChain->GetFrameStatistics(&stats)) && stats.SyncQPCTime.QuadPart>0) {
+        out.valid=true;out.displayedPresent=stats.PresentCount;out.syncQpc=uint64_t(stats.SyncQPCTime.QuadPart);
+    }
+    return out;
+}
+void NativeBackend::enableGpuTimeline() {
+    requireOwner();
+    if(GpuTimeline::requested())GpuTimeline::attach(device.Get(),context.Get());
 }
 void NativeBackend::resetSceneStateCacheForDevice() {
     sceneCacheDevice=device;
@@ -410,6 +554,7 @@ ComPtr<ID3D11DepthStencilState> NativeBackend::sceneDepthState(uint32_t enable,u
         dd.DepthFunc=D3D11_COMPARISON_FUNC(compare+1);
         dd.FrontFace={D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_COMPARISON_ALWAYS};
         dd.BackFace=dd.FrontFace;
+        StallProfiler::Scope profile(StallProfiler::Section::Rendering,"D3D11.CreateDepthStencilState.scene",nullptr,reinterpret_cast<uintptr_t>(device.Get()));
         check(device->CreateDepthStencilState(&dd,&sceneDepthStates[index]),"scene depth state creation");
     }
     return sceneDepthStates[index];
@@ -423,7 +568,7 @@ ComPtr<ID3D11RasterizerState> NativeBackend::sceneRasterState(uint32_t cull,uint
     if(!sceneRasterStates[index]) {
         D3D11_RASTERIZER_DESC rd{}; rd.FillMode=D3D11_FILL_SOLID;
         rd.CullMode=cull==0?D3D11_CULL_NONE:D3D11_CULL_BACK;
-        rd.FrontCounterClockwise=cull==2; rd.ScissorEnable=scissorEnable; rd.DepthClipEnable=TRUE;
+        rd.FrontCounterClockwise=cull==2; rd.ScissorEnable=scissorEnable; rd.DepthClipEnable=TRUE;rd.MultisampleEnable=TRUE;
         check(device->CreateRasterizerState(&rd,&sceneRasterStates[index]),"scene raster state creation");
     }
     return sceneRasterStates[index];
@@ -462,21 +607,23 @@ ComPtr<ID3D11SamplerState> NativeBackend::sceneSamplerState(const D3D11_SAMPLER_
     slot.used=true; slot.desc=desc; slot.state=created;
     return created;
 }
-ComPtr<ID3D11Buffer> NativeBackend::sceneDepthConstantBuffer(uint32_t reverse,uint32_t constantBits,uint32_t slopeBits) {
+ComPtr<ID3D11Buffer> NativeBackend::sceneDepthConstantBuffer(uint32_t reverse,uint32_t constantBits,uint32_t slopeBits,uint32_t reserved) {
     requireOwner();
     if(!device || !context) throw Error("Native scene state cache requires its D3D device");
     if(sceneCacheDevice.Get()!=device.Get()) resetSceneStateCacheForDevice();
     for(auto& entry:sceneDepthConstants) {
-        if(entry.used && entry.reverse==reverse && entry.constantBits==constantBits && entry.slopeBits==slopeBits) return entry.buffer;
+        if(entry.used && entry.reverse==reverse && entry.constantBits==constantBits && entry.slopeBits==slopeBits && entry.reserved==reserved) return entry.buffer;
     }
     struct Values { uint32_t reverse,constantBits,slopeBits,reserved; };
-    const Values values{reverse,constantBits,slopeBits,0};
+    const Values values{reverse,constantBits,slopeBits,reserved};
     D3D11_BUFFER_DESC bd{}; bd.ByteWidth=sizeof(values); bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER; bd.Usage=D3D11_USAGE_IMMUTABLE;
     const D3D11_SUBRESOURCE_DATA initial{&values,0,0};
     ComPtr<ID3D11Buffer> created;
+    StallProfiler::Scope depthProfile(StallProfiler::Section::Rendering,"D3D11.CreateBuffer.scene.depthConstants",nullptr,reinterpret_cast<uintptr_t>(device.Get()));
     check(device->CreateBuffer(&bd,&initial,&created),"scene depth constant creation");
+    depthProfile.finish();
     auto& slot=sceneDepthConstants[sceneDepthConstantNext]; sceneDepthConstantNext=(sceneDepthConstantNext+1)%sceneDepthConstants.size();
-    slot.used=true; slot.reverse=reverse; slot.constantBits=constantBits; slot.slopeBits=slopeBits; slot.buffer=created;
+    slot.used=true; slot.reverse=reverse; slot.constantBits=constantBits; slot.slopeBits=slopeBits; slot.reserved=reserved; slot.buffer=created;
     return created;
 }
 }

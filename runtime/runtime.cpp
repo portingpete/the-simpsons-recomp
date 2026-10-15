@@ -139,9 +139,11 @@ Runtime::Runtime() {
     if(!vectoredHandler) vectoredHandler=AddVectoredExceptionHandler(1,guestFaultHandler);
 }
 Runtime::~Runtime() {
+    // Workers still use watch tables and hardware-fault conversion while exiting.
+    stopThreads();
     guestWatchArmedTable=nullptr;guestWatchVersionTable=nullptr;
     if(vectoredHandler) {RemoveVectoredExceptionHandler(vectoredHandler);vectoredHandler=nullptr;}
-    stopThreads(); engineAudioOutput.reset(); engineAudio.reset();
+    engineAudioOutput.reset(); engineAudio.reset();
     {std::lock_guard lifetime(engineDriverMutex);engineDriver.reset();}
     window.reset(); objectReferences.clear(); handles.clear(); threads.clear();mainThreadHandle.reset();
     currentContext=nullptr; active=nullptr;

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <utility>
 #include "VSTextured.h"
 #include "PSMovie.h"
 #include "PSMoviePacked.h"
@@ -16,6 +17,11 @@ void check(HRESULT result,const char* operation) {
     }
 }
 bool same(float a,float b) {return std::bit_cast<uint32_t>(a)==std::bit_cast<uint32_t>(b);}
+bool sameTextureDescriptor(const D3D11_TEXTURE2D_DESC& a,const D3D11_TEXTURE2D_DESC& b) {
+    return a.Width==b.Width && a.Height==b.Height && a.MipLevels==b.MipLevels && a.ArraySize==b.ArraySize &&
+        a.Format==b.Format && a.SampleDesc.Count==b.SampleDesc.Count && a.SampleDesc.Quality==b.SampleDesc.Quality &&
+        a.Usage==b.Usage && a.BindFlags==b.BindFlags && a.CPUAccessFlags==b.CPUAccessFlags && a.MiscFlags==b.MiscFlags;
+}
 void validateRectangle(const std::array<ScreenVertex,4>& vertices) {
     // Original primitive8 expansion, in the original bottom-left, bottom-right,
     // top-left, top-right order. VSTextured passes clip XY and UV through.
@@ -140,8 +146,24 @@ void NativeBackend::drawMovie(const std::shared_ptr<RenderTarget>& target,const 
     D3D11_TEXTURE2D_DESC packedDesc{};outputOwner->texture->GetDesc(&packedDesc);
     packedDesc.Format=DXGI_FORMAT_R10G10B10A2_UINT;packedDesc.BindFlags=D3D11_BIND_RENDER_TARGET;
     ComPtr<ID3D11Texture2D> packed;ComPtr<ID3D11RenderTargetView> packedView;
-    check(device->CreateTexture2D(&packedDesc,nullptr,&packed),"integer output allocation");
-    check(device->CreateRenderTargetView(packed.Get(),nullptr,&packedView),"integer output view creation");
+    // Screen and movie passes both copy the whole target in, draw, then copy
+    // it back on this owner immediate context. Share their private packed
+    // surface by exact device/physical descriptor; no target or plane owner
+    // enters the cache. Stage a miss until every fallible movie preparation
+    // succeeds, so a rejected frame leaves the previous cache and receipt live.
+    ScreenScratchTexture nextScratch;
+    if(screenScratch.device.Get()!=device.Get() || !screenScratch.texture || !screenScratch.view ||
+       !sameTextureDescriptor(screenScratch.desc,packedDesc)) {
+        nextScratch.device=device;nextScratch.desc=packedDesc;
+        check(device->CreateTexture2D(&packedDesc,nullptr,&nextScratch.texture),"integer output allocation");
+        D3D11_RENDER_TARGET_VIEW_DESC packedViewDesc{};packedViewDesc.Format=DXGI_FORMAT_R10G10B10A2_UINT;
+        packedViewDesc.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;
+        check(device->CreateRenderTargetView(nextScratch.texture.Get(),&packedViewDesc,&nextScratch.view),"integer output view creation");
+        packed=nextScratch.texture;packedView=nextScratch.view;
+    } else {packed=screenScratch.texture;packedView=screenScratch.view;}
+    if(packed.Get()==outputOwner->texture.Get())throw Error("Native movie scratch aliases its output");
+    for(const auto& plane:owned.textures)
+        if(packed.Get()==plane->texture.Get())throw Error("Native movie scratch aliases a plane");
     auto prepared=moviePipeline?moviePipeline:std::make_shared<MoviePipeline>(device.Get());
     ComPtr<ID3D11Buffer> priorStream;UINT priorStride{},priorOffset{};
     context->IAGetVertexBuffers(0,1,&priorStream,&priorStride,&priorOffset);
@@ -149,6 +171,7 @@ void NativeBackend::drawMovie(const std::shared_ptr<RenderTarget>& target,const 
     // All fallible preparation is complete. A real movie binding replaces any
     // earlier scene/screen transaction; a rejected frame above leaves it live.
     invalidateScreenReplacement();
+    if(nextScratch.texture)screenScratch=std::move(nextScratch);
     moviePipeline=prepared;const auto& pipeline=*prepared;
 
     // Same compatible packed-family bit transfer as drawOriginalScreen. The
@@ -180,6 +203,8 @@ void NativeBackend::drawMovie(const std::shared_ptr<RenderTarget>& target,const 
     views.fill(nullptr);context->PSSetShaderResources(0,UINT(views.size()),views.data());
     output=outputOwner->view.Get();context->OMSetRenderTargets(1,&output,depthOwner->view.Get());
     context->CopyResource(outputOwner->texture.Get(),packed.Get());
+    // Actual movie DS is disabled, including when its retained write bit is one.
+    noteTemporalSceneDraw(outputOwner,depthOwner,15,false,false,std::array<float,2>{});
     context->RSSetViewports(1,&originalViewport);
     context->PSSetShader(pipeline.pixel.Get(),nullptr,0);
     stream=priorStream.Get();context->IASetVertexBuffers(0,1,&stream,&priorStride,&priorOffset);

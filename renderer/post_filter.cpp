@@ -18,6 +18,7 @@
 #include "PSSatDraw.h"
 #include "PSFlatEffectDraw.h"
 #include "PSModulatedFlatDraw.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -131,14 +132,15 @@ struct PostFilterPipeline {
     }
     void surfaces(ID3D11Device* device,UINT w,UINT h){
         if(width==w&&height==h)return;
-        D3D11_TEXTURE2D_DESC desc{};desc.Width=w;desc.Height=h;desc.MipLevels=desc.ArraySize=1;desc.SampleDesc.Count=1;
+        D3D11_TEXTURE2D_DESC desc{};desc.Width=w;desc.Height=h;desc.MipLevels=desc.ArraySize=1;desc.SampleDesc={1,0};
         desc.Format=DXGI_FORMAT_R10G10B10A2_TYPELESS;desc.BindFlags=D3D11_BIND_RENDER_TARGET;
         ComPtr<ID3D11Texture2D> p,d;ComPtr<ID3D11RenderTargetView> r;ComPtr<ID3D11ShaderResourceView> s;
         check(device->CreateTexture2D(&desc,nullptr,&p),"packed output allocation");
         desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;check(device->CreateTexture2D(&desc,nullptr,&d),"destination allocation");
         D3D11_RENDER_TARGET_VIEW_DESC rd{};rd.Format=DXGI_FORMAT_R10G10B10A2_UINT;rd.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;
         check(device->CreateRenderTargetView(p.Get(),&rd,&r),"packed RTV");
-        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=DXGI_FORMAT_R10G10B10A2_UINT;sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;sd.Texture2D.MipLevels=1;
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=DXGI_FORMAT_R10G10B10A2_UINT;sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels=1;
         check(device->CreateShaderResourceView(d.Get(),&sd,&s),"destination SRV");
         packed=std::move(p);destination=std::move(d);output=std::move(r);sampled=std::move(s);width=w;height=h;
     }
@@ -254,7 +256,12 @@ void NativeBackend::drawPostFilter(const std::shared_ptr<RenderTarget>& target,c
     };
     if(d.input)validateSampler(d.sampler);if(d.secondaryInput)validateSampler(d.secondarySampler);if(d.depthInput)validateSampler(d.depthSampler);
     flushIm2D();noAuxiliaryStages(context.Get(),device->GetFeatureLevel());
-    if(!submit)return;
+    if(!submit) {
+        // A suppressed original modulated overlay (lens flare off) completes
+        // its draw scope without pixels, keeping its screen-replacement receipt.
+        if(d.pixelShader==0x82152318){++postFilterDraws;completedOriginalModulatedPostFilterDraw=postFilterDraws;completedOriginalDistortionDraw=0;}
+        return;
+    }
     if(!postFilterPipeline)postFilterPipeline=std::make_shared<PostFilterPipeline>(device.Get());
     auto& p=*postFilterPipeline;p.surfaces(device.Get(),target->pixelWidth(),target->pixelHeight());
     // RECTLIST implies its fourth corner v1+v2-v0; strip order v0,v1,v2,v3.
@@ -280,7 +287,7 @@ void NativeBackend::drawPostFilter(const std::shared_ptr<RenderTarget>& target,c
     bd.RenderTarget[0].DestBlendAlpha=D3D11_BLEND_ZERO;bd.RenderTarget[0].BlendOpAlpha=D3D11_BLEND_OP_ADD;
     bd.RenderTarget[0].RenderTargetWriteMask=UINT8(d.colorMask);
     ComPtr<ID3D11BlendState> blend;check(device->CreateBlendState(&bd,&blend),"packed color write mask");
-    D3D11_RASTERIZER_DESC rd{};rd.FillMode=D3D11_FILL_SOLID;rd.CullMode=D3D11_CULL_NONE;rd.DepthClipEnable=TRUE;rd.ScissorEnable=d.scissorEnable;
+    D3D11_RASTERIZER_DESC rd{};rd.FillMode=D3D11_FILL_SOLID;rd.CullMode=D3D11_CULL_NONE;rd.DepthClipEnable=TRUE;rd.ScissorEnable=d.scissorEnable;rd.MultisampleEnable=TRUE;
     ComPtr<ID3D11RasterizerState> raster;check(device->CreateRasterizerState(&rd,&raster),"raster state");
     {
         Restore restore(context.Get());restore.clearResources();context->OMSetRenderTargets(0,nullptr,nullptr);
@@ -306,6 +313,7 @@ void NativeBackend::drawPostFilter(const std::shared_ptr<RenderTarget>& target,c
         restore.clearResources();context->OMSetRenderTargets(0,nullptr,nullptr);context->CopyResource(target->texture.Get(),p.packed.Get());
     }
     check(device->GetDeviceRemovedReason(),"draw submission");++postFilterDraws;
+    noteTemporalSceneDraw(target,{},d.colorMask,false,false,std::array<float,2>{});
     completedOriginalModulatedPostFilterDraw=d.pixelShader==0x82152318?postFilterDraws:0;
     completedOriginalDistortionDraw=d.pixelShader==0x82156340?postFilterDraws:0;
 }

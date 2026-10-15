@@ -11,6 +11,7 @@ import tomllib
 from prepare_image import digest, GAME_SHA
 import generator_identity
 import stall_profile_generation
+import inline_fast_memory_generation
 
 ROOT=Path(__file__).resolve().parents[1]
 OUT=ROOT/'build/generated'
@@ -20,7 +21,8 @@ def native_sources():
 
 def inputs():
     result=[Path(__file__), ROOT/'tools/prepare_image.py', ROOT/'tools/generator_identity.py',
-            ROOT/'tools/stall_profile_generation.py', ROOT/'config/simpsons.toml',
+            ROOT/'tools/stall_profile_generation.py', ROOT/'tools/inline_fast_memory_generation.py',
+            ROOT/'config/inline_fast_memory.json', ROOT/'config/guest_profile_scopes.json', ROOT/'config/simpsons.toml',
             ROOT/'runtime/ppc_context.template.h', ROOT/'analysis/simpsons.unencrypted.xex',
             ROOT/'analysis/simpsons.pe', ROOT/'analysis/executable.json', ROOT/'analysis/switch_tables.toml',
             ROOT/'config/switch_overrides.toml']
@@ -123,7 +125,10 @@ def main():
     missing=sorted(names-implemented)
     (OUT/'ppc_imports.cpp').write_text('#include "ppc_context.h"\n'+''.join(
         f'PPC_FUNC({n}) {{ PPC_RECOMP_FAILURE(ctx, uint32_t(ctx.lr), "unimplemented import {n}"); }}\n' for n in missing))
-    profiling=stall_profile_generation.instrument_generated(OUT,chunks,native_texts)
+    inline_memory=inline_fast_memory_generation.instrument_generated(OUT,chunks,
+        json.loads((ROOT/'config/inline_fast_memory.json').read_text(encoding='utf-8')))
+    profiling=stall_profile_generation.instrument_generated(OUT,chunks,native_texts,
+        json.loads((ROOT/'config/guest_profile_scopes.json').read_text(encoding='utf-8')))
     descriptors=info['imports']
     code={(d['library'],d['ordinal']) for d in descriptors if d['kind']==1}
     data=[d for d in descriptors if d['kind']==0 and (d['library'],d['ordinal']) not in code]
@@ -154,7 +159,7 @@ def main():
     generator_identity.verify(a.generator,a.analyser)
     manifest=dict(format=1, semantic_diagnostics=semantic, profile='diagnostic' if semantic else 'zero-reported-diagnostics',
                   generator_sha256=digest(a.generator),analyser_sha256=digest(a.analyser),
-                  missing_imports=missing,stall_profiler_coverage=profiling,
+                  missing_imports=missing,stall_profiler_coverage=profiling,inline_fast_memory_coverage=inline_memory,
                   inputs={f.relative_to(ROOT).as_posix():digest(f) for f in inputs()},
                   outputs={f.name:digest(f) for f in files})
     (OUT/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n', encoding="utf-8")

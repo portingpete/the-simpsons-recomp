@@ -1,13 +1,15 @@
 #include "native_backend.h"
 #include <cmath>
 #include <algorithm>
+#include <d3d11_3.h>
 
 namespace Simpsons::Graphics {
 namespace {
 constexpr GUID logicalExtentKey={0x7b39c8e1,0x2da8,0x4a03,{0x99,0xd3,0x51,0xc7,0x35,0x9e,0x84,0x10}};
-// Bound scene allocations to the previous largest supported preset, 4K SSAA.
-// This is a settings budget, not a guarantee that a GPU has available memory.
+// Bound spatial dimensions and the actual color+depth coverage storage. This
+// is a settings budget, not a guarantee of available adapter memory.
 constexpr uint64_t maxScenePixels=uint64_t(3840)*2160*4;
+constexpr uint64_t maxGeometryBytes=uint64_t(1024)*1024*1024;
 void validate(const D3D11_VIEWPORT& value) {
     for(float field:{value.TopLeftX,value.TopLeftY,value.Width,value.Height,value.MinDepth,value.MaxDepth})
         if(!std::isfinite(field)) throw Error("Native viewport requires finite coordinates, dimensions and depth endpoints");
@@ -26,27 +28,51 @@ void validate(const D3D11_VIEWPORT& value) {
 
 bool NativeBackend::supportsRendering(uint32_t width,uint32_t height,uint32_t anisotropy,Antialiasing aa,uint32_t percent) noexcept {
     if(width<1280||width>5120||height<720||height>2160||uint64_t(width)*9<uint64_t(height)*16||uint64_t(width)*9>uint64_t(height)*32||
-       (anisotropy!=1&&anisotropy!=4&&anisotropy!=8&&anisotropy!=16)||uint32_t(aa)>3||
+       (anisotropy!=1&&anisotropy!=2&&anisotropy!=4&&anisotropy!=8&&anisotropy!=16)||!validAntialiasing(aa)||
        (percent!=50&&percent!=67&&percent!=75&&percent!=100&&percent!=125&&percent!=150&&percent!=200))return false;
-    const uint32_t samples=aa==Antialiasing::SSAA4x?2:1;
-    const uint64_t w=((uint64_t(width)*percent+50)/100)*samples,h=((uint64_t(height)*percent+50)/100)*samples;
-    return w&&h&&w<=D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION&&h<=D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION&&w*h<=maxScenePixels;
+    const uint64_t w=(uint64_t(width)*percent+50)/100,h=(uint64_t(height)*percent+50)/100;
+    return w&&h&&w<=D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION&&h<=D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION&&
+        w*h<=maxScenePixels&&w*h*12<=maxGeometryBytes;
 }
-void NativeBackend::configureRendering(uint32_t width,uint32_t height,uint32_t anisotropy,Antialiasing aa,uint32_t percent) {
+void NativeBackend::configureRendering(uint32_t width,uint32_t height,uint32_t anisotropy,Antialiasing aa,uint32_t percent,TextureFilter filter,uint32_t shadows) {
     requireOwner();
     if(renderingAllocated||swapChain)throw Error("Internal resolution must be configured before target allocation");
-    if(!supportsRendering(width,height,anisotropy,aa,percent))throw Error("Unsupported internal rendering settings or scene pixel budget exceeded");
-    antialiasingMode=aa;
-    const uint32_t samples=aa==Antialiasing::SSAA4x?2:1;
+    if(!supportsRendering(width,height,anisotropy,aa,percent)||shadows>3)throw Error("Unsupported internal rendering settings or scene pixel budget exceeded");
+    antialiasingMode=aa;shadowQualityLevel=shadows;
     renderBaseWidth=width;renderBaseHeight=height;
-    internalWidth=uint32_t((uint64_t(width)*percent+50)/100)*samples;
-    internalHeight=uint32_t((uint64_t(height)*percent+50)/100)*samples;textureAnisotropy=anisotropy;
+    internalWidth=uint32_t((uint64_t(width)*percent+50)/100);
+    internalHeight=uint32_t((uint64_t(height)*percent+50)/100);textureAnisotropy=anisotropy;
+    outputWidth=internalWidth;outputHeight=internalHeight;renderScalePercent=percent;textureFilterMode=filter;
+}
+bool NativeBackend::renderingMatches(uint32_t width,uint32_t height,uint32_t anisotropy,Antialiasing aa,uint32_t percent,TextureFilter filter,uint32_t shadows) const noexcept {
+    return renderBaseWidth==width&&renderBaseHeight==height&&textureAnisotropy==anisotropy&&
+        antialiasingMode==aa&&renderScalePercent==percent&&textureFilterMode==filter&&shadowQualityLevel==shadows;
+}
+void NativeBackend::configureSceneExtent(uint32_t width,uint32_t height) {
+    requireOwner();
+    if(renderingAllocated||swapChain||!temporalAntialiasing(antialiasingMode))
+        throw Error("SDK scene extent requires configured temporal mode before target allocation");
+    if(!width||!height||width>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION||height>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION||
+       uint64_t(width)*height>maxScenePixels||uint64_t(width)*height*12>maxGeometryBytes)
+        throw Error("SDK scene extent exceeds native dimension or geometry storage budget");
+    internalWidth=width;internalHeight=height;
 }
 std::array<uint32_t,2> NativeBackend::renderExtent(uint32_t w,uint32_t h,TargetScale scale) const {
     if(scale==TargetScale::Fixed)return {w,h};
-    const uint32_t samples=antialiasingMode==Antialiasing::SSAA4x?2:1;
-    const uint64_t width=std::max(uint64_t(1),(uint64_t(w)*(internalWidth/samples)+640)/1280)*samples;
-    const uint64_t height=std::max(uint64_t(1),(uint64_t(h)*(internalHeight/samples)+360)/720)*samples;
+    if(scale==TargetScale::Shadow) {
+        // Shadow storage: half, original, double or quadruple resolution.
+        const uint32_t numerator=shadowQualityLevel==0?1u:shadowQualityLevel==1?1u:shadowQualityLevel==2?2u:4u;
+        const uint32_t denominator=shadowQualityLevel==0?2u:1u;
+        const uint64_t width=std::max(uint64_t(1),uint64_t(w)*numerator/denominator),height=std::max(uint64_t(1),uint64_t(h)*numerator/denominator);
+        if(width>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION||height>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)
+            throw Error("Scaled native shadow target exceeds texture dimensions");
+        return {uint32_t(width),uint32_t(height)};
+    }
+    if(scale!=TargetScale::Scene&&scale!=TargetScale::Output)throw Error("Unknown native target extent role");
+    const uint32_t baseWidth=scale==TargetScale::Output?outputWidth:internalWidth;
+    const uint32_t baseHeight=scale==TargetScale::Output?outputHeight:internalHeight;
+    const uint64_t width=std::max(uint64_t(1),(uint64_t(w)*baseWidth+640)/1280);
+    const uint64_t height=std::max(uint64_t(1),(uint64_t(h)*baseHeight+360)/720);
     if(width>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION||height>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION||width*height>maxScenePixels)
         throw Error("Scaled native scene target exceeds dimension or scene pixel budget");
     return {uint32_t(width),uint32_t(height)};
@@ -82,7 +108,7 @@ D3D11_VIEWPORT NativeBackend::contentViewport(const std::shared_ptr<RenderTarget
     v.Width=width;v.Height=height;return v;
 }
 std::array<uint32_t,2> NativeBackend::presentationExtent(uint32_t w,uint32_t h,uint32_t clientW,uint32_t clientH,
-    uint32_t logicalW,uint32_t logicalH) const {
+    uint32_t logicalW,uint32_t logicalH,bool upscale) const {
     if(!w||!h||!clientW||!clientH||!logicalW||!logicalH||w>16384||h>16384||clientW>16384||clientH>16384||logicalW>16384||logicalH>16384)
         throw Error("Invalid native presentation aspect dimensions");
     // Keep every internal pixel; add centered bars before DXGI display scaling.
@@ -93,6 +119,9 @@ std::array<uint32_t,2> NativeBackend::presentationExtent(uint32_t w,uint32_t h,u
     if(aspectW*clientH<aspectH*clientW)width=(uint64_t(w)*aspectH*clientW+aspectW*clientH-1)/(aspectW*clientH);
     else if(aspectW*clientH>aspectH*clientW)height=(uint64_t(h)*aspectW*clientH+aspectH*clientW-1)/(aspectH*clientW);
     if(width>16384||height>16384)throw Error("Native aspect-preserving presentation exceeds D3D11 bounds");
+    // Edge-adaptive upscaling presents at the window extent instead of letting
+    // DXGI stretch the smaller image bilinearly.
+    if(upscale&&presentationUpscaling&&clientW>width&&clientH>height)return {clientW,clientH};
     return {uint32_t(width),uint32_t(height)};
 }
 D3D11_RECT NativeBackend::renderScissor(const std::shared_ptr<RenderTarget>& target,D3D11_RECT r) const {
@@ -102,9 +131,15 @@ D3D11_RECT NativeBackend::renderScissor(const std::shared_ptr<RenderTarget>& tar
 D3D11_SAMPLER_DESC NativeBackend::materialSampling(D3D11_SAMPLER_DESC desc) const {
     requireOwner();
     // Preserve point-sampled lookup/noise maps and all comparison samplers.
-    if(textureAnisotropy>1&&(desc.Filter==D3D11_FILTER_MIN_MAG_MIP_LINEAR||desc.Filter==D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT)) {
-        desc.Filter=D3D11_FILTER_ANISOTROPIC;desc.MaxAnisotropy=textureAnisotropy;
+    if(desc.Filter!=D3D11_FILTER_MIN_MAG_MIP_LINEAR&&desc.Filter!=D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT)return desc;
+    switch(textureFilterMode) {
+    case TextureFilter::Original:break;
+    // Nearest keeps every texel square; anisotropy needs linear filtering.
+    case TextureFilter::Nearest:desc.Filter=D3D11_FILTER_MIN_MAG_MIP_POINT;return desc;
+    case TextureFilter::Bilinear:desc.Filter=D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;break;
+    case TextureFilter::Trilinear:desc.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;break;
     }
+    if(textureAnisotropy>1){desc.Filter=D3D11_FILTER_ANISOTROPIC;desc.MaxAnisotropy=textureAnisotropy;}
     return desc;
 }
 namespace {

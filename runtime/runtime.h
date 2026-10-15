@@ -3,6 +3,7 @@
 #include "player_telemetry.h"
 #include "native_video_settings.h"
 #include "native_control_settings.h"
+#include "native_audio_settings.h"
 #include "native_ultrawide_camera.h"
 #include "resource_audit.h"
 #include "../common/guest_write_watch.h"
@@ -194,22 +195,30 @@ public:
     bool autoDefeatLocEnemies=false; // Opt-in native damage for NPCs in Land of Chocolate only.
     std::atomic<bool> landOfChocolateStreamSeen{false}; // Set by a successful top-level map stream open.
     std::atomic<uint64_t> nativeDepthCopyCount{0}; // Scene gate for exact returned-input playback.
-    uint32_t requestedFrameRate=0; // 0 retains the original scheduler; 60 selects one refresh; other supported rates use native presentation pacing.
+    uint32_t requestedFrameRate=0; // Explicit caps use native presentation pacing; zero means unlimited after settings apply.
     bool uncappedFrameRate=false; // Opt-in zero-interval original wait for 120+ FPS testing; game dt remains real time.
     bool vsyncEnabled=false; // Normal launches use sync interval zero; --vsync selects interval one.
     NativeVideoSettings videoSettings;
     NativeVideoSettings videoSettingsBeforeMenu;
     NativeControlSettings controlSettings;
+    NativeAudioSettings audioSettings,audioSettingsBeforeMenu;
+    std::filesystem::path audioSettingsPath;
     NativeControlSettings controlSettingsBeforeMenu;
     std::filesystem::path controlSettingsPath;
     NativeCameraProjectionState nativeCameraProjection;
+    NativeTemporalCameraState nativeTemporalCamera;
+    NativeFreeCameraState freeCamera;
     bool videoSettingsPending=true;
     // Owned by the original frontend thread; discarded with its guest memory.
     uint32_t nativeMainMenuExitQuery=0;
     bool nativeMainMenuExitQueryQueued=false;
     std::filesystem::path videoSettingsPath,nativeFrontendRoot;
+    // Derived simpsons_gameflow.lua whose New Game starts in another episode.
+    std::filesystem::path nativeGameflowRoot;
     uint64_t nativePresentationTimebase=0; // Real time sampled at the most recent native presentation entry.
     FramePacer framePacer; // Even-cadence presentation limiter state.
+    uint32_t pacingFrameRate=0; // Effective foreground/background cap; changes reset pacing history.
+    uint32_t pacingThread=0; // Thread that the native limiter paces; only its gameplay updates read predictions.
     // The original gameplay clock quantized every update to at least one
     // display refresh. Keep its elapsed time independent of presentation rate.
     struct GameplayTiming {
@@ -268,6 +277,8 @@ extern thread_local PPCContext* currentContext;
 // sustain 120; see frame_pacer.h). No guest clock, scheduler request, or simulation dt
 // changes; game dt stays real time.
 void SimpsonsNativeFramePace(Runtime& runtime);
+// After a present: its DXGI present count and the latest displayed flip's statistics.
+void SimpsonsNativeFramePresented(Runtime& runtime,uint32_t present,bool valid,uint32_t displayedPresent,uint64_t syncQpc);
 void unwindAudioReaderCall(PPCContext&) noexcept;
 int runOriginal(PPCContext& ctx, uint8_t* base);
 uint32_t runThreadEntry(PPCContext& ctx,uint8_t* base,uint32_t address);

@@ -1,6 +1,7 @@
 #include "native_backend.h"
 #include "runtime/stall_profiler.h"
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <limits>
 
@@ -144,12 +145,20 @@ class NativeRecordingPayload {
     bool commandsProven=false;
     ComPtr<ID3D11Query> provenCompletion;
     bool completionProven=false;
+    // Unlike the refreshable device proof above, this identity changes only
+    // when execute installs the event for its latest submission or retirement
+    // clears it. A same-device replacement is not completion provenance.
+    ComPtr<ID3D11Query> submittedCompletion;
     NativeRecordingReceipt receipt{};
     RecordingSeed seed;
     struct Draw {
         size_t offset{},bytes{};
         std::shared_ptr<void> owner;
         NativeRecordingPrepare prepare;
+        std::function<void()> submitted;
+        // Retained to rebuild the sealed list after a live rendering change.
+        std::function<void(ID3D11DeviceContext*)> record;
+        std::function<void()> refresh;
     };
     // Accounting is exactly data.size(), not sizeof(Draw), GPU allocation
     // size, command-list bytes, nor any fabricated original SDK receipt.
@@ -310,6 +319,7 @@ std::shared_ptr<NativeRecordingPayload> NativeBackend::allocateRecordingPayload(
     payload->receipt.state=NativeRecordingPayloadState::Allocated;payload->receipt.capacityBytes=capacityBytes;
     payload->receipt.ownedDataCapacityBytes=recordingOwnedDataCapacityBytes;
     payload->data.reserve(capacityBytes); // Modest initial host allocation; grow only as snapshots arrive.
+    registerLive(liveRecordingPayloads,payload);
     return payload;
 }
 
@@ -343,7 +353,8 @@ ID3D11DeviceContext* NativeBackend::checkedRecordingPayloadContext(const std::sh
 
 void NativeBackend::recordRecordingDraw(const std::shared_ptr<NativeRecordingPayload>& payload,
     std::span<const uint8_t> ownedDrawData,const std::shared_ptr<void>& drawOwner,
-    NativeRecordingPrepare prepare,const std::function<void(ID3D11DeviceContext*)>& draw) {
+    NativeRecordingPrepare prepare,const std::function<void(ID3D11DeviceContext*)>& draw,
+    const std::function<void()>& submitted,std::function<void()> refresh) {
     auto* deferred=checkedRecordingPayloadContext(payload);
     if(!drawOwner || ownedDrawData.empty() || !draw)
         throw Error("Native recording draw requires owned data, a resource owner and an actual draw");
@@ -355,7 +366,7 @@ void NativeBackend::recordRecordingDraw(const std::shared_ptr<NativeRecordingPay
     // Stage every potentially throwing allocation before invoking the one-draw
     // native backend callback. Input data may alias a caller buffer; copy first.
     std::vector<uint8_t> snapshot(ownedDrawData.begin(),ownedDrawData.end());
-    NativeRecordingPayload::Draw entry{payload->data.size(),snapshot.size(),drawOwner,std::move(prepare)};
+    NativeRecordingPayload::Draw entry{payload->data.size(),snapshot.size(),drawOwner,std::move(prepare),submitted,draw,std::move(refresh)};
     const size_t required=payload->data.size()+snapshot.size();
     if(required>payload->data.capacity()) {
         const size_t growth=std::min<size_t>(payload->receipt.ownedDataCapacityBytes,
@@ -421,11 +432,12 @@ void NativeBackend::retireRecordingPayloads() {
         BOOL completed=FALSE;
         const HRESULT result=context->GetData(payload->completion.Get(),&completed,sizeof(completed),D3D11_ASYNC_GETDATA_DONOTFLUSH);
         recordingCheck(result,"execution retirement query");
-        if(result!=S_OK || !completed)break;
+        if(result==S_FALSE)break;
+        if(result!=S_OK || completed!=TRUE)throw Error("Native recording retirement returned an invalid event result");
         payload->inFlight=false;
         if(recordingEventPool.size()<recordingEventPoolLimit)recordingEventPool.push_back(std::move(payload->completion));
         payload->completion.Reset();
-        payload->provenCompletion.Reset();payload->completionProven=false;
+        payload->provenCompletion.Reset();payload->completionProven=false;payload->submittedCompletion.Reset();
         ++retired;
     }
     pendingRecordingPayloads.erase(pendingRecordingPayloads.begin(),pendingRecordingPayloads.begin()+ptrdiff_t(retired));
@@ -443,13 +455,39 @@ bool NativeBackend::retireRecordingPayload(const std::shared_ptr<NativeRecording
     BOOL completed=FALSE;
     const HRESULT result=context->GetData(payload->completion.Get(),&completed,sizeof(completed),D3D11_ASYNC_GETDATA_DONOTFLUSH);
     recordingCheck(result,"execution retirement query");
-    if(result!=S_OK || !completed)return false;
+    if(result==S_FALSE)return false;
+    if(result!=S_OK || completed!=TRUE)throw Error("Native recording retirement returned an invalid event result");
     payload->inFlight=false;
     if(recordingEventPool.size()<recordingEventPoolLimit)recordingEventPool.push_back(std::move(payload->completion));
     payload->completion.Reset();
-    payload->provenCompletion.Reset();payload->completionProven=false;
+    payload->provenCompletion.Reset();payload->completionProven=false;payload->submittedCompletion.Reset();
     pendingRecordingPayloads.erase(it);
     return true;
+}
+
+ComPtr<ID3D11Query> NativeBackend::recordingCompletionQuery(const std::shared_ptr<NativeRecordingPayload>& payload) const {
+    validateSubmissionContext();noRecordingCallback();
+    if(!payload)throw Error("Native recording payload owner is missing");
+    if(payload->owner!=this || payload->thread!=owner || payload->device.Get()!=device.Get())
+        throw Error("Native recording wait belongs to another graphics owner");
+    if(payload->receipt.state!=NativeRecordingPayloadState::Sealed || payload->draws.empty())
+        throw Error("Native recording wait requires a sealed nonempty payload");
+    if(!payload->recording || payload->recording->activeSession)
+        throw Error("Native recording wait overlaps an active recording session");
+    const auto pending=std::count(pendingRecordingPayloads.begin(),pendingRecordingPayloads.end(),payload);
+    if(!payload->inFlight) {
+        if(pending || payload->completion || payload->submittedCompletion || payload->provenCompletion || payload->completionProven)
+            throw Error("Native recording wait lost its retired execution provenance");
+    } else if(pending!=1 || !payload->receipt.executions || !payload->completion ||
+       payload->submittedCompletion.Get()!=payload->completion.Get() || !payload->completionProven ||
+       payload->provenCompletion.Get()!=payload->completion.Get())
+        throw Error("Native recording wait lost its latest execution owner");
+    // Reject a substituted execution identity before the ordinary validator
+    // can refresh its device proof. A device proof is not an End provenance.
+    validateRecordingPayloadItem(payload);
+    requireOwner();
+    // Null is possible only before execution or after actual event retirement.
+    return payload->submittedCompletion;
 }
 
 void NativeBackend::executeRecordingPayload(const std::shared_ptr<NativeRecordingPayload>& payload) {
@@ -479,6 +517,9 @@ void NativeBackend::executeRecordingPayload(const std::shared_ptr<NativeRecordin
         // first GPU mutation so later receipts can rely on the proof. No payload
         // state changes before this check, keeping a failure retryable.
         recordingDevice(completed.Get(),device.Get());
+        D3D11_QUERY_DESC actual{};completed->GetDesc(&actual);
+        if(actual.Query!=D3D11_QUERY_EVENT || actual.MiscFlags)
+            throw Error("Native recording execution requires an ordinary completion event");
     }
     requireOwner();
     // Preparation updates each draw's retained native constant buffers on the
@@ -492,9 +533,11 @@ void NativeBackend::executeRecordingPayload(const std::shared_ptr<NativeRecordin
         }
     }
     requireOwner();
+    if(temporalOrigins)validateTemporalSceneOriginOwners();
     // Retain before issuing anything: even a post-submission device failure
     // leaves resource ownership anchored until retirement or backend teardown.
     payload->completion=std::move(completed);payload->inFlight=true;
+    payload->submittedCompletion=payload->completion;
     payload->provenCompletion=payload->completion;
     payload->completionProven=true;
     // Its new event is the latest submission: keep the list in event submission order.
@@ -505,6 +548,9 @@ void NativeBackend::executeRecordingPayload(const std::shared_ptr<NativeRecordin
     executeProfile.finish();
     context->End(payload->completion.Get());
     ++payload->receipt.executions;payload->receipt.executedDraws+=drawCount;recordingExecutedDraws+=drawCount;
+    // CPU receipts describe actual executed owner writes, never capture order.
+    // The real completion event is already queued if receipt validation fails.
+    for(const auto& entry:payload->draws)if(entry.submitted)entry.submitted();
     requireOwner();
 }
 
@@ -526,11 +572,70 @@ void NativeBackend::releaseRecordingPayload(const std::shared_ptr<NativeRecordin
         }
         payload->recording->active.reset();payload->recording->activeSession=false;
     }
-    payload->commands.Reset();payload->completion.Reset();payload->seed=RecordingSeed{};
+    payload->commands.Reset();payload->completion.Reset();payload->submittedCompletion.Reset();payload->seed=RecordingSeed{};
     payload->provenCommands.Reset();payload->commandsProven=false;
     payload->provenCompletion.Reset();payload->completionProven=false;
     payload->draws.clear();payload->data.clear();payload->recording.reset();payload->device.Reset();
     payload->receipt.state=NativeRecordingPayloadState::Released;
+}
+
+bool NativeBackend::recordingSessionActive() const {
+    for(const auto& entry:liveRecordingPayloads)
+        if(const auto payload=entry.lock();payload&&payload->recording&&payload->recording->activeSession)return true;
+    return false;
+}
+
+uint32_t NativeBackend::rerecordRecordingPayloads(const LiveViewRemap& remap) {
+    validateSubmissionContext();noRecordingCallback();
+    uint32_t rerecorded=0;
+    std::erase_if(liveRecordingPayloads,[](const std::weak_ptr<NativeRecordingPayload>& entry){return entry.expired();});
+    for(const auto& entry:liveRecordingPayloads) {
+        const auto payload=entry.lock();
+        if(!payload||payload->receipt.state!=NativeRecordingPayloadState::Sealed||!payload->commands)continue;
+        validateRecordingPayloadItem(payload);
+        auto* deferred=checkedRecordingContext(payload->recording);
+        if(payload->recording->activeSession)throw Error("Native live re-recording found an active recording session");
+        // The begin seed is the actual immediate binding at begin. Follow its
+        // targets to their new storage and scale its physical rectangles.
+        auto& seed=payload->seed;
+        const auto* scale=remap.scale(seed.color.Get(),seed.depth.Get());
+        if(auto* color=remap.map(seed.color.Get()))seed.color=color;
+        if(auto* depth=remap.map(seed.depth.Get()))seed.depth=depth;
+        if(scale) {
+            for(UINT i=0;i<seed.viewportCount;++i) {
+                auto& v=seed.viewports[i];
+                v.TopLeftX*=(*scale)[0];v.Width*=(*scale)[0];v.TopLeftY*=(*scale)[1];v.Height*=(*scale)[1];
+            }
+            for(UINT i=0;i<seed.scissorCount;++i) {
+                auto& r=seed.scissors[i];
+                r={LONG(std::floor(r.left*(*scale)[0])),LONG(std::floor(r.top*(*scale)[1])),
+                   LONG(std::ceil(r.right*(*scale)[0])),LONG(std::ceil(r.bottom*(*scale)[1]))};
+            }
+        }
+        for(const auto& draw:payload->draws)
+            if(!draw.record||!draw.refresh)throw Error("Native recording draw cannot be re-recorded live");
+        for(const auto& draw:payload->draws)draw.refresh();
+        requireOwner();
+        deferred->ClearState();seed.bind(deferred);
+        try {
+            for(const auto& draw:payload->draws){RecordingCallbackScope callback;draw.record(deferred);}
+            requireOwner();
+        } catch(...) {
+            ComPtr<ID3D11CommandList> discarded;deferred->FinishCommandList(FALSE,&discarded);
+            payload->receipt.state=NativeRecordingPayloadState::Failed;throw;
+        }
+        ComPtr<ID3D11CommandList> commands;
+        const HRESULT result=deferred->FinishCommandList(FALSE,&commands);
+        if(FAILED(result)||!commands) {
+            payload->receipt.state=NativeRecordingPayloadState::Failed;
+            recordingCheck(result,"live re-recording FinishCommandList");throw Error("Native live re-recording returned no command list");
+        }
+        recordingDevice(commands.Get(),device.Get());requireOwner();
+        payload->commands=std::move(commands);
+        payload->provenCommands=payload->commands;payload->commandsProven=true;
+        ++rerecorded;
+    }
+    return rerecorded;
 }
 
 uint64_t NativeBackend::recordingDrawCount() const {validateSubmissionContext();noRecordingCallback();return recordingDraws;}

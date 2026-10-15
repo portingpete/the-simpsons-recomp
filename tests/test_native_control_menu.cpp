@@ -156,9 +156,15 @@ void exercise(const char* image,const std::filesystem::path& settings) {
     need(rt.controlSettings==NativeControlSettings{}&&rt.window->keyboard->controls()==NativeControlSettings{},"Controls Cancel did not restore both native preference owners");
     invoke(rt,entry,SimpsonsNativeControlsPopulate,0,false,true);
     selection=0;pendingAction=101;invoke(rt,entry,SimpsonsNativeControlsSave,0,false,true);
-    need(keyboardPages==1&&labels.at("ControlsMenu.set_ctlpage").find("2/2")!=std::string::npos,"Second binding page not selected");
+    need(keyboardPages==1&&labels.at("ControlsMenu.set_ctlpage").find("2/3")!=std::string::npos,"Second binding page not selected");
     pendingAction=101;invoke(rt,entry,SimpsonsNativeControlsSave,0,false,true);
-    need(mousePages==1,"Native mouse/controller page not selected");
+    // The third page holds the version 2 camera, walk, free camera and photo
+    // actions; its eighth row has no action.
+    need(keyboardPages==2&&labels.at("ControlsMenu.set_ctlpage").find("3/3")!=std::string::npos&&
+         labels.at("ControlsMenu.set_ctlrow6").find("Photo mode")!=std::string::npos&&labels.at("ControlsMenu.set_ctlrow7")=="-",
+         "Third binding page not selected or lacks the version 2 actions");
+    pendingAction=101;invoke(rt,entry,SimpsonsNativeControlsSave,0,false,true);
+    need(mousePages==1&&labels.at("ControlsMenu.set_ctlpage").find("4/4")!=std::string::npos,"Native mouse/controller page not selected");
     pendingAction=103;invoke(rt,entry,SimpsonsNativeControlsSave,0,false,true);
     need(rt.controlSettings.mouseSensitivity==125&&rt.window->keyboard->controls().mouseSensitivity==125,"Sensitivity edit did not publish live");
     selection=5;pendingAction=111;invoke(rt,entry,SimpsonsNativeControlsSave,0,false,true);

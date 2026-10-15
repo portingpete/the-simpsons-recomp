@@ -1,3 +1,4 @@
+#include <thread>
 #include "engine_audio.h"
 #include "engine_audio_reader.h"
 #include "engine_audio_output.h"
@@ -12,6 +13,7 @@
 #include "audio/resident_audio_catalog.h"
 #include "audio/resident_xma.h"
 #include "audio/xma_float_output.h"
+#include "audio/fresh_xma_cache.h"
 #include <algorithm>
 #include <atomic>
 #include <bit>
@@ -21,6 +23,7 @@
 #include <shared_mutex>
 #include <limits>
 #include <bcrypt.h>
+#include <future>
 
 namespace Simpsons {
 namespace {
@@ -72,9 +75,13 @@ struct EngineAudioOwners::State {
     // lock exclusively, only around the mutation itself; readers under `mutex` need nothing more.
     mutable std::shared_mutex heapMutex;
     std::unique_ptr<Audio::NativeXmaFactory> factory;
+    Audio::FreshXmaCache freshCache;
     std::shared_ptr<const Audio::AudioCatalog> catalog;
     std::shared_ptr<const Audio::AmxAudioCatalog> amxCatalog;
     std::shared_ptr<const Audio::ResidentAudioCatalog> residentCatalog;
+    std::shared_future<std::shared_ptr<const Audio::AudioCatalog>> catalogPreparation;
+    std::shared_future<std::shared_ptr<const Audio::AmxAudioCatalog>> amxCatalogPreparation;
+    std::shared_future<std::shared_ptr<const Audio::ResidentAudioCatalog>> residentCatalogPreparation;
     uint32_t reserved=0;
     uint32_t residentSourceLogs{},constructedLogs{},pcmLogs{},deliveredRetirementLogs{};
     struct HeapAllocation {
@@ -216,6 +223,45 @@ struct EngineAudioOwners::State {
     std::unordered_map<PPCContext*,MemberBuild> memberBuilds;
     std::unordered_map<PPCContext*,StorageFree> groupFrees,stateFrees;
     explicit State(Runtime& value):runtime(value) {}
+    ~State() {
+        // Runtime has already joined its guest threads before destroying this
+        // owner. These path-only workers access no runtime/guest storage and
+        // join here without holding any guest or audio callback mutex.
+        if(catalogPreparation.valid())catalogPreparation.wait();
+        if(amxCatalogPreparation.valid())amxCatalogPreparation.wait();
+        if(residentCatalogPreparation.valid())residentCatalogPreparation.wait();
+        const auto cache=freshCache.snapshot();
+        std::fprintf(stderr,"[NATIVE AUDIO FRESH CACHE] shutdown hits=%llu misses=%llu bypasses=%llu evictions=%llu entries=%u bytes=%llu pinned=%u; guest threads stopped, original receipts unchanged\n",
+            static_cast<unsigned long long>(cache.hits),static_cast<unsigned long long>(cache.misses),
+            static_cast<unsigned long long>(cache.bypasses),static_cast<unsigned long long>(cache.evictions),
+            cache.entries,static_cast<unsigned long long>(cache.bytes),cache.pinned);
+    }
+    template<class Catalog> static std::shared_future<std::shared_ptr<const Catalog>> prepareCatalog(std::filesystem::path path) {
+        try {
+            return std::async(std::launch::async,[path=std::move(path)] {
+                return std::make_shared<const Catalog>(Catalog::load(path));
+            }).share();
+        } catch(const std::system_error&) {
+            // Thread pressure leaves the original demand-time loader available.
+            return {};
+        } catch(const std::bad_alloc&) {
+            return {};
+        }
+    }
+    void prepareCatalogs() {
+        if(!runtime.gameRoot.is_absolute())return;
+        try {
+            const auto root=runtime.gameRoot.parent_path()/"analysis";
+            if(!residentCatalog && !residentCatalogPreparation.valid())
+                residentCatalogPreparation=prepareCatalog<Audio::ResidentAudioCatalog>(root/"resident_audio_catalog.bin");
+            if(!amxCatalog && !amxCatalogPreparation.valid())
+                amxCatalogPreparation=prepareCatalog<Audio::AmxAudioCatalog>(root/"amx_audio_catalog.bin");
+            if(!catalog && !catalogPreparation.valid())
+                catalogPreparation=prepareCatalog<Audio::AudioCatalog>(root/"audio_catalog.bin");
+        } catch(const std::bad_alloc&) {
+            // Optional path/capture storage pressure also keeps demand loading.
+        }
+    }
     void auditProducer(const PPCContext& ctx) const noexcept {
         if(!runtime.resourceAudit.active())return;
         // Cached metadata is safe even when the incoming guest owner/block is
@@ -287,8 +333,9 @@ struct EngineAudioOwners::State {
     const Audio::AudioCatalog& audioCatalog() {
         if(!catalog) {
             require(runtime.gameRoot.is_absolute(),"Audio catalog requires the original game root");
-            catalog=std::make_shared<Audio::AudioCatalog>(Audio::AudioCatalog::load(
-                runtime.gameRoot.parent_path()/"analysis"/"audio_catalog.bin"));
+            catalog=catalogPreparation.valid()?catalogPreparation.get():
+                std::make_shared<Audio::AudioCatalog>(Audio::AudioCatalog::load(
+                    runtime.gameRoot.parent_path()/"analysis"/"audio_catalog.bin"));
             std::fprintf(stderr,"[NATIVE AUDIO] loaded full stream catalog: %zu sources, %zu streams, %zu blocks\n",
                 catalog->sourceCount(),catalog->streamCount(),catalog->blockCount());
         }
@@ -297,8 +344,9 @@ struct EngineAudioOwners::State {
     const Audio::ResidentAudioCatalog& residentAudioCatalog() {
         if(!residentCatalog) {
             require(runtime.gameRoot.is_absolute(),"Resident audio catalog requires the original game root");
-            residentCatalog=std::make_shared<Audio::ResidentAudioCatalog>(Audio::ResidentAudioCatalog::load(
-                runtime.gameRoot.parent_path()/"analysis"/"resident_audio_catalog.bin"));
+            residentCatalog=residentCatalogPreparation.valid()?residentCatalogPreparation.get():
+                std::make_shared<Audio::ResidentAudioCatalog>(Audio::ResidentAudioCatalog::load(
+                    runtime.gameRoot.parent_path()/"analysis"/"resident_audio_catalog.bin"));
             std::fprintf(stderr,"[NATIVE AUDIO] loaded resident catalog: %zu banks, %zu cues, %zu blocks\n",
                 residentCatalog->bankCount(),residentCatalog->cueCount(),residentCatalog->blockCount());
         }
@@ -307,19 +355,38 @@ struct EngineAudioOwners::State {
     const Audio::AmxAudioCatalog& amxAudioCatalog() {
         if(!amxCatalog) {
             require(runtime.gameRoot.is_absolute(),"AMX audio catalog requires the original game root");
-            amxCatalog=std::make_shared<Audio::AmxAudioCatalog>(Audio::AmxAudioCatalog::load(
-                runtime.gameRoot.parent_path()/"analysis"/"amx_audio_catalog.bin"));
+            amxCatalog=amxCatalogPreparation.valid()?amxCatalogPreparation.get():
+                std::make_shared<Audio::AmxAudioCatalog>(Audio::AmxAudioCatalog::load(
+                    runtime.gameRoot.parent_path()/"analysis"/"amx_audio_catalog.bin"));
             std::fprintf(stderr,"[NATIVE AUDIO] loaded AMX catalog: %zu payloads, %zu cues, %zu blocks\n",
                 amxCatalog->payloadCount(),amxCatalog->cueCount(),amxCatalog->blockCount());
         }
         return *amxCatalog;
     }
     static uint64_t residentKey(uint32_t request) {return (uint64_t(1)<<32)|request;}
-    const HeapAllocation& observedAllocation(uint32_t address,uint32_t bytes,bool exact=false) const {
+    const HeapAllocation* findObservedAllocation(uint32_t address,uint32_t bytes,bool exact=false) const {
         const HeapAllocation* found=nullptr;
-        for(const auto& [at,allocation]:heap)
-            if(!allocation.closing && (!exact || at==address) && contains(at,allocation.extent,address,bytes) &&
+        const auto consider=[&](const HeapAllocation& allocation) {
+            if(!allocation.closing && contains(allocation.address,allocation.extent,address,bytes) &&
                (!found || allocation.extent<found->extent)) found=&allocation;
+        };
+        if(exact) {
+            if(const auto it=heap.find(address);it!=heap.end()) consider(it->second);
+        } else {
+            // The existing index lists every allocation containing the start
+            // byte. Retain full-span bounds and smallest-live-owner selection.
+            // A zero-byte range can sit at an allocation's excluded end, so
+            // preserve the original scan for that uncommon query shape.
+            if(!bytes) {
+                for(const auto& [at,allocation]:heap) consider(allocation);
+            } else heapIndex.stab(address,[&](const HeapPageIndex::Ref& ref) {
+                if(const auto it=heap.find(ref.start);it!=heap.end()) consider(it->second);
+            });
+        }
+        return found;
+    }
+    const HeapAllocation& observedAllocation(uint32_t address,uint32_t bytes,bool exact=false) const {
+        const auto* found=findObservedAllocation(address,bytes,exact);
         if(!found) {
             std::fprintf(stderr,"[RESIDENT SBK] missing actual allocation: address=%08X bytes=%X exact=%u live=%zu\n",address,bytes,unsigned(exact),heap.size());
             throw Failure("Resident SBK lacks an observed original allocation generation");
@@ -359,10 +426,7 @@ struct EngineAudioOwners::State {
                 if(!cue || cue->headerOffset>header ||
                    !std::equal(bytes.begin(),bytes.end(),cue->header.begin())) continue;
                 const uint32_t base=header-uint32_t(cue->headerOffset);
-                const HeapAllocation* allocation=nullptr;
-                for(const auto& [at,item]:heap)
-                    if(!item.closing && contains(at,item.extent,base,uint32_t(payload->payloadBytes)) &&
-                       (!allocation || item.extent<allocation->extent)) allocation=&item;
+                const auto* allocation=findObservedAllocation(base,uint32_t(payload->payloadBytes));
                 if(!allocation) continue;
                 const uint8_t* sourceBytes=nullptr;
                 try {sourceBytes=runtime.pointer(base,uint32_t(payload->payloadBytes),false);}
@@ -1218,22 +1282,32 @@ void EngineAudioOwners::State::beginResident(PPCContext& ctx,uint8_t* base,Recor
     sourceIdentity(*source,base);
     const std::array<Audio::XmaFormat,1> formats={{{profile->channels,profile->codecRate,Audio::XmaVariant::Xma2}}};
     Audio::XmaSource::Limits limits;limits.maxBufferedFramesPerLayer=profile->rawFrames;
+    // A resident sound decoded whole here held the original callback lock (which the
+    // game's main thread also takes) for 0.6-3.6 ms on its first play. Decode its first
+    // 8192 frames now; the fresh cache's worker decodes the rest off this thread (and the
+    // mixer decodes on demand if it gets there first). Samples are identical.
+    if(source->samples>16384)limits.prepareFrames=8192;
     limits.maxDeclaredFrames=profile->frames;limits.maxCompressedBytes=profile->blockBytes-12+profile->restoredFF;
     limits.maxQuotaFrames=256;
-    n.source=std::make_shared<Audio::XmaSource>(*factory,r.generation,formats,limits);n.selector=profile->codecSelector;
-    source->decoder=n.source;
     Audio::XmaSource::Segment segment;segment.sequence=source->sequence;segment.slot=j;
     segment.declaredFrames=source->samples;segment.continuity=Audio::XmaSource::Continuity::FreshContext;
     segment.layers=std::move(parsed.layers);segment.layers[0].skipFrames=384;
     sources.emplace(source->key,source);
+    bool freshReused=false;
     try {
         producers.emplace(&ctx,source);n.queue[slot]=source;
-        const auto accepted=n.source->prepare(segment);
-        require(accepted.status==Audio::XmaSource::PrepareStatus::Accepted,"Resident EXm0 source admission has no capacity");
+        const auto accepted=freshCache.prepare(*factory,r.generation,formats,segment,limits);
+        freshReused=accepted.reused;
+        n.source=accepted.source;n.selector=profile->codecSelector;source->decoder=n.source;
         source->receipt=accepted.receipt;source->prepared=true;++n.nextSequence;
     }catch(...) {cancel(r);throw;}
-    if(n.nextSequence<=3 && sampleSuccessLog(residentSourceLogs)) std::fprintf(stderr,"[NATIVE AUDIO SOURCE] qualified resident V=%08X generation=%llu R=%08X frames=%u channels=%u selector=%u; original initial skip=384\n",
-        v,static_cast<unsigned long long>(r.generation),request,source->samples,profile->channels,profile->codecSelector);
+    if(n.nextSequence<=3 && sampleSuccessLog(residentSourceLogs)) {
+        const auto cache=freshCache.snapshot();
+        std::fprintf(stderr,"[NATIVE AUDIO SOURCE] qualified resident V=%08X generation=%llu R=%08X frames=%u channels=%u selector=%u; original initial skip=384 fresh_cache_hit=%u hits=%llu misses=%llu bypasses=%llu entries=%u bytes=%llu\n",
+            v,static_cast<unsigned long long>(r.generation),request,source->samples,profile->channels,profile->codecSelector,unsigned(freshReused),
+            static_cast<unsigned long long>(cache.hits),static_cast<unsigned long long>(cache.misses),
+            static_cast<unsigned long long>(cache.bypasses),cache.entries,static_cast<unsigned long long>(cache.bytes));
+    }
 }
 void EngineAudioOwners::producerBegin(PPCContext& ctx,uint8_t* base) {
     auto& s=*state;std::lock_guard lock(s.mutex);s.auditProducer(ctx);s.frame(ctx,base);
@@ -1383,11 +1457,25 @@ void EngineAudioOwners::start(PPCContext& ctx,uint8_t* base) {
         const uint32_t q=PPC_LOAD_U32(0x82E31BCC);s.region(q,0x20,true);
         const bool installCallbacks=PPC_LOAD_U32(q+0x18)==0;
         auto factory=std::make_unique<Audio::NativeXmaFactory>();
+        // Open the decoders that streams and overlapping sound effects need on a
+        // background thread at startup, instead of on the audio thread under the
+        // original callback lock the first time each sound starts (see
+        // NativeXmaCodecPool). In-game resident sound effects are mono 24 kHz; streams
+        // (a six-channel ambience and its next loop) use 48 kHz stereo layers.
+        std::thread([pool=factory->pool()] {
+            SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_BELOW_NORMAL);
+            try {
+                pool->reserve({1,24000,Audio::XmaVariant::Xma2},24);
+                pool->reserve({2,48000,Audio::XmaVariant::Xma2},6);
+                pool->reserve({1,48000,Audio::XmaVariant::Xma2},8);
+            } catch(...) {} // Prewarming is optional; sources open their own decoders.
+        }).detach();
         // This shared CPU callback installation was inside the replaced pool
         // initializer. Preserve its exact conditional branch independently of
         // native readiness and the absent private hardware allocations.
         if(installCallbacks) {PPC_STORE_U32(q+0x18,0x82339788);PPC_STORE_U32(q+0x1C,0x82339798);}
         s.factory=std::move(factory);
+        s.prepareCatalogs();
         std::fprintf(stderr,"[NATIVE AUDIO] EXm0 native factory acquired; instances unconfigured, input/decode guarded; descriptor=%08X caller=%08X\n",
             descriptor,uint32_t(ctx.lr));
     }

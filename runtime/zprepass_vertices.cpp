@@ -10,6 +10,11 @@ uint32_t word(std::span<const uint8_t> bytes,size_t at) {
     require(at<=bytes.size()&&bytes.size()-at>=4,"Truncated static Z-prepass word");
     return uint32_t(bytes[at])<<24|uint32_t(bytes[at+1])<<16|uint32_t(bytes[at+2])<<8|bytes[at+3];
 }
+// Only XYZ words in records already qualified by fetchEnd/count use this load.
+// Declaration reads retain word() and its original bounds/error behavior.
+uint32_t recordWord(const uint8_t* bytes) noexcept {
+    return uint32_t(bytes[0])<<24|uint32_t(bytes[1])<<16|uint32_t(bytes[2])<<8|bytes[3];
+}
 }
 std::vector<Graphics::ZPrepassVertex> decodeStaticZPrepassVertices(
     std::span<const uint8_t> bytes,std::span<const uint8_t> declaration,uint32_t stride) {
@@ -51,10 +56,15 @@ std::vector<Graphics::ZPrepassVertex> decodeStaticZPrepassVertices(
     const auto count=originalFetchedVertexCount(bytes.size(),stride,positionOffset+12);
     require(count!=0,"Static Z-prepass vertex owner lacks its first consumed record");
     std::vector<Graphics::ZPrepassVertex> result(count,Graphics::ZPrepassVertex{});
-    for(size_t vertex=0;vertex<result.size();++vertex)for(size_t lane=0;lane<3;++lane) {
-        const auto bits=word(bytes,vertex*stride+positionOffset+4*lane);
-        require((bits&0x7F800000)!=0x7F800000,"Nonfinite static Z-prepass position");
-        result[vertex].position[lane]=std::bit_cast<float>(bits);
+    for(size_t vertex=0;vertex<result.size();++vertex) {
+        // count proves position12 lies in this owned record, including a
+        // final record without its unused stride padding.
+        const auto* row=bytes.data()+vertex*stride+positionOffset;
+        for(size_t lane=0;lane<3;++lane) {
+            const auto bits=recordWord(row+4*lane);
+            require((bits&0x7F800000)!=0x7F800000,"Nonfinite static Z-prepass position");
+            result[vertex].position[lane]=std::bit_cast<float>(bits);
+        }
     }
     return result;
 }

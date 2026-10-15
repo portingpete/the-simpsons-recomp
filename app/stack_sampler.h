@@ -6,7 +6,9 @@
 // chain with RtlVirtualUnwind while it is stopped (no allocation, fixed
 // buffers), resumes it, and at the end writes raw samples as
 // "S <tid> <module-index>:<rva> ..." lines for offline symbolization with
-// tools/stack_profile.py. Sampling pauses distort FPS; use it for ratios only.
+// tools/stack_profile.py. Separate Q/T records retain the owned process QPC
+// domain and conservative capture intervals without changing the M/S format.
+// Sampling pauses distort FPS; frame-correlated samples are diagnostic only.
 #include <windows.h>
 #include <timeapi.h>
 #pragma comment(lib,"winmm.lib")
@@ -24,7 +26,15 @@ struct Sample {
     DWORD tid;
     uint32_t depth;
     uint64_t pc[40];
+    int64_t suspendBeginQpc{};
+    int64_t contextReadyQpc{};
+    int64_t resumeEndQpc{};
 };
+
+inline int64_t qpc() noexcept {
+    LARGE_INTEGER value{};
+    return QueryPerformanceCounter(&value) ? value.QuadPart : 0;
+}
 
 inline void run(std::string spec) {
     std::string path=spec;double delay=30,duration=10;unsigned threadCount=1;
@@ -54,14 +64,21 @@ inline void run(std::string spec) {
     if(candidates.size()>threadCount)candidates.resize(threadCount);
     std::vector<Sample> samples;samples.reserve(size_t(duration*1000)+1024);
     std::vector<std::pair<uint64_t,std::string>> modules;
+    LARGE_INTEGER sampleFrequency{};
+    QueryPerformanceFrequency(&sampleFrequency);
+    const int64_t captureBeginQpc=qpc();
     const ULONGLONG end=GetTickCount64()+ULONGLONG(duration*1000);
     size_t next=0;
     while(GetTickCount64()<end&&!candidates.empty()) {
         const auto& target=candidates[next++%candidates.size()];
         Sample sample{target.tid,0,{}};
+        sample.suspendBeginQpc=qpc();
         if(SuspendThread(target.handle)==DWORD(-1))continue;
         CONTEXT context{};context.ContextFlags=CONTEXT_CONTROL|CONTEXT_INTEGER;
         if(GetThreadContext(target.handle,&context)) {
+            // The exact stop point lies somewhere in this interval. Unwinding
+            // and resume costs extend past it and must not select another frame.
+            sample.contextReadyQpc=qpc();
             for(unsigned frame=0;frame<40&&context.Rip;++frame) {
                 sample.pc[sample.depth++]=context.Rip;
                 DWORD64 base=0;
@@ -76,9 +93,11 @@ inline void run(std::string spec) {
             }
         }
         ResumeThread(target.handle);
+        sample.resumeEndQpc=qpc();
         if(sample.depth)samples.push_back(sample);
         Sleep(1);
     }
+    const int64_t captureEndQpc=qpc();
     FILE* out=fopen(path.c_str(),"w");
     if(!out)return;
     auto moduleIndex=[&](uint64_t pc,uint64_t& rva)->int {
@@ -100,7 +119,16 @@ inline void run(std::string spec) {
         lines.push_back(std::move(line));
     }
     for(size_t i=0;i<modules.size();++i)fprintf(out,"M %zu %s\n",i,modules[i].second.c_str());
-    for(const auto& line:lines)fprintf(out,"%s\n",line.c_str());
+    fprintf(out,"Q schema=1 pid=%lu frequency=%lld capture_begin_qpc=%lld capture_end_qpc=%lld sample_count=%zu\n",
+        static_cast<unsigned long>(pid),static_cast<long long>(sampleFrequency.QuadPart),
+        static_cast<long long>(captureBeginQpc),static_cast<long long>(captureEndQpc),samples.size());
+    for(size_t i=0;i<lines.size();++i) {
+        const auto& sample=samples[i];
+        fprintf(out,"T sample=%zu tid=%lu begin_qpc=%lld context_qpc=%lld end_qpc=%lld\n",i,
+            static_cast<unsigned long>(sample.tid),static_cast<long long>(sample.suspendBeginQpc),
+            static_cast<long long>(sample.contextReadyQpc),static_cast<long long>(sample.resumeEndQpc));
+        fprintf(out,"%s\n",lines[i].c_str());
+    }
     fclose(out);
 }
 

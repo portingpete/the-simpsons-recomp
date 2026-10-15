@@ -49,6 +49,7 @@ struct NativeXmaCodec::State {
 };
 struct NativeXmaFactory::State {
     AVCodecContext* capabilities[2]{};
+    std::shared_ptr<NativeXmaCodecPool> pool=std::make_shared<NativeXmaCodecPool>();
     ~State(){CodecFloatingPoint floatingPoint;for(auto& value:capabilities) avcodec_free_context(&value);}
 };
 NativeXmaFactory::NativeXmaFactory():state(std::make_unique<State>()) {
@@ -67,7 +68,68 @@ NativeXmaFactory::NativeXmaFactory():state(std::make_unique<State>()) {
 }
 NativeXmaFactory::~NativeXmaFactory()=default;
 std::unique_ptr<NativeXmaCodec> NativeXmaFactory::create(XmaFormat format) const {
+    return state->pool->take(format);
+}
+std::shared_ptr<NativeXmaCodecPool> NativeXmaFactory::pool() const {return state->pool;}
+
+struct NativeXmaCodecPool::State {
+    mutable std::mutex mutex;
+    size_t limit;
+    std::vector<std::unique_ptr<NativeXmaCodec>> decoders;
+    std::vector<std::vector<float>> rings;
+    uint64_t reused=0;
+    explicit State(size_t idle):limit(idle) {}
+};
+namespace {
+bool sameFormat(XmaFormat a,XmaFormat b) {return a.channels==b.channels && a.sampleRate==b.sampleRate && a.variant==b.variant;}
+}
+NativeXmaCodecPool::NativeXmaCodecPool(size_t idlePerFormat):state(std::make_unique<State>(idlePerFormat)) {}
+NativeXmaCodecPool::~NativeXmaCodecPool()=default;
+std::unique_ptr<NativeXmaCodec> NativeXmaCodecPool::take(XmaFormat format) {
+    {
+        std::lock_guard lock(state->mutex);
+        auto& idle=state->decoders;
+        for(auto it=idle.begin();it!=idle.end();++it) if(sameFormat((*it)->format(),format)) {
+            auto decoder=std::move(*it);idle.erase(it);++state->reused;return decoder;
+        }
+    }
     return std::make_unique<NativeXmaCodec>(format);
+}
+void NativeXmaCodecPool::give(std::unique_ptr<NativeXmaCodec> decoder) noexcept {
+    if(!decoder) return;
+    try {decoder->reset();} catch(...) {return;}
+    std::lock_guard lock(state->mutex);
+    const auto format=decoder->format();
+    const auto same=std::count_if(state->decoders.begin(),state->decoders.end(),
+        [&](const auto& idle){return sameFormat(idle->format(),format);});
+    if(size_t(same)<state->limit) {
+        try {state->decoders.push_back(std::move(decoder));} catch(...) {}
+    }
+}
+void NativeXmaCodecPool::reserve(XmaFormat format,size_t count) {
+    std::vector<std::unique_ptr<NativeXmaCodec>> opened;
+    for(size_t index=0;index<count;++index) opened.push_back(std::make_unique<NativeXmaCodec>(format));
+    for(auto& decoder:opened) give(std::move(decoder));
+}
+std::vector<float> NativeXmaCodecPool::takeRing(size_t samples) {
+    {
+        std::lock_guard lock(state->mutex);
+        auto& rings=state->rings;
+        for(auto it=rings.begin();it!=rings.end();++it) if(it->size()==samples) {
+            auto ring=std::move(*it);rings.erase(it);return ring;
+        }
+    }
+    return std::vector<float>(samples);
+}
+void NativeXmaCodecPool::giveRing(std::vector<float>&& ring) noexcept {
+    if(ring.empty()) return;
+    std::lock_guard lock(state->mutex);
+    if(state->rings.size()<state->limit*2) {
+        try {state->rings.push_back(std::move(ring));} catch(...) {}
+    }
+}
+size_t NativeXmaCodecPool::idleDecoders() const {std::lock_guard lock(state->mutex);return state->decoders.size();}
+uint64_t NativeXmaCodecPool::reused() const {std::lock_guard lock(state->mutex);return state->reused;
 }
 NativeXmaCodec::NativeXmaCodec(XmaFormat format):state(std::make_unique<State>(format)) {
     if((format.channels!=1 && format.channels!=2) ||

@@ -8,6 +8,7 @@
 #include <thread>
 #include <string>
 #include <memory>
+#include "native_video_settings.h"
 
 namespace Simpsons {
 namespace Platform {class NativeKeyboard;class NativeInputRecording;}
@@ -21,7 +22,21 @@ public:
     HWND handle() const {return hwnd.load();}
     // Rendering only counts frames; the UI timer owns the title and elapsed time.
     void recordPresentedFrame() noexcept {presentedFrames.fetch_add(1,std::memory_order_relaxed);}
-    void configureVideo(uint32_t outputWidth,uint32_t outputHeight,bool fullscreen);
+    // Windowed client extent, borderless desktop, or an exclusive display mode
+    // on the window's monitor (restored on deactivation, exit and mode change).
+    struct VideoRequest {
+        uint32_t width{},height{};
+        bool fullscreen{},exclusive{};
+        NativeDisplayMode mode{};
+    };
+    void configureVideo(const VideoRequest& request);
+    void configureVideo(uint32_t outputWidth,uint32_t outputHeight,bool fullscreen) {
+        configureVideo(VideoRequest{outputWidth,outputHeight,fullscreen,false,{}});
+    }
+    // Monitor refresh observed for the current display mode (Hz, 0 unknown).
+    std::atomic<uint32_t> displayRefresh{0};
+    // Window message that applies configureVideo on the window thread.
+    static constexpr UINT videoMessage=WM_APP+17;
     void setMenuMouse(bool active);
     bool isMenuMouse() const {return menuMouse.load(std::memory_order_relaxed);}
     std::atomic<uint32_t> presentationWidth{1280},presentationHeight{720};
@@ -53,6 +68,12 @@ private:
     int cursorHideCalls=0;
     std::string error;
     bool fullscreen=false;
+    // Exclusive display mode owned by this window (UI thread only).
+    bool exclusiveActive=false,exclusiveSuspended=false;
+    NativeDisplayMode exclusiveMode{};
+    std::wstring exclusiveDevice;
+    bool applyDisplayMode(HWND window,const NativeDisplayMode& mode);
+    void restoreDisplayMode();
     RECT windowedRect{};
     POINT videoWindowExtent{}; // Requested outer extent; owned by the UI thread.
 };

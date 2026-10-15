@@ -1,4 +1,5 @@
 #include "native_backend.h"
+#include "native_copy_submission.h"
 #include "d3d_call_stats.h"
 #include "runtime/stall_profiler.h"
 #include "presentation_window.h"
@@ -6,16 +7,6 @@
 #include <cstdio>
 
 namespace Simpsons::Graphics {
-// Deliberately opaque to runtime receipts. A native query is not a guest SDK
-// fence/token, and completing this copy says nothing about display acceptance.
-class NativeCopySubmission {
-    friend class NativeBackend;
-    const NativeBackend* owner{};
-    ComPtr<ID3D11Query> event;
-    ComPtr<ID3D11Texture2D> sourceResource,destinationResource;
-    std::shared_ptr<void> sourceOwner,destinationOwner;
-    bool submitted{},complete{};
-};
 namespace {
 constexpr ULONGLONG waitMilliseconds=5000;
 void check(HRESULT result,const char* operation) {
@@ -45,7 +36,7 @@ bool eventComplete(ID3D11DeviceContext* context,ID3D11Query* query) {
     if(result!=S_OK || complete!=TRUE) throw Error("Native completion query returned an invalid event result");
     return true;
 }
-void boundedWait(const NativeBackend& backend,ID3D11DeviceContext* context,ID3D11Query* query) {
+void boundedWait(const NativeBackend& backend,ID3D11DeviceContext* context,ID3D11Query* query,bool commandsFlushed) {
     StallProfiler::Scope waitProfile(StallProfiler::Section::Wait,"D3D11.completionQuery",nullptr,reinterpret_cast<uintptr_t>(query));
     // A Sleep(1) poll can consume an entire scheduler tick for each of the
     // frame's completion queries. This timer only paces polling; GetData is
@@ -72,13 +63,14 @@ void boundedWait(const NativeBackend& backend,ID3D11DeviceContext* context,ID3D1
     // gate, GetData is still completion evidence, and the5s deadline remains.
     LARGE_INTEGER frequency{},spinStart{};
     bool spinning=QueryPerformanceFrequency(&frequency) && frequency.QuadPart>0 && QueryPerformanceCounter(&spinStart);
-    bool flushed=false;
+    bool flushed=commandsFlushed;
     for(;;) {
         backend.validateSubmissionContext();
         if(eventComplete(context,query)) {backend.validateSubmissionContext();return;}
-        // Copies no longer Flush at submission. Submit queued commands once
-        // before polling with DONOTFLUSH, so a still-unsubmitted event cannot
-        // sit in the command buffer until the deadline.
+        // A successful Present or an explicit Flush already submitted earlier
+        // events on this immediate context. Otherwise submit queued commands
+        // once so DONOTFLUSH cannot leave an event waiting in the CPU batch.
+        // Submission is not completion: only the real event result returns.
         if(!flushed) {
             StallProfiler::Scope profile(StallProfiler::Section::Rendering,"D3D11.Flush.completionQuery",nullptr,reinterpret_cast<uintptr_t>(query));
             context->Flush();flushed=true;continue;
@@ -122,7 +114,8 @@ void NativeBackend::validateFrontTarget(const std::shared_ptr<RenderTarget>& tar
         if(proof.device && proof.device==device.Get() && proof.texture.Get()==target->texture.Get() &&
            proof.view.Get()==target->view.Get() && proof.sampledView.Get()==target->sampledView.Get() &&
            proof.width==target->width && proof.height==target->height && proof.rowBytes==target->rowBytes &&
-           proof.physicalWidth==target->physicalWidth && proof.physicalHeight==target->physicalHeight && proof.format==target->format)
+           proof.physicalWidth==target->physicalWidth && proof.physicalHeight==target->physicalHeight &&
+           proof.format==target->format)
             return;
     }
     ComPtr<ID3D11Device> actual;target->texture->GetDevice(&actual);
@@ -134,13 +127,13 @@ void NativeBackend::validateFrontTarget(const std::shared_ptr<RenderTarget>& tar
        desc.MipLevels!=1 || desc.ArraySize!=1 || desc.SampleDesc.Count!=1 || desc.SampleDesc.Quality ||
        desc.Usage!=D3D11_USAGE_DEFAULT || desc.BindFlags!=(D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE) ||
        desc.CPUAccessFlags || desc.MiscFlags)
-        throw Error("Native front target exceeds the exact packed RGB10A2 single-sample profile");
+        throw Error("Native color target exceeds its exact packed RGB10A2 coverage profile");
     D3D11_RENDER_TARGET_VIEW_DESC rtv{};target->view->GetDesc(&rtv);
     D3D11_SHADER_RESOURCE_VIEW_DESC srv{};target->sampledView->GetDesc(&srv);
     if(!viewOf(target->view.Get(),target->texture.Get()) || !viewOf(target->sampledView.Get(),target->texture.Get()) ||
-       rtv.Format!=desc.Format || rtv.ViewDimension!=D3D11_RTV_DIMENSION_TEXTURE2D || rtv.Texture2D.MipSlice ||
+       rtv.Format!=desc.Format || rtv.ViewDimension!=D3D11_RTV_DIMENSION_TEXTURE2D ||
        srv.Format!=desc.Format || srv.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D ||
-       srv.Texture2D.MostDetailedMip || srv.Texture2D.MipLevels!=1)
+       rtv.Texture2D.MipSlice || srv.Texture2D.MostDetailedMip || srv.Texture2D.MipLevels!=1)
         throw Error("Native front target view does not match its packed backing");
     // Publish the proof only after the full check succeeded.
     target->frontProof={target->texture,target->view,target->sampledView,device.Get(),target->width,target->height,
@@ -174,15 +167,16 @@ void NativeBackend::validateDepthCopyTarget(const std::shared_ptr<DepthTarget>& 
        desc.Format!=DXGI_FORMAT_R32G8X24_TYPELESS || desc.MipLevels!=1 || desc.ArraySize!=1 ||
        desc.SampleDesc.Count!=1 || desc.SampleDesc.Quality || desc.Usage!=D3D11_USAGE_DEFAULT ||
        desc.BindFlags!=(D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE) || desc.CPUAccessFlags || desc.MiscFlags)
-        throw Error("Native depth copy target exceeds the exact single-sample depth/stencil profile");
+        throw Error("Native depth copy target exceeds its exact depth/stencil coverage profile");
     D3D11_DEPTH_STENCIL_VIEW_DESC dsv{};target->view->GetDesc(&dsv);
     D3D11_SHADER_RESOURCE_VIEW_DESC depth{},stencil{};target->depthView->GetDesc(&depth);target->stencilView->GetDesc(&stencil);
     if(!viewOf(target->view.Get(),target->texture.Get()) || !viewOf(target->depthView.Get(),target->texture.Get()) ||
        !viewOf(target->stencilView.Get(),target->texture.Get()) || dsv.Format!=DXGI_FORMAT_D32_FLOAT_S8X24_UINT ||
-       dsv.ViewDimension!=D3D11_DSV_DIMENSION_TEXTURE2D || dsv.Flags || dsv.Texture2D.MipSlice ||
+       dsv.ViewDimension!=D3D11_DSV_DIMENSION_TEXTURE2D || dsv.Flags ||
        depth.Format!=DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS || stencil.Format!=DXGI_FORMAT_X32_TYPELESS_G8X24_UINT ||
        depth.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D || stencil.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D ||
-       depth.Texture2D.MostDetailedMip || stencil.Texture2D.MostDetailedMip || depth.Texture2D.MipLevels!=1 || stencil.Texture2D.MipLevels!=1)
+       dsv.Texture2D.MipSlice || depth.Texture2D.MostDetailedMip || stencil.Texture2D.MostDetailedMip ||
+       depth.Texture2D.MipLevels!=1 || stencil.Texture2D.MipLevels!=1)
         throw Error("Native depth copy views do not match their backing");
     // Publish the proof only after the full check succeeded.
     target->copyProof={target->texture,target->view,target->depthView,target->stencilView,device.Get(),
@@ -199,21 +193,26 @@ void NativeBackend::validateDepthCopy(const std::shared_ptr<DepthTarget>& source
 }
 std::shared_ptr<NativeCopySubmission> NativeBackend::copyDepth(const std::shared_ptr<DepthTarget>& source,const std::shared_ptr<DepthTarget>& destination) {
     validateDepthCopy(source,destination);
-    return submitCopy(source,destination,source->texture.Get(),destination->texture.Get());
+    return submitCopy(source,destination,source->texture.Get(),destination->texture.Get(),{},destination);
 }
 std::shared_ptr<NativeCopySubmission> NativeBackend::submitCopy(const std::shared_ptr<void>& sourceOwner,
-    const std::shared_ptr<void>& destinationOwner,ID3D11Texture2D* source,ID3D11Texture2D* destination) {
+    const std::shared_ptr<void>& destinationOwner,ID3D11Texture2D* source,ID3D11Texture2D* destination,
+    const std::shared_ptr<RenderTarget>& copiedColor,const std::shared_ptr<DepthTarget>& copiedDepth) {
+    if(temporalOrigins)validateTemporalSceneOriginOwners();
     flushIm2D();
     retireCopies();
     auto submission=std::make_shared<NativeCopySubmission>();
     submission->owner=this;submission->event=eventQuery(device.Get());
     submission->sourceResource=source;submission->destinationResource=destination;
     submission->sourceOwner=sourceOwner;submission->destinationOwner=destinationOwner;
+    captureTemporalCopiedOrigin(submission,copiedColor,copiedDepth);
     pendingCopies.push_back(submission); // All potentially allocating work precedes submission.
     // Same storage format and full extent: preserves all color codes or both
     // depth/stencil components. No shader, rounding, clear or binding changes.
     context->CopyResource(destination,source);
     context->End(submission->event.Get());submission->submitted=true;
+    noteTemporalSceneCopy(source,destination);
+    publishTemporalCopiedOrigin(submission);
     // No per-copy Flush: with a threaded driver each Flush synchronizes with its
     // submission thread. Present, a full command buffer, or boundedWait submit
     // the queued copy/event; the GPU still executes them in command order.
@@ -223,7 +222,7 @@ std::shared_ptr<NativeCopySubmission> NativeBackend::submitCopy(const std::share
 std::shared_ptr<NativeCopySubmission> NativeBackend::copyFront(const std::shared_ptr<RenderTarget>& source,
                                                               const std::shared_ptr<RenderTarget>& front) {
     validateFrontCopy(source,front);
-    return submitCopy(source,front,source->texture.Get(),front->texture.Get());
+    return submitCopy(source,front,source->texture.Get(),front->texture.Get(),front,{});
 }
 bool NativeBackend::pollCopy(const std::shared_ptr<NativeCopySubmission>& submission) {
     validateSubmissionContext();
@@ -249,8 +248,23 @@ bool NativeBackend::copyComplete(const std::shared_ptr<NativeCopySubmission>& su
 }
 void NativeBackend::waitCopy(const std::shared_ptr<NativeCopySubmission>& submission) {
     if(copyComplete(submission)) return;
-    boundedWait(*this,context.Get(),submission->event.Get());
+    boundedWait(*this,context.Get(),submission->event.Get(),submission->commandsFlushed);
     if(!copyComplete(submission)) throw Error("Native copy event lost its proven completion");
+}
+void NativeBackend::waitRecordingPayload(const std::shared_ptr<NativeRecordingPayload>& payload) {
+    // Pin the event installed for the latest execution before any retirement.
+    // Its End follows prepare uploads and ExecuteCommandList on this context.
+    auto event=recordingCompletionQuery(payload);
+    noPredication(context.Get());
+    check(device->GetDeviceRemovedReason(),"device availability before recording retirement");
+    if(!event)return; // Sealed but never executed, or already proven retired.
+    if(!retireRecordingPayload(payload)) {
+        boundedWait(*this,context.Get(),event.Get(),false);
+        if(recordingCompletionQuery(payload).Get()!=event.Get() || !retireRecordingPayload(payload))
+            throw Error("Native recording event lost its proven completion");
+    }
+    check(device->GetDeviceRemovedReason(),"device availability after recording retirement");
+    requireOwner();
 }
 void NativeBackend::waitIdle() {
     flushIm2D();
@@ -258,7 +272,7 @@ void NativeBackend::waitIdle() {
     check(device->GetDeviceRemovedReason(),"device availability before retirement");
     auto event=eventQuery(device.Get());
     context->End(event.Get());context->Flush();
-    boundedWait(*this,context.Get(),event.Get());
+    boundedWait(*this,context.Get(),event.Get(),true);
     retireCopies();
     check(device->GetDeviceRemovedReason(),"device availability after retirement");
     retireRecordingPayloads();
@@ -282,6 +296,7 @@ void NativeBackend::validateFrontPresentation(const std::shared_ptr<RenderTarget
         // they do not authorize a resized, foreign or invalid window.
         DWORD process{};
         const DWORD windowThread=GetWindowThreadProcessId(window,&process);
+        const WindowDpiScope dpi(window);
         const BOOL valid=IsWindow(window),iconicBefore=IsIconic(window);
         RECT client{},outer{};
         const BOOL clientRead=GetClientRect(window,&client),outerRead=GetWindowRect(window,&outer);
@@ -295,12 +310,10 @@ void NativeBackend::validateFrontPresentation(const std::shared_ptr<RenderTarget
             presentationSourceWidth,presentationSourceHeight,presentationLogicalWidth,presentationLogicalHeight);
         throw Error("Native front presentation window state or client extent changed");
     }
-    const uint32_t samples=antialiasingMode==Antialiasing::SSAA4x?2:1;
-    const auto canvas=presentationExtent(front->pixelWidth()/samples,front->pixelHeight()/samples,
+    const auto canvas=presentationExtent(front->pixelWidth(),front->pixelHeight(),
         presentationWidth?presentationWidth:presentationLogicalWidth,presentationHeight?presentationHeight:presentationLogicalHeight,
         presentationLogicalWidth,presentationLogicalHeight);
-    if(front->pixelWidth()%samples || front->pixelHeight()%samples ||
-       front->pixelWidth()/samples!=presentationSourceWidth || front->pixelHeight()/samples!=presentationSourceHeight ||
+    if(front->pixelWidth()!=presentationSourceWidth || front->pixelHeight()!=presentationSourceHeight ||
        desc.Width!=canvas[0] || desc.Height!=canvas[1] || desc.Format!=DXGI_FORMAT_R10G10B10A2_UNORM ||
        desc.Stereo || desc.SampleDesc.Count!=1 || desc.SampleDesc.Quality || desc.BufferCount!=2 ||
        desc.BufferUsage!=DXGI_USAGE_RENDER_TARGET_OUTPUT || desc.SwapEffect!=DXGI_SWAP_EFFECT_FLIP_DISCARD ||
@@ -342,13 +355,32 @@ std::shared_ptr<NativeCopySubmission> NativeBackend::submitFrontPresentation(con
         if(!presentationCanvas||presentationCanvas->pixelWidth()!=extent[0]||presentationCanvas->pixelHeight()!=extent[1])
             presentationCanvas=createTarget(extent[0],extent[1],TargetFormat::RGB10A2);
         clearTarget(presentationCanvas,{0,0,0,1});
-        context->CopySubresourceRegion(presentationCanvas->texture.Get(),0,
+        // The barred canvas at the image's own resolution; an upscaled canvas
+        // is that layout scaled to the window extent.
+        const auto barred=presentationExtent(output->pixelWidth(),output->pixelHeight(),
+            presentationWidth?presentationWidth:presentationLogicalWidth,presentationHeight?presentationHeight:presentationLogicalHeight,
+            presentationLogicalWidth,presentationLogicalHeight,false);
+        if(barred!=extent) {
+            const float kx=float(extent[0])/float(barred[0]),ky=float(extent[1])/float(barred[1]);
+            drawUpscaled(output,presentationCanvas,{float((barred[0]-output->pixelWidth())/2)*kx,float((barred[1]-output->pixelHeight())/2)*ky,
+                float(output->pixelWidth())*kx,float(output->pixelHeight())*ky});
+        } else context->CopySubresourceRegion(presentationCanvas->texture.Get(),0,
             (extent[0]-output->pixelWidth())/2,(extent[1]-output->pixelHeight())/2,0,output->texture.Get(),0,nullptr);
         copied=presentationCanvas;
     }
+    if(fpsOverlayEnabled) {
+        // Never draw into the engine-owned front; draw into a private copy.
+        if(copied==output) {
+            if(!overlayCanvas||overlayCanvas->pixelWidth()!=output->pixelWidth()||overlayCanvas->pixelHeight()!=output->pixelHeight())
+                overlayCanvas=createTarget(output->pixelWidth(),output->pixelHeight(),TargetFormat::RGB10A2);
+            context->CopyResource(overlayCanvas->texture.Get(),output->texture.Get());
+            copied=overlayCanvas;
+        }
+        drawFpsOverlay(copied);
+    }
     ComPtr<ID3D11Texture2D> target;check(swapChain->GetBuffer(0,IID_PPV_ARGS(&target)),"presentation copy target query");
     auto transfer=submitCopy(copied,nullptr,copied->texture.Get(),target.Get());
-    lastPresentedFront=output;
+    lastPresentedFront=output;lastDisplayedImage=copied;
     return transfer;
 }
 void NativeBackend::configureVideoPresentation(bool vsync,uint32_t width,uint32_t height) {
@@ -391,6 +423,12 @@ std::shared_ptr<NativeCopySubmission> NativeBackend::presentFrontQueued(const st
     // preserves source->front->swapchain. The returned receipt proves nothing
     // until it completes; the caller decides when it must wait.
     accepted=present(); // Configured sync interval; false only for DXGI_STATUS_OCCLUDED.
+    if(accepted) {
+        // S_OK Present submits outstanding commands on the validated device
+        // and immediate context. Occlusion/failure supplies no such proof.
+        // https://learn.microsoft.com/en-us/windows-hardware/drivers/display/submitting-a-command-buffer
+        for(const auto& copy:pendingCopies) copy->commandsFlushed=true;
+    }
     return transfer;
 }
 bool NativeBackend::presentFront(const std::shared_ptr<RenderTarget>& front) {

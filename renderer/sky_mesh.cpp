@@ -1,3 +1,4 @@
+#include "temporal_scene.h"
 #include "sky_mesh.h"
 #include "runtime/stall_profiler.h"
 #include "common/geometry_extent.h"
@@ -146,6 +147,7 @@ template<class T>void skyInherit(T& material,const T& live,const NativeRecording
 }
 struct SkyRecordedConstants {SkyVertexConstants vertex;SkyPixelConstants pixel;NativeRecordingMask mask;};
 struct SkyRecordedDraw {
+    std::shared_ptr<TemporalGeometryDraw> temporal;
     const NativeBackend* owner{};DWORD thread{};ComPtr<ID3D11Device> device;
     std::shared_ptr<NativeSkyMesh> mesh;std::shared_ptr<NativeSkyReplayConstants> live;
     std::shared_ptr<RenderTarget> color;std::shared_ptr<DepthTarget> depth;
@@ -177,6 +179,7 @@ struct SkyRecordedDraw {
         deferred->IASetVertexBuffers(0,UINT(streams.size()),streams.data(),strides.data(),offsets.data());
         deferred->IASetInputLayout(layout.Get());deferred->IASetIndexBuffer(indices.Get(),DXGI_FORMAT_R16_UINT,0);
         deferred->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        if(temporal)temporal->bind(deferred);
         forEachOriginalR16StripChunk(start,count,[&](uint32_t n,uint32_t first){deferred->DrawIndexed(n,first,base);});
     }
 };
@@ -273,7 +276,8 @@ void NativeBackend::drawSkyMesh(const std::shared_ptr<RenderTarget>& target,cons
     const float bias=std::bit_cast<float>(d.depthBiasBits),slope=std::bit_cast<float>(d.slopeBiasBits);
     need(std::isfinite(bias)&&std::isfinite(slope)&&std::isfinite(slope*16),"Native sky bias is nonfinite or overflows");
     validateFrontTarget(target);validateDepthCopyTarget(depth);
-    need(depth->width==target->width&&depth->height==target->height,"Native sky attachment dimensions differ");
+    need(depth->width==target->width&&depth->height==target->height&&depth->storageWidth()==target->pixelWidth()&&depth->storageHeight()==target->pixelHeight(),
+         "Native sky attachment dimensions differ");
     const bool reverse=d.viewport[4]==0x3F800000&&d.viewport[5]==0;
     need(d.viewport[0]==0&&d.viewport[1]==0&&d.viewport[2]==target->width&&d.viewport[3]==target->height&&
          (reverse||(d.viewport[4]==0&&d.viewport[5]==0x3F800000)),"Native sky requires a full-target viewport with depth0..1 or1..0");
@@ -289,7 +293,7 @@ void NativeBackend::drawSkyMesh(const std::shared_ptr<RenderTarget>& target,cons
     }
     if(d.lineTarget) {
         validateFrontTarget(d.lineTarget);
-        need(d.lineTarget->texture.Get()!=target->texture.Get(),"Native sky line target aliases its output");
+        need(d.lineTarget->texture.Get()!=target->texture.Get(),"Native sky line snapshot aliases its output");
         need(d.lineTarget->width==target->width&&d.lineTarget->height==target->height,"Native sky line target dimensions differ from its output");
     } else {
         need(bool(d.textures[3]),"Native sky draw is missing a committed line texture");
@@ -326,8 +330,13 @@ void NativeBackend::drawSkyMesh(const std::shared_ptr<RenderTarget>& target,cons
         if(d.lineTarget){auto* line=d.lineTarget->sampledView.Get();context->PSSetShaderResources(3,1,&line);}
         for(UINT i=0;i<4;++i){auto* sampler=samplers[i].Get();context->PSSetSamplers(i,1,&sampler);}
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        auto temporal=temporalGeometryDraw(target,depth,d,vertex.originalAddress(),3);
+        if(temporal){const auto raw=temporalVertexConstants();temporal->prepare(context.Get(),raw,false);}
+        ScopedTemporalGeometryDraw temporalBindings(context.Get(),temporal);
         forEachOriginalR16StripChunk(d.startIndex,d.indexCount,[&](uint32_t n,uint32_t first){context->DrawIndexed(n,first,d.baseVertex);});
         ++skyMeshDraws;
+        noteTemporalSceneDraw(target,depth,d.colorMask,d.depthEnable&&d.depthWrite,false,
+            temporal?std::optional{temporalSceneJitter()}:std::nullopt);
     }
     bindings();requireOwner();
 }
@@ -357,7 +366,8 @@ void NativeBackend::recordSkyMesh(const std::shared_ptr<NativeRecordingPayload>&
     const float bias=std::bit_cast<float>(d.depthBiasBits),slope=std::bit_cast<float>(d.slopeBiasBits);
     need(std::isfinite(bias)&&std::isfinite(slope)&&std::isfinite(slope*16),"Native sky bias is nonfinite or overflows");
     validateFrontTarget(target);validateDepthCopyTarget(depth);
-    need(depth->width==target->width&&depth->height==target->height,"Native sky attachment dimensions differ");
+    need(depth->width==target->width&&depth->height==target->height&&depth->storageWidth()==target->pixelWidth()&&depth->storageHeight()==target->pixelHeight(),
+         "Native sky attachment dimensions differ");
     const bool reverse=d.viewport[4]==0x3F800000&&d.viewport[5]==0;
     need(d.viewport[0]==0&&d.viewport[1]==0&&d.viewport[2]==target->width&&d.viewport[3]==target->height&&
          (reverse||(d.viewport[4]==0&&d.viewport[5]==0x3F800000)),"Native sky requires a full-target viewport with depth0..1 or1..0");
@@ -373,7 +383,7 @@ void NativeBackend::recordSkyMesh(const std::shared_ptr<NativeRecordingPayload>&
     }
     if(d.lineTarget) {
         validateFrontTarget(d.lineTarget);
-        need(d.lineTarget->texture.Get()!=target->texture.Get(),"Recorded sky line target aliases its output");
+        need(d.lineTarget->texture.Get()!=target->texture.Get(),"Recorded sky line snapshot aliases its output");
         need(d.lineTarget->width==target->width&&d.lineTarget->height==target->height,"Recorded sky line target dimensions differ from its output");
     } else {
         need(bool(d.textures[3]),"Recorded sky draw is missing a committed line texture");
@@ -398,8 +408,9 @@ void NativeBackend::recordSkyMesh(const std::shared_ptr<NativeRecordingPayload>&
     draw->pc=buffer(device.Get(),materialPS.data(),sizeof(materialPS),D3D11_BIND_CONSTANT_BUFFER,D3D11_USAGE_DEFAULT);
     std::memcpy(draw->uploadedVertex.data(),materialVS.data(),sizeof(materialVS));
     std::memcpy(draw->uploadedPixel.data(),materialPS.data(),sizeof(materialPS));
-    const DepthConstants values{uint32_t(reverse),d.depthBiasBits,d.slopeBiasBits,0};
-    draw->depthConstants=buffer(device.Get(),&values,sizeof(values),D3D11_BIND_CONSTANT_BUFFER,D3D11_USAGE_IMMUTABLE);
+    // Recorded owners pin immutable depth bits across cache eviction; the
+    // replay-writable material banks above remain private to this draw.
+    draw->depthConstants=sceneDepthConstantBuffer(uint32_t(reverse),d.depthBiasBits,d.slopeBiasBits);
     D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthEnable=d.depthEnable;dd.DepthWriteMask=d.depthWrite?D3D11_DEPTH_WRITE_MASK_ALL:D3D11_DEPTH_WRITE_MASK_ZERO;
     dd.DepthFunc=D3D11_COMPARISON_FUNC(d.depthCompare+1);
     dd.FrontFace={D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_COMPARISON_ALWAYS};dd.BackFace=dd.FrontFace;
@@ -410,11 +421,12 @@ void NativeBackend::recordSkyMesh(const std::shared_ptr<NativeRecordingPayload>&
     color.DestBlend=color.DestBlendAlpha=d.blendEnable?D3D11_BLEND_INV_SRC_ALPHA:D3D11_BLEND_ZERO;
     color.BlendOp=color.BlendOpAlpha=D3D11_BLEND_OP_ADD;check(device->CreateBlendState(&bd,&draw->blend),"direct replace color state creation");
     D3D11_RASTERIZER_DESC rd{};rd.FillMode=D3D11_FILL_SOLID;rd.CullMode=d.cull==0?D3D11_CULL_NONE:D3D11_CULL_BACK;
-    rd.FrontCounterClockwise=d.cull==2;rd.ScissorEnable=d.scissorEnable;rd.DepthClipEnable=TRUE;
+    rd.FrontCounterClockwise=d.cull==2;rd.ScissorEnable=d.scissorEnable;rd.DepthClipEnable=TRUE;rd.MultisampleEnable=TRUE;
     check(device->CreateRasterizerState(&rd,&draw->raster),"direct raster state creation");
     for(UINT i=0;i<4;++i)draw->samplers[i]=sceneSamplerState(materialSampling(d.samplers[i]));
 
     const SkyRecordedConstants data{materialVS,materialPS,receipt.inputMask};
+    draw->temporal=temporalGeometryDraw(target,depth,d,vertex.originalAddress(),3,true);
     NativeRecordingPrepare prepare=[](ID3D11DeviceContext* immediate,const std::shared_ptr<void>& owner,std::span<const uint8_t> bytes) {
         const auto draw=std::static_pointer_cast<SkyRecordedDraw>(owner);
         need(bool(draw)&&bytes.size()==sizeof(SkyRecordedConstants),"Sky recorded constant snapshot changed");
@@ -426,6 +438,7 @@ void NativeBackend::recordSkyMesh(const std::shared_ptr<NativeRecordingPayload>&
         skyInherit(material.vertex,draw->live->state->vertex,material.mask,0);
         skyInherit(material.pixel,draw->live->state->pixel,material.mask,8);
         skyFinite(material.vertex);skyFinite(material.pixel);
+        if(draw->temporal)draw->temporal->prepare(immediate,material.vertex,false);
         if(std::memcmp(draw->uploadedVertex.data(),material.vertex.data(),sizeof(material.vertex))) {
             StallProfiler::Scope updateProfile(StallProfiler::Section::Rendering,"D3D11.UpdateSubresource.skyVertex",nullptr,reinterpret_cast<uintptr_t>(draw->vc.Get()));
             immediate->UpdateSubresource(draw->vc.Get(),0,nullptr,material.vertex.data(),0,0);
@@ -437,7 +450,23 @@ void NativeBackend::recordSkyMesh(const std::shared_ptr<NativeRecordingPayload>&
             std::memcpy(draw->uploadedPixel.data(),material.pixel.data(),sizeof(material.pixel));
         }
     };
+    // Live rendering changes re-derive storage views, physical rectangles and
+    // filtered material samplers from the same owners and original state.
+    auto refresh=[this,draw,samplers=d.samplers,
+                  scissor=d.scissorEnable?D3D11_RECT{LONG(d.scissor[0]),LONG(d.scissor[1]),LONG(d.scissor[2]),LONG(d.scissor[3])}:
+                      D3D11_RECT{0,0,LONG(target->width),LONG(target->height)}] {
+        const auto& target=draw->color;
+        draw->colorView=target->view;draw->depthView=draw->depth->view;
+        if(draw->lineTarget)draw->textureViews[3]=draw->lineTarget->sampledView;
+        draw->viewport=renderViewport(target,{0,0,float(target->width),float(target->height),0,1});
+        draw->scissor=renderScissor(target,scissor);
+        for(UINT i=0;i<4;++i)draw->samplers[i]=sceneSamplerState(materialSampling(samplers[i]));
+    };
     recordRecordingDraw(payload,std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&data),sizeof(data)),draw,std::move(prepare),
-        [draw](ID3D11DeviceContext* deferred){draw->record(deferred);});
+        [draw](ID3D11DeviceContext* deferred){draw->record(deferred);},
+        [this,draw,colorMask=d.colorMask,depthWrite=bool(d.depthEnable&&d.depthWrite)] {
+            noteTemporalSceneDraw(draw->color,draw->depth,colorMask,depthWrite,false,
+                draw->temporal?std::optional{temporalSceneJitter()}:std::nullopt);
+        },std::move(refresh));
 }
 }

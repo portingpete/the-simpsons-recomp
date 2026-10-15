@@ -31,6 +31,11 @@ public:
         // Empty uses the Windows virtual client and follows the default device.
         // An explicit ID pins that endpoint; failures remain terminal.
         std::wstring deviceId;
+        // Opens no device: a real-time clock consumes each buffer after its
+        // 256 frames at 48 kHz, so callers keep their audio cadence without
+        // playback. Also used when no default output device exists (no
+        // speakers, disconnected headset or Remote Desktop session).
+        bool silent=false;
     };
     struct Endpoint {uint32_t channels,sampleRate,channelMask;bool muted;};
     struct Routing {
@@ -63,6 +68,7 @@ public:
     NativeAudioOutput& operator=(const NativeAudioOutput&)=delete;
     Endpoint endpoint() const;
     uint64_t generation() const noexcept;
+    bool silent() const noexcept; // True when buffers complete on the real-time clock.
     void configure(const Routing&); // Once; leaves the source stopped, no implicit routing.
     // Alternative once-only native Windows policy: component indices 0..5 are
     // FL, FR, FC, LFE, SL, SR (mask 0x60F). Uses XAudio2's default endpoint
@@ -72,6 +78,9 @@ public:
     void configureWindows51();
     Routing routing() const; // Configuration was read back from the actual source voice.
     void start();
+    // Master gain on the mastering voice, 0..1. A muted or silent graph keeps
+    // its silence; safe from any non-callback thread, including after stop().
+    void setVolume(float);
     // Exactly 256 interleaved frames, finite normalized float32 [-1,1]. Copies
     // input before acceptance. Backpressure consumes nothing and returns no ID.
     Submission submit(std::span<const float>);

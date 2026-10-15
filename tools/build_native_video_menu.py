@@ -10,18 +10,36 @@ from inspect_assets import stoc_entries, decode_entry, resource_chunks, align, p
 ROOT = Path(__file__).resolve().parents[1]
 OPTIONS_SHA = '1d0f8d2fc3a72b2f676932976eae422c2aa10dfabd6226607f64671b6f7725ad'
 PACKAGES = ('frontend/frontend.str', 'simpsons_chars/simpsons_chars_global.str')
+# Row IDs are stable persisted step() rows (1-based); pages only order them.
 NATIVE_ROWS = ('resolution','windowsize','windowmode','vsync','framecap','filtering','antialiasing',
-               'fov','renderscale','bloom','depthoffield','motionblur','atmosphericfog','colorgrading','cinematicbars')
+               'fov','renderscale','bloom','depthoffield','motionblur','atmosphericfog','colorgrading','cinematicbars',
+               'sharpening','backgroundcap','framelatency','renderer',
+               'refreshrate','anisotropy','lensflare','screenshake','shadowquality','ambientocclusion','upscaling',
+               'colorlook','vibrance','saturation','contrast','exposure',
+               'inkoutlines','outlinestrength','outlinecolor','eyeshading',
+               'fpscounter','menucap','skipintros','characterdetail','startepisode')
 ROW_IDS = ('Resolution','WindowSize','WindowMode','VSync','FrameRate','Filtering','Antialiasing',
-           'FieldOfView','RenderScale','Bloom','DepthOfField','MotionBlur','AtmosphericFog','ColorGrading','CinematicBars')
-VIDEO_PAGES = (('page','brightness',*NATIVE_ROWS[:7]),('page',*NATIVE_ROWS[7:]))
+           'FieldOfView','RenderScale','Bloom','DepthOfField','MotionBlur','AtmosphericFog','ColorGrading','CinematicBars',
+           'Sharpening','BackgroundFrameRate','FrameLatency','Renderer',
+           'RefreshRate','Anisotropy','LensFlare','ScreenShake','ShadowQuality','AmbientOcclusion','Upscaling',
+           'ColorLook','Vibrance','Saturation','Contrast','Exposure',
+           'InkOutlines','OutlineStrength','OutlineColor','EyeShading',
+           'FpsCounter','MenuFrameRate','SkipIntros','CharacterDetail','StartEpisode')
+VIDEO_PAGES = (('page','brightness','windowmode','windowsize','refreshrate','vsync','framecap','resolution','renderscale'),
+               ('page','antialiasing','filtering','anisotropy','shadowquality','ambientocclusion','upscaling','sharpening','characterdetail'),
+               ('page','fov','bloom','depthoffield','motionblur','atmosphericfog','lensflare','screenshake','cinematicbars'),
+               ('page','colorgrading','colorlook','vibrance','saturation','contrast','exposure'),
+               ('page','inkoutlines','outlinestrength','outlinecolor','eyeshading'),
+               ('page','backgroundcap','menucap','framelatency','fpscounter','skipintros','renderer'),
+               ('page','startepisode'))
+PAGE_NAMES = ('Display','Quality','Effects','Color','Outlines','Performance','Game')
 PAGE_ROW_ID = len(NATIVE_ROWS)+1
 ROW_FONT_SIZE, ROW_TOP, ROW_SPACING, FIRST_ROW_GAP = 20.0, -115.0, 24.0, 45.0
 
 def row_y(row):
     if row=='page':return ROW_TOP
     if row=='brightness':return ROW_TOP+35
-    page=0 if row in NATIVE_ROWS[:7] else 1
+    page=next(i for i,names in enumerate(VIDEO_PAGES) if row in names)
     index=VIDEO_PAGES[page].index(row)
     return ROW_TOP+35+(FIRST_ROW_GAP if page==0 else 0)+ROW_SPACING*(index-(2 if page==0 else 1))
 
@@ -149,7 +167,6 @@ def patch_options(original):
             video_clip();a.member('btn_'+row);a.op(0x12);missing=a.jump(0x9d)
             clip_property('btn_'+row,'_visible',0);a.target(missing)
             clip_property('text_'+row,'_visible',0)
-        a.variable('nativePage');effects=a.jump(0x9d)
         def configure(page):
             names=VIDEO_PAGES[page]
             a.array('MenuItemButtons',['btn_'+row for row in names])
@@ -163,28 +180,43 @@ def patch_options(original):
             # The color source remains an authored clip; it is only hidden
             # on the page that has no brightness slider.
             clip_property('brightnessColorRef','_visible',int(page==0))
-            a.string('nativePageLabel');a.string('Video page: '+('1/2 Display' if page==0 else '2/2 Effects')+' (Left/Right)');a.op(0x1d)
-        configure(0);done=a.jump();a.target(effects);configure(1);a.target(done)
+            a.string('nativePageLabel');a.string(f'Video page: {page+1}/{len(VIDEO_PAGES)} {PAGE_NAMES[page]} (Left/Right)');a.op(0x1d)
+        done=[]
+        for page in range(len(VIDEO_PAGES)-1):
+            a.variable('nativePage');a.integer(page);a.op(0x0b);other=a.jump(0x9d)
+            configure(page);done.append(a.jump());a.target(other)
+        configure(len(VIDEO_PAGES)-1)
+        for at in done:a.target(at)
         a.method('_root','initializeButtons')
         a.variable('nativePageLabel');a.integer(1);video_clip();a.string('set_page');a.op(0x52);a.op(0x17)
     a.function('layoutNativePage',layout_page)
-    def next_page():
-        a.string('nativePage');a.integer(1);a.variable('nativePage');a.op(0x0b);a.op(0x1d)
+    def change_page(right):
+        a.string('nativePage');a.variable('NativeNextPages' if right else 'NativePreviousPages');a.variable('nativePage');a.op(0x4e);a.op(0x1d)
         video_method('layoutNativePage')
         a.method('_root','activateGizmos')
         a.string('rememberedSelection');a.variable('_root');a.member('InitialSelection');a.op(0x1d)
         a.variable('_root');a.string('InitialSelection');a.string('');a.op(0x4f)
         a.string('currentSelection');a.integer(0);a.integer(1);a.variable('_root');a.string('activateMenuButtons');a.op(0x52);a.op(0x1d)
         a.variable('_root');a.string('InitialSelection');a.variable('rememberedSelection');a.op(0x4f)
-    a.function('nextPage',next_page)
+    a.function('nextPage',lambda:change_page(True));a.function('previousPage',lambda:change_page(False))
+    a.array('NativeNextPages',[(page+1)%len(VIDEO_PAGES) for page in range(len(VIDEO_PAGES))])
+    a.array('NativePreviousPages',[(page-1)%len(VIDEO_PAGES) for page in range(len(VIDEO_PAGES))])
     a.assign('nativeAction',0);a.assign('nativePage',0);video_method('layoutNativePage');a.assign('currentSelection',0)
     a.finish()
     # Original text movie, font and transform. Separate depths and names make
     # these normal display-list members of VideoMenu, not a drawing overlay.
     additions=[];characters=[]
-    defaults=['Render resolution: 1280x720 (restart)','Window size: 1280 x 720','Display mode: Windowed','VSync: Off','Frame limit: 120 FPS','Texture filtering: Original (restart)','Antialiasing: Original (restart)',
-              'FOV (16:9): Original','Render scale: 100% (restart)','Bloom: On','Depth of field: On','Motion blur: On',
-              'Atmospheric fog: On','Color grading: On','Cinematic bars: On','Video page: 1/2 Display (Left/Right)']
+    defaults=['Render resolution: Match display (1280x720)','Window size: 1280 x 720','Display mode: Windowed','VSync: Off','Frame limit: 120 FPS','Texture filtering: Original','Antialiasing: Original',
+              'FOV (16:9): Original','Render scale: 100%','Bloom: On','Depth of field: On','Motion blur: On',
+              'Atmospheric fog: On','Color grading: On','Cinematic bars: On',
+              'Sharpening: 0%','Background limit: 30 FPS','Frame queue: 1 frame','Renderer: D3D11 (restart)',
+              'Refresh rate: Desktop (60 Hz)','Anisotropic filtering: Off','Lens flare: On','Screen shake: On',
+              'Shadow quality: Original','Ambient occlusion: Off','Upscaling: Bilinear',
+              'Color look: Original','Vibrance: 0% (Custom look)','Saturation: 0% (Custom look)',
+              'Contrast: 0% (Custom look)','Exposure: 0% (Custom look)',
+              'Ink outlines: Original','Soft outline strength: 50%','Outline color: Black','Character eyes: Original',
+              'FPS counter: Off','Menu frame limit: Same as gameplay','Skip intro videos: Off (next launch)',
+              'Character detail: Off (restart)','New game episode: Land of Chocolate (restart)','Video page: 1/7 Display (Left/Right)']
     assert len(defaults)==len(NATIVE_ROWS)+1==len(ROW_IDS)+1
     for i,row in enumerate(rows[1:],1):
         # Give each row its own text character. The retail character is bound
@@ -228,6 +260,7 @@ def build(source):
     # Import lazily: the mouse assembler shares the byte/constant writer above.
     from build_native_mouse_menu import MENU_NAMES, patch_mouse
     from build_native_control_menu import patch_controls
+    from build_native_audio_menu import patch_audio
     from build_native_main_menu import patch_main_menu
     data=source.read_bytes(); entries=stoc_entries(data)['entries']; output=bytearray(data[:entries[0]['file_offset']])
     found=False
@@ -239,7 +272,7 @@ def build(source):
         for c in reversed(list(resource_chunks(decoded))):
             if c.get('name') in MENU_NAMES:
                 at=c['payload_decoded_offset']; size=c['payload_size']; original=decoded[at:at+size]
-                if c['name']=='options.swf':original=patch_controls(patch_options(original))
+                if c['name']=='options.swf':original=patch_audio(patch_controls(patch_options(original)))
                 elif c['name']=='frontend.swf':original=patch_main_menu(original)
                 patch=patch_mouse(original)
                 end=at+size; new=bytearray(decoded[:at]+patch+b'\0'*(-len(patch)%4)+decoded[align(end,4):])

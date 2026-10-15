@@ -5,6 +5,11 @@
 #include <bit>
 #include <limits>
 #include <utility>
+#if defined(_WIN32)
+#include <windows.h>
+#include <bcrypt.h>
+#include <immintrin.h>
+#endif
 
 namespace Simpsons::Graphics {
 namespace {
@@ -119,8 +124,44 @@ std::array<uint8_t,32> sha256(std::span<const uint8_t> bytes) {
     return result;
 }
 
+#if defined(_WIN32)
+constexpr bool fitsLength(size_t length) noexcept {
+    return length<=static_cast<size_t>(std::numeric_limits<ULONG>::max());
+}
+static_assert(fitsLength(static_cast<size_t>(std::numeric_limits<ULONG>::max())));
+static_assert([] {
+    if constexpr(sizeof(size_t)>sizeof(ULONG))
+        return !fitsLength(static_cast<size_t>(std::numeric_limits<ULONG>::max())+size_t{1});
+    else return true;
+}());
+#endif
+
+std::array<uint8_t,32> sha256WithPlatform(std::span<const uint8_t> bytes) {
+#if defined(_WIN32)
+    if(fitsLength(bytes.size())) {
+        // Restore the complete host state before returning or using fallback.
+        struct HostState {
+            unsigned csr=_mm_getcsr();
+            DWORD error=GetLastError();
+            ~HostState() noexcept {_mm_setcsr(csr);SetLastError(error);}
+        };
+        std::array<uint8_t,32> result{};
+        NTSTATUS status{};
+        {
+            const HostState restore;
+            status=BCryptHash(BCRYPT_SHA256_ALG_HANDLE,nullptr,0,
+                bytes.empty()?nullptr:const_cast<PUCHAR>(bytes.data()),
+                static_cast<ULONG>(bytes.size()),result.data(),
+                static_cast<ULONG>(result.size()));
+        }
+        if(status>=0) return result;
+    }
+#endif
+    return sha256(bytes);
+}
+
 bool matchesDigest(std::span<const uint8_t> bytes,std::string_view expected) {
-    const auto digest=sha256(bytes);
+    const auto digest=sha256WithPlatform(bytes);
     constexpr std::string_view hex="0123456789abcdef";
     if(expected.size()!=64) return false;
     for(size_t i=0;i<digest.size();++i)

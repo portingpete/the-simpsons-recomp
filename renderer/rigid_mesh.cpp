@@ -1,3 +1,4 @@
+#include "temporal_scene.h"
 #include "rigid_mesh.h"
 #include "runtime/stall_profiler.h"
 #include "common/geometry_extent.h"
@@ -44,9 +45,18 @@
 #include <utility>
 
 namespace Simpsons::Graphics {
+// Shader bytecode and input signatures are identical for every rigid mesh.
+// Each mesh retains its own references; the backend publishes one complete
+// immutable adapter pack per actual device after every creation succeeds.
+struct RigidMeshAdapters {
+    ComPtr<ID3D11InputLayout> layout,tangentLayout,chocolateLayout,chocolateOpaqueLayout,vfxLayout;
+    ComPtr<ID3D11PixelShader> vfxPixel,pixel,texturedPixel,dualPixel,dualUVPixel,dualUVAlphaPixel,singleUVPixel,singleUVAlphaPixel,flipbookPixel,flipbookAlphaPixel,glossPixel,multitonePixel,normalmapPixel,glossAlphaPixel,multitoneAlphaPixel,normalmapAlphaPixel,a168Pixel,chocPixel,chocOpaquePixel,projtexPixel,projtexAlphaPixel,rigidAlphaPixel;
+};
 // Per-backend exact-content cache, never cross-device.
 struct RigidMeshUploadCache {
+    ComPtr<ID3D11Device> device;
     ExactContentMeshCache<NativeRigidMesh> cache;
+    std::shared_ptr<const RigidMeshAdapters> adapters;
 };
 namespace {
 void need(bool ok,const char* message){if(!ok)throw Error(message);}
@@ -59,7 +69,11 @@ template<class T>void finite(const T& bank) {
 ComPtr<ID3D11Buffer> buffer(ID3D11Device* device,const void* data,UINT bytes,UINT binding,D3D11_USAGE usage) {
     D3D11_BUFFER_DESC desc{};desc.ByteWidth=bytes;desc.BindFlags=binding;desc.Usage=usage;
     const D3D11_SUBRESOURCE_DATA initial{data,0,0};ComPtr<ID3D11Buffer> result;
-    check(device->CreateBuffer(&desc,data?&initial:nullptr,&result),"buffer allocation");return result;
+    const char* function=binding==D3D11_BIND_VERTEX_BUFFER?"D3D11.CreateBuffer.rigid.vertices":
+        binding==D3D11_BIND_INDEX_BUFFER?"D3D11.CreateBuffer.rigid.indices":"D3D11.CreateBuffer.rigid.recordedConstants";
+    StallProfiler::Scope allocationProfile(StallProfiler::Section::Rendering,function,nullptr,reinterpret_cast<uintptr_t>(device));
+    const HRESULT status=device->CreateBuffer(&desc,data?&initial:nullptr,&result);
+    allocationProfile.finish();check(status,"buffer allocation");return result;
 }
 template<class T>std::vector<T> readBuffer(ID3D11Device* device,ID3D11DeviceContext* context,ID3D11Buffer* source) {
     D3D11_BUFFER_DESC desc{};source->GetDesc(&desc);const auto bytes=desc.ByteWidth;
@@ -164,6 +178,7 @@ template<class T>void inherit(T& material,const T& live,const NativeRecordingMas
     }
 }
 struct RecordedDraw {
+    std::shared_ptr<TemporalGeometryDraw> temporal;
     ComPtr<ID3D11Device> device;
     const NativeBackend* owner{};
     DWORD thread{};
@@ -243,14 +258,15 @@ struct RecordedDraw {
         destination->IASetVertexBuffers(0,UINT(streams.size()),streams.data(),strides.data(),offsets.data());
         destination->IASetInputLayout(layout.Get());destination->IASetIndexBuffer(indices.Get(),DXGI_FORMAT_R16_UINT,0);
         destination->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        if(temporal)temporal->bind(destination);
         forEachOriginalR16StripChunk(startIndex,indexCount,[&](uint32_t n,uint32_t first){destination->DrawIndexed(n,first,baseVertex);});
     }
 };
 }
 
-struct NativeRigidMesh::State {
+struct NativeRigidMesh::State : RigidMeshAdapters {
     const NativeBackend* owner{};DWORD thread{};ComPtr<ID3D11Device> device;
-    ComPtr<ID3D11Buffer> vertices,indices;ComPtr<ID3D11InputLayout> layout,tangentLayout,chocolateLayout,chocolateOpaqueLayout,vfxLayout;ComPtr<ID3D11PixelShader> vfxPixel,pixel,texturedPixel,dualPixel,dualUVPixel,dualUVAlphaPixel,singleUVPixel,singleUVAlphaPixel,flipbookPixel,flipbookAlphaPixel,glossPixel,multitonePixel,normalmapPixel,glossAlphaPixel,multitoneAlphaPixel,normalmapAlphaPixel,a168Pixel,chocPixel,chocOpaquePixel,projtexPixel,projtexAlphaPixel,rigidAlphaPixel;
+    ComPtr<ID3D11Buffer> vertices,indices;
     uint32_t vertexCount{};R16Indices indexValues;
     mutable ImmutableBufferPairProof proof;
     void validate(const NativeBackend* backend,ID3D11Device* expected) const {
@@ -300,23 +316,37 @@ NativeRigidReplayConstants::NativeRigidReplayConstants(std::unique_ptr<State> va
 NativeRigidReplayConstants::~NativeRigidReplayConstants()=default;
 
 std::shared_ptr<NativeRigidMesh> NativeBackend::uploadRigidMesh(std::span<const RigidVertex> vertices,std::span<const uint16_t> indices) {
+    return uploadRigidMeshImpl(vertices,indices,nullptr);
+}
+std::shared_ptr<NativeRigidMesh> NativeBackend::uploadRigidMeshOwned(std::vector<RigidVertex>& vertices,std::span<const uint16_t> indices) {
+    return uploadRigidMeshImpl(vertices,indices,&vertices);
+}
+std::shared_ptr<NativeRigidMesh> NativeBackend::uploadRigidMeshImpl(std::span<const RigidVertex> vertices,std::span<const uint16_t> indices,
+                                                               std::vector<RigidVertex>* ownedVertices) {
     validateSubmissionContext();
     need(validNativeMeshBufferExtent(vertices.size(),sizeof(RigidVertex))&&validNativeMeshBufferExtent(indices.size(),sizeof(uint16_t)),
          "Native rigid mesh exceeds buffer byte or index extent");
     // Exact decoded bytes only: never guest address, never hash-only.
     const std::span<const uint8_t> vertexBytes{reinterpret_cast<const uint8_t*>(vertices.data()), vertices.size_bytes()};
     const std::span<const uint8_t> indexBytes{reinterpret_cast<const uint8_t*>(indices.data()), indices.size_bytes()};
+    StallProfiler::Scope lookupProfile(StallProfiler::Section::Rendering,"Mesh.rigid.decodedLookup",nullptr,reinterpret_cast<uintptr_t>(device.Get()));
     const uint64_t contentKey =
         ExactContentMeshCache<NativeRigidMesh>::contentKey(vertexBytes, indexBytes);
     if(!rigidMeshCache_) rigidMeshCache_ = std::make_shared<RigidMeshUploadCache>();
     auto& slot = *rigidMeshCache_;
-    if(auto hit = slot.cache.find(vertexBytes, indexBytes, contentKey)) {
+    if(slot.device.Get()!=device.Get()) {
+        slot.cache.clear();slot.adapters.reset();slot.device=device;
+    }
+    auto hit = slot.cache.find(vertexBytes, indexBytes, contentKey);
+    lookupProfile.finish();
+    if(hit) {
         // Exact immutable bytes were validated before insertion; stale
         // wrong-device resources fail here and propagate, never reupload.
         hit->state->validate(this, device.Get());
         requireOwner();
         return hit;
     }
+    StallProfiler::Scope validationProfile(StallProfiler::Section::Rendering,"Mesh.rigid.validate",nullptr,reinterpret_cast<uintptr_t>(device.Get()));
     for(const auto& v:vertices) {
         for(float x:v.position)need(std::isfinite(x),"Nonfinite rigid position");
         // Original packed normals may be zero. The qualified PS slot15 keeps
@@ -329,65 +359,77 @@ std::shared_ptr<NativeRigidMesh> NativeBackend::uploadRigidMesh(std::span<const 
         // check preserves existing callers and qualifies future normalmap use.
         for(float x:v.tangent)need(std::isfinite(x),"Nonfinite rigid tangent");
     }
+    validationProfile.finish();
     auto result=std::make_unique<NativeRigidMesh::State>();result->owner=this;result->thread=owner;result->device=device;
-    result->vertexCount=uint32_t(vertices.size());result->indexValues.assign(indices.begin(),indices.end());
+    result->vertexCount=uint32_t(vertices.size());
+    StallProfiler::Scope indexCopyProfile(StallProfiler::Section::Rendering,"Mesh.rigid.indexCopy",nullptr,reinterpret_cast<uintptr_t>(device.Get()));
+    result->indexValues.assign(indices.begin(),indices.end());indexCopyProfile.finish();
     result->vertices=buffer(device.Get(),vertices.data(),UINT(vertices.size_bytes()),D3D11_BIND_VERTEX_BUFFER,D3D11_USAGE_IMMUTABLE);
     result->indices=buffer(device.Get(),indices.data(),UINT(indices.size_bytes()),D3D11_BIND_INDEX_BUFFER,D3D11_USAGE_IMMUTABLE);
-    const D3D11_INPUT_ELEMENT_DESC elements[]={
-        {"TEXCOORD",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0},
-        {"TEXCOORD",1,DXGI_FORMAT_R32G32B32_FLOAT,0,12,D3D11_INPUT_PER_VERTEX_DATA,0},
-        {"TEXCOORD",2,DXGI_FORMAT_R32G32B32A32_FLOAT,0,24,D3D11_INPUT_PER_VERTEX_DATA,0},
-        {"TEXCOORD",3,DXGI_FORMAT_R32G32_FLOAT,0,40,D3D11_INPUT_PER_VERTEX_DATA,0},
-        {"TEXCOORD",4,DXGI_FORMAT_R32G32_FLOAT,0,48,D3D11_INPUT_PER_VERTEX_DATA,0}};
-    check(device->CreateInputLayout(elements,UINT(std::size(elements)),kVSRigidDualTextured,sizeof(kVSRigidDualTextured),&result->layout),"dual rigid input layout creation");
-    // The particle VS consumes three registers; use its own signature so
-    // color and UV are not shifted by the lit shader's normal input.
-    const D3D11_INPUT_ELEMENT_DESC vfxElements[]={elements[0],elements[2],elements[3]};
-    check(device->CreateInputLayout(vfxElements,UINT(std::size(vfxElements)),kVSVfxRigid,sizeof(kVSVfxRigid),&result->vfxLayout),"VFX rigid input layout creation");
-    // Tangent-consuming declaration. Appends TEXCOORD5 at byte56; the
-    // first 56 bytes and the default 5-element layout above are unchanged, so
-    // every existing consumer keeps its exact binding. Grounded in the
-    // declaration row usage6/index0 type002A2187 and the rigid VS fetches
-    // targeting r5. Bound only for shaders that explicitly consume tangent.
-    const D3D11_INPUT_ELEMENT_DESC tangentElements[]={
-        {"TEXCOORD",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0},
-        {"TEXCOORD",1,DXGI_FORMAT_R32G32B32_FLOAT,0,12,D3D11_INPUT_PER_VERTEX_DATA,0},
-        {"TEXCOORD",2,DXGI_FORMAT_R32G32B32A32_FLOAT,0,24,D3D11_INPUT_PER_VERTEX_DATA,0},
-        {"TEXCOORD",3,DXGI_FORMAT_R32G32_FLOAT,0,40,D3D11_INPUT_PER_VERTEX_DATA,0},
-        {"TEXCOORD",4,DXGI_FORMAT_R32G32_FLOAT,0,48,D3D11_INPUT_PER_VERTEX_DATA,0},
-        {"TEXCOORD",5,DXGI_FORMAT_R32G32B32_FLOAT,0,56,D3D11_INPUT_PER_VERTEX_DATA,0}};
-    check(device->CreateInputLayout(tangentElements,UINT(std::size(tangentElements)),kVSRigidNormalTangent,sizeof(kVSRigidNormalTangent),&result->tangentLayout),"normalmap tangent input layout creation");
-    // D3D input layouts encode the VS input register mapping. Chocolate has
-    // the same vertex fields but a different signature from NormalTangent.
-    check(device->CreateInputLayout(tangentElements,UINT(std::size(tangentElements)),kVSChocolate,sizeof(kVSChocolate),&result->chocolateLayout),"chocolate tangent input layout creation");
-    check(device->CreateInputLayout(tangentElements,UINT(std::size(tangentElements)),kVSChocolateOpaque,sizeof(kVSChocolateOpaque),&result->chocolateOpaqueLayout),"chocolate opaque input layout creation");
-    check(device->CreatePixelShader(kPSRigidDraw,sizeof(kPSRigidDraw),nullptr,&result->pixel),"depth/color adapter creation");
-    check(device->CreatePixelShader(kPSVfxRigidDraw,sizeof(kPSVfxRigidDraw),nullptr,&result->vfxPixel),"VFX rigid depth/color adapter creation");
-    check(device->CreatePixelShader(kPSRigidTexturedDraw,sizeof(kPSRigidTexturedDraw),nullptr,&result->texturedPixel),"textured depth/color adapter creation");
-    check(device->CreatePixelShader(kPSRigidDualTexturedDraw,sizeof(kPSRigidDualTexturedDraw),nullptr,&result->dualPixel),"dualtextured depth/color adapter creation");
-    check(device->CreatePixelShader(kPSRigidDualTexturedUVDraw,sizeof(kPSRigidDualTexturedUVDraw),nullptr,&result->dualUVPixel),"dualtextured UV depth/color adapter");
-    check(device->CreatePixelShader(kPSRigidDualTexturedUVAlphaDraw,sizeof(kPSRigidDualTexturedUVAlphaDraw),nullptr,&result->dualUVAlphaPixel),"dualtextured UV alpha depth/color adapter");
-    check(device->CreatePixelShader(kPSRigidUVDraw,sizeof(kPSRigidUVDraw),nullptr,&result->singleUVPixel),"single UV depth/color adapter");
-    check(device->CreatePixelShader(kPSRigidUVAlphaDraw,sizeof(kPSRigidUVAlphaDraw),nullptr,&result->singleUVAlphaPixel),"single UV alpha depth/color adapter");
-    check(device->CreatePixelShader(kPSFlipbookDraw,sizeof(kPSFlipbookDraw),nullptr,&result->flipbookPixel),"flipbook depth/color adapter");
-    check(device->CreatePixelShader(kPSFlipbookAlphaDraw,sizeof(kPSFlipbookAlphaDraw),nullptr,&result->flipbookAlphaPixel),"flipbook alpha depth/color adapter");
-    check(device->CreatePixelShader(kPSRigidGlossDraw,sizeof(kPSRigidGlossDraw),nullptr,&result->glossPixel),"gloss depth/color adapter creation");
-    check(device->CreatePixelShader(kPSRigidMultitoneDraw,sizeof(kPSRigidMultitoneDraw),nullptr,&result->multitonePixel),"multitone depth/color adapter creation");
-    check(device->CreatePixelShader(kPSRigidNormalmapDraw,sizeof(kPSRigidNormalmapDraw),nullptr,&result->normalmapPixel),"normalmap depth/color adapter creation");
-    check(device->CreatePixelShader(kPSRigidGlossAlphaDraw,sizeof(kPSRigidGlossAlphaDraw),nullptr,&result->glossAlphaPixel),"gloss alpha depth/color adapter");
-    check(device->CreatePixelShader(kPSRigidMultitoneAlphaDraw,sizeof(kPSRigidMultitoneAlphaDraw),nullptr,&result->multitoneAlphaPixel),"multitone alpha depth/color adapter");
-    check(device->CreatePixelShader(kPSRigidNormalmapAlphaDraw,sizeof(kPSRigidNormalmapAlphaDraw),nullptr,&result->normalmapAlphaPixel),"normalmap alpha depth/color adapter");
-    check(device->CreatePixelShader(kPS168F8Draw,sizeof(kPS168F8Draw),nullptr,&result->a168Pixel),"168F8 depth/color adapter creation");
-    check(device->CreatePixelShader(kPSChocolateDraw,sizeof(kPSChocolateDraw),nullptr,&result->chocPixel),"chocolate depth/color adapter creation");
-    check(device->CreatePixelShader(kPSChocolateOpaqueDraw,sizeof(kPSChocolateOpaqueDraw),nullptr,&result->chocOpaquePixel),"chocolate opaque depth/color adapter");
-    check(device->CreatePixelShader(kPSProjtexDraw,sizeof(kPSProjtexDraw),nullptr,&result->projtexPixel),"projtex depth/color adapter");
-    check(device->CreatePixelShader(kPSProjtexAlphaDraw,sizeof(kPSProjtexAlphaDraw),nullptr,&result->projtexAlphaPixel),"projtex alpha depth/color adapter");
-    check(device->CreatePixelShader(kPSRigidAlphaDraw,sizeof(kPSRigidAlphaDraw),nullptr,&result->rigidAlphaPixel),"rigid alpha depth/color adapter");
+    if(!slot.adapters) {
+        StallProfiler::Scope adapterProfile(StallProfiler::Section::Rendering,"Mesh.rigid.adapters",nullptr,reinterpret_cast<uintptr_t>(device.Get()));
+        auto pending=std::make_shared<RigidMeshAdapters>();
+        const D3D11_INPUT_ELEMENT_DESC elements[]={
+            {"TEXCOORD",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0},
+            {"TEXCOORD",1,DXGI_FORMAT_R32G32B32_FLOAT,0,12,D3D11_INPUT_PER_VERTEX_DATA,0},
+            {"TEXCOORD",2,DXGI_FORMAT_R32G32B32A32_FLOAT,0,24,D3D11_INPUT_PER_VERTEX_DATA,0},
+            {"TEXCOORD",3,DXGI_FORMAT_R32G32_FLOAT,0,40,D3D11_INPUT_PER_VERTEX_DATA,0},
+            {"TEXCOORD",4,DXGI_FORMAT_R32G32_FLOAT,0,48,D3D11_INPUT_PER_VERTEX_DATA,0}};
+        check(device->CreateInputLayout(elements,UINT(std::size(elements)),kVSRigidDualTextured,sizeof(kVSRigidDualTextured),&pending->layout),"dual rigid input layout creation");
+        // The particle VS consumes three registers; use its own signature so
+        // color and UV are not shifted by the lit shader's normal input.
+        const D3D11_INPUT_ELEMENT_DESC vfxElements[]={elements[0],elements[2],elements[3]};
+        check(device->CreateInputLayout(vfxElements,UINT(std::size(vfxElements)),kVSVfxRigid,sizeof(kVSVfxRigid),&pending->vfxLayout),"VFX rigid input layout creation");
+        // Tangent-consuming declaration. Appends TEXCOORD5 at byte56; the
+        // first 56 bytes and the default 5-element layout above are unchanged, so
+        // every existing consumer keeps its exact binding. Grounded in the
+        // declaration row usage6/index0 type002A2187 and the rigid VS fetches
+        // targeting r5. Bound only for shaders that explicitly consume tangent.
+        const D3D11_INPUT_ELEMENT_DESC tangentElements[]={
+            {"TEXCOORD",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0},
+            {"TEXCOORD",1,DXGI_FORMAT_R32G32B32_FLOAT,0,12,D3D11_INPUT_PER_VERTEX_DATA,0},
+            {"TEXCOORD",2,DXGI_FORMAT_R32G32B32A32_FLOAT,0,24,D3D11_INPUT_PER_VERTEX_DATA,0},
+            {"TEXCOORD",3,DXGI_FORMAT_R32G32_FLOAT,0,40,D3D11_INPUT_PER_VERTEX_DATA,0},
+            {"TEXCOORD",4,DXGI_FORMAT_R32G32_FLOAT,0,48,D3D11_INPUT_PER_VERTEX_DATA,0},
+            {"TEXCOORD",5,DXGI_FORMAT_R32G32B32_FLOAT,0,56,D3D11_INPUT_PER_VERTEX_DATA,0}};
+        check(device->CreateInputLayout(tangentElements,UINT(std::size(tangentElements)),kVSRigidNormalTangent,sizeof(kVSRigidNormalTangent),&pending->tangentLayout),"normalmap tangent input layout creation");
+        // D3D input layouts encode the VS input register mapping. Chocolate has
+        // the same vertex fields but a different signature from NormalTangent.
+        check(device->CreateInputLayout(tangentElements,UINT(std::size(tangentElements)),kVSChocolate,sizeof(kVSChocolate),&pending->chocolateLayout),"chocolate tangent input layout creation");
+        check(device->CreateInputLayout(tangentElements,UINT(std::size(tangentElements)),kVSChocolateOpaque,sizeof(kVSChocolateOpaque),&pending->chocolateOpaqueLayout),"chocolate opaque input layout creation");
+        check(device->CreatePixelShader(kPSRigidDraw,sizeof(kPSRigidDraw),nullptr,&pending->pixel),"depth/color adapter creation");
+        check(device->CreatePixelShader(kPSVfxRigidDraw,sizeof(kPSVfxRigidDraw),nullptr,&pending->vfxPixel),"VFX rigid depth/color adapter creation");
+        check(device->CreatePixelShader(kPSRigidTexturedDraw,sizeof(kPSRigidTexturedDraw),nullptr,&pending->texturedPixel),"textured depth/color adapter creation");
+        check(device->CreatePixelShader(kPSRigidDualTexturedDraw,sizeof(kPSRigidDualTexturedDraw),nullptr,&pending->dualPixel),"dualtextured depth/color adapter creation");
+        check(device->CreatePixelShader(kPSRigidDualTexturedUVDraw,sizeof(kPSRigidDualTexturedUVDraw),nullptr,&pending->dualUVPixel),"dualtextured UV depth/color adapter");
+        check(device->CreatePixelShader(kPSRigidDualTexturedUVAlphaDraw,sizeof(kPSRigidDualTexturedUVAlphaDraw),nullptr,&pending->dualUVAlphaPixel),"dualtextured UV alpha depth/color adapter");
+        check(device->CreatePixelShader(kPSRigidUVDraw,sizeof(kPSRigidUVDraw),nullptr,&pending->singleUVPixel),"single UV depth/color adapter");
+        check(device->CreatePixelShader(kPSRigidUVAlphaDraw,sizeof(kPSRigidUVAlphaDraw),nullptr,&pending->singleUVAlphaPixel),"single UV alpha depth/color adapter");
+        check(device->CreatePixelShader(kPSFlipbookDraw,sizeof(kPSFlipbookDraw),nullptr,&pending->flipbookPixel),"flipbook depth/color adapter");
+        check(device->CreatePixelShader(kPSFlipbookAlphaDraw,sizeof(kPSFlipbookAlphaDraw),nullptr,&pending->flipbookAlphaPixel),"flipbook alpha depth/color adapter");
+        check(device->CreatePixelShader(kPSRigidGlossDraw,sizeof(kPSRigidGlossDraw),nullptr,&pending->glossPixel),"gloss depth/color adapter creation");
+        check(device->CreatePixelShader(kPSRigidMultitoneDraw,sizeof(kPSRigidMultitoneDraw),nullptr,&pending->multitonePixel),"multitone depth/color adapter creation");
+        check(device->CreatePixelShader(kPSRigidNormalmapDraw,sizeof(kPSRigidNormalmapDraw),nullptr,&pending->normalmapPixel),"normalmap depth/color adapter creation");
+        check(device->CreatePixelShader(kPSRigidGlossAlphaDraw,sizeof(kPSRigidGlossAlphaDraw),nullptr,&pending->glossAlphaPixel),"gloss alpha depth/color adapter");
+        check(device->CreatePixelShader(kPSRigidMultitoneAlphaDraw,sizeof(kPSRigidMultitoneAlphaDraw),nullptr,&pending->multitoneAlphaPixel),"multitone alpha depth/color adapter");
+        check(device->CreatePixelShader(kPSRigidNormalmapAlphaDraw,sizeof(kPSRigidNormalmapAlphaDraw),nullptr,&pending->normalmapAlphaPixel),"normalmap alpha depth/color adapter");
+        check(device->CreatePixelShader(kPS168F8Draw,sizeof(kPS168F8Draw),nullptr,&pending->a168Pixel),"168F8 depth/color adapter creation");
+        check(device->CreatePixelShader(kPSChocolateDraw,sizeof(kPSChocolateDraw),nullptr,&pending->chocPixel),"chocolate depth/color adapter creation");
+        check(device->CreatePixelShader(kPSChocolateOpaqueDraw,sizeof(kPSChocolateOpaqueDraw),nullptr,&pending->chocOpaquePixel),"chocolate opaque depth/color adapter");
+        check(device->CreatePixelShader(kPSProjtexDraw,sizeof(kPSProjtexDraw),nullptr,&pending->projtexPixel),"projtex depth/color adapter");
+        check(device->CreatePixelShader(kPSProjtexAlphaDraw,sizeof(kPSProjtexAlphaDraw),nullptr,&pending->projtexAlphaPixel),"projtex alpha depth/color adapter");
+        check(device->CreatePixelShader(kPSRigidAlphaDraw,sizeof(kPSRigidAlphaDraw),nullptr,&pending->rigidAlphaPixel),"rigid alpha depth/color adapter");
+        slot.adapters=std::move(pending);
+    }
+    static_cast<RigidMeshAdapters&>(*result)=*slot.adapters;
     result->validate(this,device.Get());requireOwner();
     auto shared = std::shared_ptr<NativeRigidMesh>(new NativeRigidMesh(std::move(result)));
     // Snapshot exact bytes so later caller mutation cannot corrupt the cache.
     // Eviction drops only the cache's strong ref; live caller handles stay valid.
-    slot.cache.insert(vertexBytes, indexBytes, contentKey, shared);
+    StallProfiler::Scope cacheCopyProfile(StallProfiler::Section::Rendering,"Mesh.rigid.cacheCopy",nullptr,reinterpret_cast<uintptr_t>(device.Get()));
+    if(ownedVertices)slot.cache.insertOwnedVertices(*ownedVertices,indexBytes,contentKey,shared);
+    else slot.cache.insert(vertexBytes, indexBytes, contentKey, shared);
+    cacheCopyProfile.finish();
     return shared;
 }
 void NativeBackend::bindRigidMeshVertices(const std::shared_ptr<NativeRigidMesh>& mesh) {
@@ -485,7 +527,8 @@ void NativeBackend::drawRigidMesh(const std::shared_ptr<RenderTarget>& target,co
     const float bias=std::bit_cast<float>(d.depthBiasBits),slope=std::bit_cast<float>(d.slopeBiasBits);
     need(std::isfinite(bias)&&std::isfinite(slope)&&std::isfinite(slope*16),"Native rigid bias is nonfinite or overflows");
     validateFrontTarget(target);validateDepthCopyTarget(depth);
-    need(depth->width==target->width&&depth->height==target->height,"Native rigid attachment dimensions differ");
+    need(depth->width==target->width&&depth->height==target->height&&depth->storageWidth()==target->pixelWidth()&&depth->storageHeight()==target->pixelHeight(),
+         "Native rigid attachment dimensions differ");
     const bool reverse=d.viewport[4]==0x3F800000&&d.viewport[5]==0;
     need(d.viewport[0]==0&&d.viewport[1]==0&&d.viewport[2]==target->width&&d.viewport[3]==target->height&&
          (reverse||(d.viewport[4]==0&&d.viewport[5]==0x3F800000)),"Native rigid requires a full-target viewport with depth0..1 or1..0");
@@ -560,8 +603,13 @@ void NativeBackend::drawRigidMesh(const std::shared_ptr<RenderTarget>& target,co
         else if(choc){ID3D11SamplerState* states[]={materialSamplers[0].Get(),materialSamplers[1].Get(),materialSamplers[2].Get()};context->PSSetSamplers(materialStage,materialCount,states);}
         else if(textured){auto* sampler=baseSampler.Get();context->PSSetSamplers(baseStage,1,&sampler);}
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        auto temporal=temporalGeometryDraw(target,depth,d,vertex.originalAddress(),0);
+        if(temporal){const auto raw=temporalVertexConstants();temporal->prepare(context.Get(),raw,false);}
+        ScopedTemporalGeometryDraw temporalBindings(context.Get(),temporal);
         forEachOriginalR16StripChunk(d.startIndex,d.indexCount,[&](uint32_t n,uint32_t first){context->DrawIndexed(n,first,d.baseVertex);});
         ++rigidMeshDraws;
+        noteTemporalSceneDraw(target,depth,d.colorMask,d.depthEnable&&d.depthWrite,false,
+            temporal?std::optional{temporalSceneJitter()}:std::nullopt);
     }
     bindings();requireOwner();
 }
@@ -675,7 +723,8 @@ void NativeBackend::recordRigidMesh(const std::shared_ptr<NativeRecordingPayload
     const float bias=std::bit_cast<float>(d.depthBiasBits),slope=std::bit_cast<float>(d.slopeBiasBits);
     need(std::isfinite(bias)&&std::isfinite(slope)&&std::isfinite(slope*16),"Native rigid bias is nonfinite or overflows");
     validateFrontTarget(target);validateDepthCopyTarget(depth);
-    need(depth->width==target->width&&depth->height==target->height,"Native rigid attachment dimensions differ");
+    need(depth->width==target->width&&depth->height==target->height&&depth->storageWidth()==target->pixelWidth()&&depth->storageHeight()==target->pixelHeight(),
+         "Native rigid attachment dimensions differ");
     const bool reverse=d.viewport[4]==0x3F800000&&d.viewport[5]==0;
     need(d.viewport[0]==0&&d.viewport[1]==0&&d.viewport[2]==target->width&&d.viewport[3]==target->height&&
          (reverse||(d.viewport[4]==0&&d.viewport[5]==0x3F800000)),"Native rigid requires a full-target viewport with depth0..1 or1..0");
@@ -711,7 +760,7 @@ void NativeBackend::recordRigidMesh(const std::shared_ptr<NativeRecordingPayload
     draw->mesh=mesh;draw->live=live;draw->colorOwner=target;draw->depthOwner=depth;draw->shadowOwners=d.shadows;draw->chocolate=choc;draw->chocolateAlpha=chocAlpha;draw->materialCount=materialCount;draw->materialStage=materialStage;
     draw->vertices=m.vertices;draw->indices=m.indices;draw->layout=vfx?m.vfxLayout:chocOpaque?m.chocolateOpaqueLayout:chocAlpha?m.chocolateLayout:normalmap?m.tangentLayout:m.layout;draw->baseStage=baseStage;draw->drawPixel=flipbookOpaque?m.flipbookPixel:flipbookAlpha?m.flipbookAlphaPixel:singleUvOpaque?m.singleUVPixel:singleUvAlpha?m.singleUVAlphaPixel:uvOpaque?m.dualUVPixel:uvAlpha?m.dualUVAlphaPixel:vfx?m.vfxPixel:rigidAlpha?m.rigidAlphaPixel:chocOpaque?m.chocOpaquePixel:chocAlpha?m.chocPixel:projtex?m.projtexPixel:projtexAlpha?m.projtexAlphaPixel:(a168||dualAlpha)?m.a168Pixel:glossAlpha?m.glossAlphaPixel:multitoneAlpha?m.multitoneAlphaPixel:normalmapAlpha?m.normalmapAlphaPixel:normalmap?m.normalmapPixel:multitone?m.multitonePixel:gloss?m.glossPixel:dual?m.dualPixel:textured?m.texturedPixel:m.pixel;
     if(multitone||normalmap||projtex){draw->noiseOwner=d.noiseTexture;draw->noiseView=d.noiseTexture->view;
-        check(device->CreateSamplerState(&d.noiseSampler,&draw->noiseSampler),"recorded noise/normal sampler creation");}
+        draw->noiseSampler=sceneSamplerState(d.noiseSampler);}
     if(textured){draw->baseOwner=d.baseTexture;draw->baseView=d.baseTexture->view;
         draw->baseSampler=sceneSamplerState(materialSampling(d.baseSampler));}
     if(choc)for(uint32_t stage=0;stage<materialCount;++stage) {
@@ -733,24 +782,18 @@ void NativeBackend::recordRigidMesh(const std::shared_ptr<NativeRecordingPayload
     // Cache the bytes that CreateBuffer uploaded to these private buffers.
     std::memcpy(draw->uploadedVertex.data(),materialVS.data(),sizeof(materialVS));
     std::memcpy(draw->uploadedPixel.data(),materialPS.data(),sizeof(materialPS));
-    const DepthConstants depthValues{uint32_t(reverse),d.depthBiasBits,d.slopeBiasBits,0};
-    draw->depthConstants=buffer(device.Get(),&depthValues,sizeof(depthValues),D3D11_BIND_CONSTANT_BUFFER,D3D11_USAGE_IMMUTABLE);
-    D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthEnable=d.depthEnable;dd.DepthWriteMask=d.depthWrite?D3D11_DEPTH_WRITE_MASK_ALL:D3D11_DEPTH_WRITE_MASK_ZERO;
-    dd.DepthFunc=D3D11_COMPARISON_FUNC(d.depthCompare+1);
-    dd.FrontFace={D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_COMPARISON_ALWAYS};dd.BackFace=dd.FrontFace;
-    check(device->CreateDepthStencilState(&dd,&draw->depthState),"depth state creation");
-    D3D11_BLEND_DESC bd{};auto& color=bd.RenderTarget[0];color.RenderTargetWriteMask=UINT8(d.colorMask);
-    color.BlendEnable=d.blendEnable;
-    if(d.blendWord==0x07060706){color.SrcBlend=color.SrcBlendAlpha=D3D11_BLEND_SRC_ALPHA;color.DestBlend=color.DestBlendAlpha=D3D11_BLEND_INV_SRC_ALPHA;}
-    else{color.SrcBlend=color.SrcBlendAlpha=D3D11_BLEND_ONE;color.DestBlend=color.DestBlendAlpha=D3D11_BLEND_ZERO;}
-    color.BlendOp=color.BlendOpAlpha=D3D11_BLEND_OP_ADD;check(device->CreateBlendState(&bd,&draw->blend),"replace color state creation");
-    D3D11_RASTERIZER_DESC rd{};rd.FillMode=D3D11_FILL_SOLID;rd.CullMode=d.cull==0?D3D11_CULL_NONE:D3D11_CULL_BACK;
-    rd.FrontCounterClockwise=d.cull==2;rd.ScissorEnable=d.scissorEnable;rd.DepthClipEnable=TRUE;
-    check(device->CreateRasterizerState(&rd,&draw->raster),"raster state creation");
-    if(!noShadowSamples)for(size_t slot=0;slot<shadowCount;++slot){draw->shadows[slot]=d.shadows[slot]->depthView;check(device->CreateSamplerState(&d.samplers[slot],&draw->samplers[slot]),"shadow sampler creation");}
+    // Descriptor-identical immutable scene objects may be shared. Every
+    // recorded draw pins its own references; its mutable VS/PS banks above
+    // remain distinct so inherited replay updates cannot overwrite a sibling.
+    draw->depthConstants=sceneDepthConstantBuffer(uint32_t(reverse),d.depthBiasBits,d.slopeBiasBits);
+    draw->depthState=sceneDepthState(d.depthEnable,d.depthWrite,d.depthCompare);
+    draw->blend=sceneBlendState(d.blendEnable,d.blendWord,d.colorMask);
+    draw->raster=sceneRasterState(d.cull,d.scissorEnable);
+    if(!noShadowSamples)for(size_t slot=0;slot<shadowCount;++slot){draw->shadows[slot]=d.shadows[slot]->depthView;draw->samplers[slot]=sceneSamplerState(d.samplers[slot]);}
     const RecordedConstants data{materialVS,materialPS,receipt.inputMask};
     // NativeRecordingPayload owns the copied bytes and draw, including both
     // shader objects. Preparation never calls this backend or original CPU code.
+    draw->temporal=temporalGeometryDraw(target,depth,d,vertex.originalAddress(),0,true);
     NativeRecordingPrepare prepare=[](ID3D11DeviceContext* immediate,const std::shared_ptr<void>& owner,std::span<const uint8_t> bytes) {
         const auto draw=std::static_pointer_cast<RecordedDraw>(owner);
         need(bool(draw)&&bytes.size()==sizeof(RecordedConstants),"Native rigid recorded constant snapshot changed");
@@ -762,6 +805,7 @@ void NativeBackend::recordRigidMesh(const std::shared_ptr<NativeRecordingPayload
         inherit(material.vertex,draw->live->state->vertex,material.inputMask,0);
         inherit(material.pixel,draw->live->state->pixel,material.inputMask,8);
         finite(material.vertex);finite(material.pixel);
+        if(draw->temporal)draw->temporal->prepare(immediate,material.vertex,false);
         // Each draw has DISTINCT DEFAULT storage, updated only here. Recording
         // UpdateSubresource into the list would overwrite every replay's values.
         if(std::memcmp(draw->uploadedVertex.data(),material.vertex.data(),sizeof(material.vertex))) {
@@ -775,7 +819,27 @@ void NativeBackend::recordRigidMesh(const std::shared_ptr<NativeRecordingPayload
             std::memcpy(draw->uploadedPixel.data(),material.pixel.data(),sizeof(material.pixel));
         }
     };
+    // Live rendering changes re-derive storage views, physical rectangles and
+    // filtered material samplers from the same owners and original state.
+    auto refresh=[this,draw,shadowSlots=noShadowSamples?0u:shadowCount,textured,choc,uv,
+                  scissor=d.scissorEnable?D3D11_RECT{LONG(d.scissor[0]),LONG(d.scissor[1]),LONG(d.scissor[2]),LONG(d.scissor[3])}:
+                      D3D11_RECT{0,0,LONG(target->width),LONG(target->height)},
+                  baseSampler=d.baseSampler,materialSamplers=d.materialSamplers,uvSamplers=d.uvSamplers] {
+        const auto& target=draw->colorOwner;
+        draw->color=target->view;draw->depth=draw->depthOwner->view;
+        draw->viewport=renderViewport(target,{0,0,float(target->width),float(target->height),0,1});
+        draw->scissor=renderScissor(target,scissor);
+        for(size_t slot=0;slot<shadowSlots;++slot)draw->shadows[slot]=draw->shadowOwners[slot]->depthView;
+        if(textured)draw->baseSampler=sceneSamplerState(materialSampling(baseSampler));
+        if(choc)for(uint32_t stage=0;stage<draw->materialCount;++stage)
+            draw->materialSamplers[stage]=sceneSamplerState(materialSampling(materialSamplers[stage]));
+        if(uv)for(uint32_t stage=0;stage<2;++stage)draw->uvSamplers[stage]=sceneSamplerState(materialSampling(uvSamplers[stage]));
+    };
     recordRecordingDraw(payload,std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&data),sizeof(data)),draw,std::move(prepare),
-        [draw](ID3D11DeviceContext* deferred){draw->record(deferred);});
+        [draw](ID3D11DeviceContext* deferred){draw->record(deferred);},
+        [this,draw,colorMask=d.colorMask,depthWrite=bool(d.depthEnable&&d.depthWrite)] {
+            noteTemporalSceneDraw(draw->colorOwner,draw->depthOwner,colorMask,depthWrite,false,
+                draw->temporal?std::optional{temporalSceneJitter()}:std::nullopt);
+        },std::move(refresh));
 }
 }

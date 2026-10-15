@@ -4,6 +4,38 @@
 // namespace: extern void SimpsonsNativeOverlayExpandedEnter(PPCContext&,uint8_t*);
 //            extern void SimpsonsNativeOverlayExpandedExit(PPCContext&,uint8_t*);
 // Uses the main test's runtime/driver/CPU/state/backend and standard includes.
+// This rejection runs before Runtime construction, while active is naturally
+// null. Never clear the process-global runtime while original workers are live.
+void overlayExpandedNoRuntimeContracts() {
+    using namespace Simpsons;
+    require(active==nullptr,"No-runtime overlay fixture must precede runtime construction");
+    struct HostRestore {
+        uint32_t csr=PPCFPSCRRegister::getcsr();DWORD error=GetLastError();PPCContext* context=currentContext;
+        ~HostRestore(){currentContext=context;PPCFPSCRRegister::restoreHostCSR(csr);SetLastError(error);}
+    } restore;
+    alignas(32) std::array<uint8_t,64> memory{};memory.fill(0xA5);
+    const auto originalMemory=memory;
+    for(bool enter:{false,true}) {
+        PPCContext ctx{};auto* bytes=reinterpret_cast<uint8_t*>(&ctx);
+        for(size_t i=0;i<sizeof(ctx);++i)bytes[i]=uint8_t(i*37+11);
+        ctx.r3.u64=0;ctx.r4.u64=enter?1:0;ctx.r1.u64=0x13F00;
+        ctx.r28.u64=ctx.r31.u64=0xFFFFFFFF82D10000ull;ctx.r30.u64=0x10100;
+        ctx.lr=enter?0x827F5AE4:0x827F5C00;ctx.fpscr.csr=PPCFPSCRRegister::DefaultCSR;
+        currentContext=&ctx;
+        std::array<uint8_t,sizeof(PPCContext)> original{};std::memcpy(original.data(),&ctx,sizeof(ctx));
+        const uint32_t csr=PPCFPSCRRegister::DefaultCSR|(2u<<PPCFPSCRRegister::RoundShift)|0x21u;
+        PPCFPSCRRegister::restoreHostCSR(csr);SetLastError(0x51ABED29);
+        bool rejected=false;
+        try {
+            if(enter)::SimpsonsNativeOverlayExpandedEnter(ctx,memory.data());
+            else ::SimpsonsNativeOverlayExpandedExit(ctx,memory.data());
+        }catch(const Failure& error){rejected=std::string(error.what())=="Overlay expansion has no current native runtime/context/driver";}
+        require(rejected,"No-runtime overlay hook did not reject at its exact ownership guard");
+        require(!std::memcmp(original.data(),&ctx,sizeof(ctx))&&memory==originalMemory,"No-runtime overlay rejection changed raw context/padding or owned fake-base bytes");
+        require(PPCFPSCRRegister::getcsr()==csr&&GetLastError()==0x51ABED29,"No-runtime overlay rejection changed full host CSR/LastError");
+        require(active==nullptr&&currentContext==&ctx,"No-runtime overlay rejection changed process or thread-local identity");
+    }
+}
 void overlayExpandedContracts(Simpsons::Runtime& runtime,Simpsons::EngineCpuCalls& cpu,uint8_t* base) {
     using namespace Simpsons;
     using namespace Simpsons::Graphics;
@@ -175,11 +207,6 @@ void overlayExpandedContracts(Simpsons::Runtime& runtime,Simpsons::EngineCpuCall
                 runtime.engineDriver=owned;
             }
             checkState(state,state.scalar(ScalarState::ExpandedBlend0));
-            {
-                auto* previous=active;active=nullptr;
-                try {prepare(enter?1:0);bad(enter,ctx,base);} catch(...) {active=previous;throw;}
-                active=previous;
-            }
             checkState(state,state.scalar(ScalarState::ExpandedBlend0));
             {
                 const auto format=target->format;target->format=TargetFormat::RGBA8;

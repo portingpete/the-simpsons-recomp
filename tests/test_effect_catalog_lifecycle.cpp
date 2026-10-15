@@ -101,6 +101,21 @@ void cycle(Runtime& rt,EngineCpuCalls& cpu,uint32_t index,std::array<uint32_t,25
     }
     need(shadowDepth[0].lock()!=shadowDepth[1].lock() && PPC_LOAD_U32(shadows+0xF8)==borrowedDepth,
          "Original shadow depth owners alias or changed their borrowed copy role");
+    // ownsCamera keeps an exact memo of its guest walk. After a successful (memoized)
+    // proof, a changed camera, frame, raster or owner field is still rejected, and the
+    // restored structure is accepted again.
+    for(uint32_t cameraField:{0x5B4u,0x5B8u}) {
+        const uint32_t camera=PPC_LOAD_U32(shadows+cameraField);
+        need(shadowTextures.ownsCamera(camera) && shadowTextures.ownsCamera(camera),"Original shadows camera ownership failed");
+        const uint32_t frame=PPC_LOAD_U32(camera+4),color=PPC_LOAD_U32(camera+0x60);
+        for(const uint32_t field:{camera+0x14,frame+0xA0,color+0xC,shadows+0x5B4+(cameraField-0x5B4)}) {
+            const uint32_t original=PPC_LOAD_U32(field);
+            PPC_STORE_U32(field,original^0x10);
+            rejects([&]{shadowTextures.ownsCamera(camera);},"Memoized shadows camera accepted a changed guest field");
+            PPC_STORE_U32(field,original);
+            need(shadowTextures.ownsCamera(camera),"Restored shadows camera was rejected");
+        }
+    }
     stage="shared pool association and edited values";
     const uint32_t sharedNames=PPC_LOAD_U32(pool+0x11C);uint32_t name=sharedNames;
     for(uint32_t i=0;i<11;++i) {

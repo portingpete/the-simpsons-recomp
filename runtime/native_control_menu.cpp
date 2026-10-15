@@ -36,12 +36,16 @@ void method(Simpsons::EngineCpuCalls& cpu,uint8_t* base,uint32_t movie,const std
 uint32_t action(Simpsons::EngineCpuCalls& cpu,uint8_t* base,uint32_t movie,const char* name) {
     method(cpu,base,movie,name);return cpu.invoke(0x823A4628);
 }
+// Three keyboard pages of eight actions, then the mouse/controller page.
+constexpr uint32_t keyboardPages=(Simpsons::NativeControlSettings::actionCount+7)/8,mousePage=keyboardPages;
+bool boundAction(uint32_t page,uint32_t row) {return page*8+row<Simpsons::NativeControlSettings::actionCount;}
 void labels(Simpsons::EngineCpuCalls& cpu,uint8_t* base) {
     auto& rt=*menu.runtime;const auto path=target(cpu,menu.movie);
     std::array<std::string,10> values;
-    if(menu.page<2) {
-        values[0]="Keyboard "+std::to_string(menu.page+1)+"/2 - "+(menu.slot?"Secondary":"Primary")+"; Enter assigns";
+    if(menu.page<keyboardPages) {
+        values[0]="Keyboard "+std::to_string(menu.page+1)+"/"+std::to_string(keyboardPages)+" - "+(menu.slot?"Secondary":"Primary")+"; Enter assigns";
         for(uint32_t i=0;i<8;++i) {
+            if(!boundAction(menu.page,i)){values[i+1]="-";continue;}
             const auto binding=Simpsons::ControlAction(menu.page*8+i);
             values[i+1]=std::string(Simpsons::NativeControlSettings::actionLabel(binding))+" ["+std::to_string(menu.slot+1)+"]: "+
                 rt.controlSettings.bindingLabel(binding,0)+" / "+rt.controlSettings.bindingLabel(binding,1);
@@ -51,7 +55,7 @@ void labels(Simpsons::EngineCpuCalls& cpu,uint8_t* base) {
                 (menu.rejected?": Reserved key - choose another":": Press key; Esc cancels; Delete clears");
         }
     } else {
-        values[0]="Mouse / Controller - page 3/3";
+        values[0]="Mouse / Controller - page "+std::to_string(mousePage+1)+"/"+std::to_string(mousePage+1);
         values[1]="Mouse sensitivity: "+std::to_string(rt.controlSettings.mouseSensitivity)+"%";
         values[2]=std::string("Invert mouse X: ")+(rt.controlSettings.invertMouseX?"On":"Off");
         values[3]=std::string("Invert mouse Y: ")+(rt.controlSettings.invertMouseY?"On":"Off");
@@ -66,8 +70,8 @@ void labels(Simpsons::EngineCpuCalls& cpu,uint8_t* base) {
     }
 }
 void changePage(Simpsons::EngineCpuCalls& cpu,uint8_t* base,int direction) {
-    menu.page=(menu.page+(direction>0?1u:2u))%3;
-    method(cpu,base,menu.movie,menu.page==2?"ControlsMenu.nativeMousePage":"ControlsMenu.nativeKeyboardPage");
+    menu.page=(menu.page+(direction>0?1u:mousePage))%(mousePage+1);
+    method(cpu,base,menu.movie,menu.page==mousePage?"ControlsMenu.nativeMousePage":"ControlsMenu.nativeKeyboardPage");
     labels(cpu,base);
 }
 bool matching(Simpsons::Runtime* rt,uint8_t* base) {
@@ -78,16 +82,17 @@ void edit(Simpsons::EngineCpuCalls& cpu,uint8_t* base,uint32_t row,int direction
     auto& rt=*menu.runtime;auto& keyboard=*rt.window->keyboard;
     if(keyboard.rebindActive())return;
     if(row==0)changePage(cpu,base,direction);
-    else if(menu.page<2&&row<=8) {
+    else if(menu.page<keyboardPages&&row<=8) {
+        if(select&&!boundAction(menu.page,row-1))return;
         if(select) {
             menu.captureRow=int(row-1);menu.rejected=false;
             keyboard.beginRebind(Simpsons::ControlAction(menu.page*8+row-1),menu.slot);
             labels(cpu,base);
         } else {menu.slot=direction>0?1u:0u;labels(cpu,base);}
-    } else if(menu.page==2&&row<=4) {
+    } else if(menu.page==mousePage&&row<=4) {
         // Reset is a deliberate Select action; direction keys only edit values.
         if(row!=4||select){rt.controlSettings.step(row-1,direction);publish(rt);labels(cpu,base);}
-    } else if(menu.page==2&&row<=7) {
+    } else if(menu.page==mousePage&&row<=7) {
         method(cpu,base,menu.movie,select?"ControlsMenu.nativeControllerToggle":direction>0?"gizmoMoveRight":"gizmoMoveLeft");
         cpu.invoke(0x823A51E8,menu.movie); // Unchanged retail gamepad preferences.
     }
@@ -130,7 +135,7 @@ void SimpsonsNativeControlsLeave(PPCContext& ctx,uint8_t* base) {
         std::fprintf(stderr,"[NATIVE CONTROL MENU] cancelled and restored\n");return;
     }
     const auto selected=action(cpu,base,menu.movie,"ControlsMenu.getNativeSelection");
-    const auto accept=menu.page==2?208u:209u;
+    const auto accept=menu.page==mousePage?208u:209u;
     if(selected>=1200||selected==accept) {
         rt->controlSettings=keyboard.controls();rt->controlSettings.save(rt->controlSettingsPath);menu={};
         std::fprintf(stderr,"[NATIVE CONTROL MENU] accepted and saved\n");return;

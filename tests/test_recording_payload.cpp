@@ -1,4 +1,5 @@
 #include "renderer/native_backend.h"
+#include "header/test_graphics_device.h"
 #include "renderer/device_availability.h"
 #include "VSFlat.h"
 #include "PSFlat.h"
@@ -37,12 +38,23 @@ struct NativeRecordingProbe {
     }
     static void retire(NativeBackend& backend){backend.retireRecordingPayloads();}
     static size_t pending(const NativeBackend& backend){return backend.pendingRecordingPayloads.size();}
+    static ComPtr<ID3D11Query> completion(NativeBackend& backend,const std::shared_ptr<NativeRecordingPayload>& payload) {
+        return backend.recordingCompletionQuery(payload);
+    }
+    static auto pendingItems(const NativeBackend& backend){return backend.pendingRecordingPayloads;}
+    static void pendingItems(NativeBackend& backend,const std::vector<std::shared_ptr<NativeRecordingPayload>>& items) {
+        backend.pendingRecordingPayloads=items;
+    }
+    static auto queuedIm2D(const NativeBackend& backend) {
+        return std::pair{backend.pendingIm2D.get(),backend.pendingIm2DBuffer.Get()};
+    }
     // Cache-hit replacement seam: swap/restore the immediate context to prove
     // a warmed identity proof still re-checks a changed pair. ComPtr copies
     // keep both sides alive across the swap; no mutable bindings are touched.
     static ComPtr<ID3D11DeviceContext> saveImmediate(NativeBackend& backend){return backend.context;}
     static void setImmediate(NativeBackend& backend,const ComPtr<ID3D11DeviceContext>& replacement){backend.context=replacement;}
     static void debug(NativeBackend& backend,bool hardware) {
+        if(testUsesVulkan())return; // D3D11 debug layer: a D3D11-only diagnostic.
         ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;D3D_FEATURE_LEVEL level{};
         const D3D_FEATURE_LEVEL levels[]={D3D_FEATURE_LEVEL_11_1,D3D_FEATURE_LEVEL_11_0};
         HRESULT result=D3D11CreateDevice(nullptr,hardware?D3D_DRIVER_TYPE_HARDWARE:D3D_DRIVER_TYPE_WARP,nullptr,
@@ -61,6 +73,88 @@ struct NativeRecordingProbe {
 namespace {
 using Snapshot=EngineBindingResetProbe::Snapshot;
 void hr(HRESULT result,const char* reason){require(SUCCEEDED(result),reason);}
+// Fixture-local COM entry patches preserve the complete runtime vtables,
+// including extension/private slots and prefix metadata used by SDK layers.
+// Every unobserved identity/thread forwards its exact original call. Control
+// only WITHHOLDS evidence: it never reports success before the real query does.
+// This makes a later unrelated submission deterministically pending on either
+// WARP or hardware, even when the actual GPU finishes the small fixture early.
+struct WaitCalls {
+    using GetData=HRESULT (STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Asynchronous*,void*,UINT,UINT);
+    using End=void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Asynchronous*);
+    using Flush=void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*);
+    using CreateQuery=HRESULT (STDMETHODCALLTYPE*)(ID3D11Device*,const D3D11_QUERY_DESC*,ID3D11Query**);
+    ID3D11DeviceContext* context;
+    ID3D11Device* device;
+    struct Slot {
+        void** location{};
+        void* original{};
+        void install(void** entry,void* replacement) {
+            DWORD protection{};
+            require(VirtualProtect(entry,sizeof(*entry),PAGE_READWRITE,&protection),"Wait fixture could not protect COM entry");
+            location=entry;original=*entry;*entry=replacement;
+            DWORD ignored{};require(VirtualProtect(entry,sizeof(*entry),protection,&ignored),"Wait fixture could not restore COM entry protection");
+        }
+        ~Slot() {
+            if(!location)return;
+            DWORD protection{},ignored{};
+            if(!VirtualProtect(location,sizeof(*location),PAGE_READWRITE,&protection))std::terminate();
+            *location=original;
+            if(!VirtualProtect(location,sizeof(*location),protection,&ignored))std::terminate();
+        }
+    };
+    std::array<Slot,4> slots;
+    inline static std::atomic<GetData> originalGetData{};
+    inline static std::atomic<End> originalEnd{};
+    inline static std::atomic<Flush> originalFlush{};
+    inline static std::atomic<CreateQuery> originalCreateQuery{};
+    inline static thread_local WaitCalls* active{};
+    size_t queries{},ends{},flushes{},heldPolls{},forcedPolls{};
+    ID3D11Asynchronous* latestEnd{};
+    ID3D11Asynchronous* held{};
+    ID3D11Asynchronous* forced{};
+    ID3D11Asynchronous* failed{};
+    size_t requiredFlush{};
+    bool flagsValid=true;
+    std::vector<ID3D11Asynchronous*> polled;
+    WaitCalls(ID3D11DeviceContext* c,ID3D11Device* d):context(c),device(d) {
+        require(!active,"Nested wait-call fixture");
+        auto** contextTable=*reinterpret_cast<void***>(c);auto** deviceTable=*reinterpret_cast<void***>(d);
+        originalEnd=reinterpret_cast<End>(contextTable[28]);originalGetData=reinterpret_cast<GetData>(contextTable[29]);
+        originalFlush=reinterpret_cast<Flush>(contextTable[111]);originalCreateQuery=reinterpret_cast<CreateQuery>(deviceTable[24]);
+        // Never replace the object's vptr with a guessed public-interface
+        // length: the debug runtime calls device slot69 during UpdateSubresource.
+        try {
+            slots[0].install(contextTable+28,reinterpret_cast<void*>(&end));
+            slots[1].install(contextTable+29,reinterpret_cast<void*>(&getData));
+            slots[2].install(contextTable+111,reinterpret_cast<void*>(&flush));
+            slots[3].install(deviceTable+24,reinterpret_cast<void*>(&createQuery));
+            active=this;
+        } catch(...) {active=nullptr;throw;}
+    }
+    ~WaitCalls(){active=nullptr;} // Slot members restore entries even on exceptions.
+    static HRESULT STDMETHODCALLTYPE getData(ID3D11DeviceContext* c,ID3D11Asynchronous* q,void* data,UINT size,UINT flags) {
+        if(!active || c!=active->context)return originalGetData.load()(c,q,data,size,flags);
+        auto& s=*active;s.polled.push_back(q);
+        s.flagsValid=s.flagsValid && flags==D3D11_ASYNC_GETDATA_DONOTFLUSH && size==sizeof(BOOL) && data;
+        if(q==s.failed)return E_FAIL;
+        if(q==s.held || (q==s.forced && s.flushes<s.requiredFlush)) {
+            if(data && size==sizeof(BOOL))*static_cast<BOOL*>(data)=FALSE;
+            if(q==s.held)++s.heldPolls;else ++s.forcedPolls;
+            return S_FALSE;
+        }
+        return originalGetData.load()(c,q,data,size,flags);
+    }
+    static void STDMETHODCALLTYPE end(ID3D11DeviceContext* c,ID3D11Asynchronous* q) {
+        if(active && c==active->context){++active->ends;active->latestEnd=q;}originalEnd.load()(c,q);
+    }
+    static void STDMETHODCALLTYPE flush(ID3D11DeviceContext* c) {
+        if(active && c==active->context)++active->flushes;originalFlush.load()(c);
+    }
+    static HRESULT STDMETHODCALLTYPE createQuery(ID3D11Device* d,const D3D11_QUERY_DESC* desc,ID3D11Query** q) {
+        if(active && d==active->device)++active->queries;return originalCreateQuery.load()(d,desc,q);
+    }
+};
 using Constants=std::array<float,8>;
 std::span<const uint8_t> bytes(const Constants& value) {
     return {reinterpret_cast<const uint8_t*>(value.data()),sizeof(value)};
@@ -268,7 +362,7 @@ void lifecycleAndPixels(Fixture& f) {
         "Record and execution counts were conflated");
     require(backend.recordingDrawCount()==2 && backend.recordingExecutedDrawCount()==4,"Backend recording counters mismatch");
     require(!backend.screenDrawCount() && !backend.presentationCount(),"Recording changed unrelated counters");
-    backend.waitIdle();NativeRecordingProbe::retire(backend);backend.releaseRecordingPayload(payload);
+    backend.waitRecordingPayload(payload);NativeRecordingProbe::retire(backend);backend.releaseRecordingPayload(payload);
     require(leftLease.expired() && rightLease.expired(),"Released payload retained draw owners after GPU retirement");
     rejects([&]{backend.recordingPayloadReceipt(payload);});rejects([&]{backend.executeRecordingPayload(payload);});
     rejects([&]{backend.releaseRecordingPayload(payload);});
@@ -605,6 +699,108 @@ void batchReceipts(Fixture& f,bool hardware) {
     backend.releaseRecordingContext(second);
     f.seed();f.clear();
 }
+
+void payloadWait(Fixture& f,bool hardware) {
+    auto& backend=f.backend;backend.waitIdle();f.seed();f.clear();
+    auto control=std::make_shared<ReplayControl>();auto left=f.owner(),right=f.owner(true);
+    std::weak_ptr<DrawOwner> leftLease=left,rightLease=right;
+    const Constants red{1,0,0,1,0,0,0,0},green{0,1,0,1,0,0,0,0},blue{0,0,.5f,1,0,0,0,0};
+    auto payload=f.begin();f.append(payload,left,red,control);f.append(payload,right,green,control);
+    backend.finishRecordingPayload(payload);left.reset();right.reset();
+    auto never=f.begin();auto unused=f.owner();f.append(never,unused,red,control);backend.finishRecordingPayload(never);
+    auto second=backend.createRecordingContext();f.seed();backend.bindTargets({f.sentinel,nullptr,nullptr,nullptr},f.depth);
+    auto later=backend.allocateRecordingPayload(second,0x3000);backend.beginRecordingPayload(later,4,mask(),mask());
+    auto laterOwner=f.owner();auto laterControl=std::make_shared<ReplayControl>();f.append(later,laterOwner,blue,laterControl);
+    backend.finishRecordingPayload(later);
+    ComPtr<ID3D11Query> firstEvent,latestEvent,laterEvent;
+    {
+        WaitCalls calls(f.immediate(),NativeRecordingProbe::device(backend));
+        backend.executeRecordingPayload(payload);firstEvent=NativeRecordingProbe::completion(backend,payload);
+        calls.held=firstEvent.Get();control->factor=.25f;backend.executeRecordingPayload(payload);
+        latestEvent=NativeRecordingProbe::completion(backend,payload);
+        require(firstEvent && latestEvent && firstEvent!=latestEvent && calls.latestEnd==latestEvent.Get(),
+            "Re-execution did not install its own latest actual End event");
+        calls.held=latestEvent.Get();backend.executeRecordingPayload(later);laterEvent=NativeRecordingProbe::completion(backend,later);
+        require(laterEvent && laterEvent!=latestEvent && calls.latestEnd==laterEvent.Get(),"Later submission did not have a distinct event");
+        require(backend.recordingPayloadReceipt(payload).executions==2,"Waiting fixture lost multiple execution accounting");
+        const size_t ends=calls.ends;control->before=[&]{backend.waitRecordingPayload(never);};
+        rejects([&]{backend.executeRecordingPayload(payload);});control->before={};
+        require(calls.ends==ends && NativeRecordingProbe::completion(backend,payload)==latestEvent,
+            "Reentrant wait changed the last submitted execution");
+    }
+    // These later CPU batches retain copied vertices/bytes and independent COM
+    // resources. Waiting for an earlier recording must leave both queued.
+    auto ui=backend.createTarget(16,8,TargetFormat::RGB10A2);backend.bindTargets({ui,nullptr,nullptr,nullptr},nullptr);
+    backend.setViewport({0,0,16,8,0,1});Im2DDraw packet{};packet.primitiveType=3;packet.rasterWidth=16;packet.rasterHeight=8;
+    packet.blendWord=0x00010001;packet.colorWriteMask=15;packet.pixelCenterHalf=true;
+    packet.vertices={{{0,0,0,1},{0,1,0,1},{}},{{16,0,0,1},{0,1,0,1},{}},{{0,8,0,1},{0,1,0,1},{}}};
+    backend.queueIm2D(ui,nullptr,packet);auto raw=backend.createBuffer(84,BufferKind::Vertex);
+    const std::array<uint8_t,84> rawBytes{};backend.queueIm2DBufferWrite(raw,0,rawBytes);
+    const auto queued=NativeRecordingProbe::queuedIm2D(backend);
+    require(queued.first && queued.second,"Recording wait fixture did not retain its later Im2D work");
+    const Snapshot stable(f.immediate());const auto receipt=backend.recordingPayloadReceipt(payload),neverReceipt=backend.recordingPayloadReceipt(never);
+    const auto pending=NativeRecordingProbe::pendingItems(backend);
+    {
+        WaitCalls calls(f.immediate(),NativeRecordingProbe::device(backend));calls.held=latestEvent.Get();
+        auto unchanged=[&] {
+            require(Snapshot(f.immediate())==stable,"Recording wait rejection changed native bindings");
+            require(NativeRecordingProbe::pendingItems(backend)==pending,"Recording wait rejection retired an execution owner");
+            require(NativeRecordingProbe::queuedIm2D(backend)==queued,"Recording wait flushed unrelated Im2D work");
+            sameReceipt(backend.recordingPayloadReceipt(payload),receipt,"Rejected wait");
+            require(!leftLease.expired() && !rightLease.expired(),"Recording wait rejection dropped draw owners");
+        };
+        rejects([&]{backend.waitRecordingPayload(nullptr);});NativeBackend foreign(!hardware);
+        rejects([&]{foreign.waitRecordingPayload(payload);});
+        auto allocated=backend.allocateRecordingPayload(second,0x3000);rejects([&]{backend.waitRecordingPayload(allocated);});
+        backend.beginRecordingPayload(allocated,0,{},{});rejects([&]{backend.waitRecordingPayload(allocated);});
+        // Waiting a sealed token whose context is now actively recording also
+        // rejects, before changing either sealed execution's retirement state.
+        rejects([&]{backend.waitRecordingPayload(later);});backend.releaseRecordingPayload(allocated);
+        rejects([&]{backend.waitRecordingPayload(allocated);});unchanged();
+        std::atomic<bool> wrongThread=false;
+        std::thread other([&]{try{backend.waitRecordingPayload(payload);}catch(const Error& error){
+            wrongThread=std::string(error.what()).starts_with("Native graphics immediate context used from a different thread");
+        }});other.join();require(wrongThread,"Recording wait accepted another thread");unchanged();
+        auto corrupt=pending;std::erase(corrupt,payload);NativeRecordingProbe::pendingItems(backend,corrupt);
+        rejects([&]{backend.waitRecordingPayload(payload);});NativeRecordingProbe::pendingItems(backend,pending);unchanged();
+        corrupt=pending;corrupt.push_back(payload);NativeRecordingProbe::pendingItems(backend,corrupt);
+        rejects([&]{backend.waitRecordingPayload(payload);});NativeRecordingProbe::pendingItems(backend,pending);unchanged();
+        ComPtr<ID3D11Predicate> predicate;const D3D11_QUERY_DESC predicateDesc{D3D11_QUERY_OCCLUSION_PREDICATE,0};
+        hr(NativeRecordingProbe::device(backend)->CreatePredicate(&predicateDesc,&predicate),"Recording wait predicate fixture");
+        f.immediate()->Begin(predicate.Get());f.immediate()->End(predicate.Get());f.immediate()->SetPredication(predicate.Get(),TRUE);
+        const Snapshot predicated(f.immediate());const size_t polls=calls.polled.size(),flushes=calls.flushes,queries=calls.queries;
+        rejects([&]{backend.waitRecordingPayload(payload);});rejects([&]{backend.waitRecordingPayload(never);});
+        require(Snapshot(f.immediate())==predicated && calls.polled.size()==polls && calls.flushes==flushes && calls.queries==queries,
+            "Predicated recording wait mutated or polled GPU work");f.immediate()->SetPredication(nullptr,FALSE);unchanged();
+        calls.failed=latestEvent.Get();rejects([&]{backend.waitRecordingPayload(payload);});calls.failed=nullptr;unchanged();
+        const size_t noOpPolls=calls.polled.size(),noOpFlushes=calls.flushes,noOpQueries=calls.queries;
+        backend.waitRecordingPayload(never);sameReceipt(backend.recordingPayloadReceipt(never),neverReceipt,"Never executed wait");
+        require(calls.polled.size()==noOpPolls && calls.flushes==noOpFlushes && calls.queries==noOpQueries,
+            "Never-executed recording wait issued completion work");
+        calls.polled.clear();calls.heldPolls=0;calls.held=laterEvent.Get();calls.forced=latestEvent.Get();calls.requiredFlush=calls.flushes+1;
+        const size_t ends=calls.ends,creates=calls.queries,flushBefore=calls.flushes;
+        backend.waitRecordingPayload(payload);
+        require(calls.flagsValid && calls.forcedPolls>=2 && calls.flushes==flushBefore+1 && calls.queries==creates && calls.ends==ends,
+            "Recording wait did not reuse its exact event and flush once only when incomplete");
+        require(!calls.polled.empty() && std::all_of(calls.polled.begin(),calls.polled.end(),[&](auto* q){return q==latestEvent.Get();}) && !calls.heldPolls,
+            "Recording wait waited for an old or unrelated later event");
+        require(!NativeRecordingProbe::completion(backend,payload) && NativeRecordingProbe::completion(backend,later)==laterEvent &&
+            NativeRecordingProbe::pending(backend)==1,"Exact recording wait retired unrelated later work");
+        require(Snapshot(f.immediate())==stable && NativeRecordingProbe::queuedIm2D(backend)==queued,
+            "Recording wait changed native bindings or submitted unrelated CPU batches");
+        sameReceipt(backend.recordingPayloadReceipt(payload),receipt,"Completed wait");
+        const size_t completedPolls=calls.polled.size();backend.waitRecordingPayload(payload);
+        require(calls.polled.size()==completedPolls && calls.flushes==flushBefore+1 && calls.queries==creates,
+            "Already-completed recording wait issued completion work");
+        f.immediate()->SetPredication(predicate.Get(),TRUE);rejects([&]{backend.waitRecordingPayload(payload);});
+        f.immediate()->SetPredication(nullptr,FALSE);
+        backend.releaseRecordingPayload(payload);
+        require(leftLease.expired() && rightLease.expired(),"Completed payload release retained its private draw owners");
+        backend.releaseRecordingPayload(never);
+    }
+    backend.waitRecordingPayload(later);backend.releaseRecordingPayload(later);backend.releaseRecordingContext(second);
+    backend.flushIm2D();f.pixels(.25f);f.seed();f.clear();
+}
 }
 
 int main(int argc,char** argv) {
@@ -613,6 +809,7 @@ int main(int argc,char** argv) {
         if(argc>2 || (argc==2 && !hardware))throw Error("Usage: RecordingPayloadTests [--hardware]");
         Fixture fixture(hardware);lifecycleAndPixels(fixture);expandedSnapshotCapacityAndPixels(fixture);rejectionAndDiscard(fixture,hardware);
         batchReceipts(fixture,hardware);
+        payloadWait(fixture,hardware);
         retirementAndLifetime(fixture,hardware);fixture.backend.waitIdle();fixture.debugErrors();
         fixture.backend.releaseRecordingContext(fixture.recording);fixture.backend.clearBindings();
         std::printf("PASS recording payload %s: %zu checks; actual deferred draws/finish/execute, fresh per-draw replay data, native accounting and lifetime\n",

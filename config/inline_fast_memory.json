@@ -1,0 +1,44 @@
+[
+  {
+    "chunk": 71,
+    "entry": "823F2D98",
+    "body_sha256": "2fbe853b6ee013b37cc6b1116ea80fe0f8217a2e71cd11adbd8fd61c55e2bc3a",
+    "operations": {"PPC_LOAD_U32": 75, "PPC_STORE_U32": 12}
+  },
+  {
+    "chunk": 140,
+    "entry": "8270A590",
+    "body_sha256": "93b673f9e74a3380e30cc7a122e521bdea724e24aede5d34e1b18d672da9bf07",
+    "operations": {"PPC_LOAD_U32": 16, "PPC_STORE_U32": 16}
+  },
+  {
+    "chunk": 176,
+    "entry": "8281E9B0",
+    "body_sha256": "56d9bdde4a3786b4368caf57f0fd538a23e85ed4ad13169409ff4271bfc3b533",
+    "operations": {"PPC_LOAD_U32": 2, "PPC_STORE_U32": 4, "PPC_LOAD_U8": 15, "PPC_STORE_U8": 8}
+  },
+  {
+    "chunk": 265,
+    "entry": "82B2A8D0",
+    "body_sha256": "a85abf9fa05770911cdc9fa1162c2a62677abb0eb32b25f184800ad1ff5b321f",
+    "operations": {"PPC_LOAD_U32": 5, "PPC_STORE_U32": 2, "PPC_LOAD_U16": 8, "PPC_STORE_U16": 10}
+  },
+  {
+    "chunk": 182,
+    "entry": "82844AB0",
+    "body_sha256": "7cf373f8be651007627f714455e8c9a7479aa03312674d8ee2ee57a2360aebfb",
+    "operations": {"PPC_LOAD_U32": 36, "PPC_STORE_U32": 17, "PPC_LOAD_U16": 2, "PPC_LOAD_U8": 6}
+  },
+  {
+    "chunk": 265,
+    "entry": "82B2A1C0",
+    "body_sha256": "4c3fed32a6b29f9855317b2c9d680aa7c51a11e9c49ceab8caf112a019685bb8",
+    "operations": {"PPC_LOAD_U16": 13, "PPC_LOAD_U32": 15, "PPC_STORE_U32": 5}
+  },
+  {
+    "chunk": 239,
+    "entry": "82A3D1D8",
+    "body_sha256": "62acfdc473f3817df8defe77314e1962ee7de9a2b7fa1883e8f2d754e684fb0e",
+    "operations": {"PPC_LOAD_U8": 6, "PPC_STORE_U8": 2, "PPC_LOAD_U32": 1, "PPC_STORE_U32": 2}
+  }
+]

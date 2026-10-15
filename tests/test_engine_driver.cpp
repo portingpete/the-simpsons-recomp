@@ -3,6 +3,7 @@
 // The application executable continues normally beyond it.
 #include "runtime/runtime.h"
 #include "runtime/engine_driver.h"
+#include "runtime/engine_audio.h"
 #include "runtime/engine_cpu_calls.h"
 #include "runtime/engine_im2d_program.h"
 #include "runtime/engine_loading_textures.h"
@@ -18,6 +19,7 @@
 #include <thread>
 #include <algorithm>
 #include <cstring>
+#include <limits>
 
 extern void SimpsonsNativeOverlayExpandedEnter(PPCContext&,uint8_t*);
 extern void SimpsonsNativeOverlayExpandedExit(PPCContext&,uint8_t*);
@@ -55,6 +57,50 @@ struct PresentObservation {
         PPC_LOOKUP_FUNC(base,0x823EE820)=observeFirstPresent;
     }
     ~PresentObservation() {PPC_LOOKUP_FUNC(base,0x823EE820)=originalPresentBody;originalPresentBody=nullptr;}
+};
+// Dedicated hardware DLAA regression: pause after the real first loading clear,
+// before present/UI transport. No generation or temporal success is fabricated.
+struct FirstTemporalLoadingClearObserved {};
+PPCFunc* originalTemporalLoadingClearBody{};
+void observeTemporalLoadingClear(PPCContext& ctx,uint8_t* base) {
+    const uint32_t camera=ctx.r3.u32;
+    auto& runtime=*Simpsons::active;
+    require(runtime.videoSettings.antialiasing==uint32_t(Simpsons::Graphics::Antialiasing::DLAA),
+            "Temporal loading fixture did not configure actual DLAA before driver creation");
+    require(camera&&camera==PPC_LOAD_U32(0x82E07248)&&ctx.r5.u32==7&&ctx.lr==0x823F1BA8,
+            "Temporal loading fixture did not reach the actual original startup clear");
+    require(!PPC_LOAD_U32(0x82D08B10),"Temporal loading fixture already has a main viewport manager");
+    const auto allocation=runtime.engineAudio?runtime.engineAudio->allocationSpan(camera):std::nullopt;
+    std::fprintf(stderr,"[DRIVER TEST TEMPORAL LOADING SPAN] camera=%08X present=%u address=%08X extent=%08X generation=%llu\n",
+        camera,unsigned(bool(allocation)),allocation?allocation->address:0u,allocation?allocation->extent:0u,
+        static_cast<unsigned long long>(allocation?allocation->generation:0u));
+    require(!allocation||!allocation->generation||camera<allocation->address||
+            uint64_t(camera)+0x8C>uint64_t(allocation->address)+allocation->extent,
+            "Loading fixture did not reproduce the exact unqualified original main allocation span predicate");
+    originalTemporalLoadingClearBody(ctx,base);
+    auto& driver=*runtime.engineDriver;
+    require(ctx.r3.u32==1&&driver.cameraClearCount()==1&&driver.frontCopyCount()==0&&
+            driver.presentationAttemptCount()==0,"Temporal loading clear did not complete alone before presentation");
+    const auto binding=driver.cameraBinding();
+    require(binding.camera==camera&&binding.colorIdentity==PPC_LOAD_U32(0x82D0CB00)&&
+            binding.depthIdentity==PPC_LOAD_U32(0x82D0CAFC),"Temporal loading clear lost its original default owner pair");
+    const auto origins=driver.temporalSceneOrigins();
+    for(const auto& origin:origins.components)
+        require(origin.kind==Simpsons::Graphics::TemporalRasterOriginKind::Uniform&&origin.revision>0,
+                "Temporal loading clear did not publish the exact invariant clear components");
+    throw FirstTemporalLoadingClearObserved{};
+}
+struct TemporalLoadingClearObservation {
+    uint8_t* base;
+    explicit TemporalLoadingClearObservation(uint8_t* memory):base(memory) {
+        originalTemporalLoadingClearBody=PPC_LOOKUP_FUNC(base,0x823EE940);
+        require(originalTemporalLoadingClearBody!=nullptr,"Original temporal loading clear mapping is absent");
+        PPC_LOOKUP_FUNC(base,0x823EE940)=observeTemporalLoadingClear;
+    }
+    ~TemporalLoadingClearObservation() {
+        PPC_LOOKUP_FUNC(base,0x823EE940)=originalTemporalLoadingClearBody;
+        originalTemporalLoadingClearBody=nullptr;
+    }
 };
 #include "header/test_rw_fog_contract.h"
 #include "header/test_rw_frontend_contract.h"
@@ -223,14 +269,26 @@ void cameraClearContracts(Simpsons::Runtime& runtime,Simpsons::EngineCpuCalls& c
         require(cpu.invoke(0x823EE940,c,color,7)==1,"Native camera seed clear did not preserve Boolean ABI");
         PPC_STORE_U32(color,0x00FF0000);PPC_STORE_U32(0x82D0CB14,0xA5);
         const auto count=driver.cameraClearCount();
+        const auto originsBefore=driver.temporalSceneOrigins();
         require(cpu.invoke(0x823EE940,c,(selector&1)?color:0xFFFFFFFC,selector)==1,"Native original clear failed");
+        const auto originsAfter=driver.temporalSceneOrigins();
+        require(originsBefore.color==originsAfter.color&&originsBefore.depth==originsAfter.depth,
+            "Original partial clear changed the canonical Scene origin owners");
+        for(size_t component=0;component<3;++component)
+            require(originsAfter.components[component].revision==originsBefore.components[component].revision+
+                bool(selector&(1u<<component))&&
+                originsAfter.components[component].kind==Simpsons::Graphics::TemporalRasterOriginKind::Uniform,
+                "Original selector updated an uncleared component or lost its invariant clear origin");
         require(driver.cameraClearCount()==count+1,"Original clear did not reach the native operation");
         checkPixels((selector&1)?0x000FFC00:0xC00003FF,(selector&4)?0xA5:0x5A);
     }
     PPC_STORE_U32(color,0xFF0000FF);PPC_STORE_U32(0x82D0CB14,0x5A);cpu.invoke(0x823EE940,c,color,7);
     const uint32_t depthRaster=PPC_LOAD_U32(c+0x64);
     PPC_STORE_U32(c+0x64,0);PPC_STORE_U32(0x82D0CB14,0xA5);
+    const auto suppressedOrigins=driver.temporalSceneOrigins();
     cpu.invoke(0x823EE940,c,0xFFFFFFFC,6);
+    require(driver.temporalSceneOrigins().components==suppressedOrigins.components,
+        "Missing original depth raster changed suppressed depth/stencil origins");
     checkPixels(0xC00003FF,0x5A); // Missing camera depth suppresses both flags, but default depth remains selected.
     PPC_STORE_U32(c+0x64,depthRaster);cpu.invoke(0x823EE6C8,c);
     const auto count=driver.cameraClearCount();
@@ -248,6 +306,947 @@ void cameraClearContracts(Simpsons::Runtime& runtime,Simpsons::EngineCpuCalls& c
     require(PPC_LOAD_U32(0x82D0CB1C)==activeBefore && PPC_LOAD_U32(0x82E3DD60)==currentBefore,
             "Camera clear changed original begin/end/current-camera bookkeeping");
     PPC_STORE_U32(0x82D0CB14,stencilBefore);
+}
+void temporalLoadingCameraContracts(const char* image) {
+    using namespace Simpsons;
+    Runtime runtime;runtime.videoSettings.antialiasing=uint32_t(Graphics::Antialiasing::DLAA);
+    runtime.load(image);PPCContext startup{};runtime.initialize(startup);
+    const PPCContext entry=startup;auto* base=runtime.base;bool observed=false;
+    {
+        TemporalLoadingClearObservation observation(base);
+        try {runOriginal(startup,base);}catch(const FirstTemporalLoadingClearObserved&) {observed=true;}
+    }
+    require(observed,"Actual hardware DLAA startup did not reach its bounded loading clear");
+    require(PPC_LOOKUP_FUNC(base,0x823EE940)!=observeTemporalLoadingClear,
+            "Temporal loading clear observer did not restore the original dispatch");
+    EngineCpuCalls cpu(entry,base);
+    cameraClearContracts(runtime,cpu,base); // Unchanged eight-selector pixels, origins, ABI/ownership rejection gold.
+    require(runtime.engineDriver->presentationAttemptCount()==0&&runtime.engineDriver->frontCopyCount()==0,
+            "Bounded temporal loading clear fixture submitted a presentation");
+    std::printf("PASS: actual hardware DLAA loading startup clear plus unchanged eight-selector clear/readback/origin contracts / %zu checks; no world, NGX evaluation or presentation claim\n",checks);
+}
+// This separate opt-in process runs through actual first loading UI transport and
+// first real GPU-completed presentation. The clear-only fixture stays exact.
+PPCFunc* originalCameraPluginDestroyBody{};
+uint32_t closingCamera{};
+bool observedCameraClosing{};
+struct CameraPluginClosingTarget {
+    uint32_t tail{},callback{},offset{},size{},id{},context{};
+    uint64_t generation{};
+    uint8_t* base{};
+};
+CameraPluginClosingTarget closingPlugin{};
+void observeCameraPluginClosing(PPCContext& ctx,uint8_t* base) {
+    // The walker is a direct AOT BL. Its first registered destructor is the
+    // actual indirect callback, reached before any original plugin body runs.
+    if(ctx.r3.u32==closingCamera&&ctx.r31.u32==closingPlugin.tail) {
+        require(Simpsons::active&&Simpsons::active->base==base&&base==closingPlugin.base&&
+                Simpsons::currentContext==&ctx&&uint32_t(ctx.lr)==0x823FB3DC&&
+                ctx.r30.u32==0x82CD1B30&&ctx.ctr.u32==closingPlugin.callback&&
+                ctx.r4.u32==closingPlugin.offset&&ctx.r5.u32==closingPlugin.size,
+                "Actual first camera plugin destructor callback changed its context or original ABI");
+        auto& driver=*Simpsons::active->engineDriver;
+        require(PPC_LOAD_U32(0x82CD1B30+0x14)==closingPlugin.tail&&
+                PPC_LOAD_U32(closingPlugin.tail+0x38)==0x82CD1B30&&
+                PPC_LOAD_U32(closingPlugin.tail)==closingPlugin.offset&&
+                PPC_LOAD_U32(closingPlugin.tail+4)==closingPlugin.size&&
+                PPC_LOAD_U32(closingPlugin.tail+8)==closingPlugin.id&&
+                PPC_LOAD_U32(closingPlugin.tail+0x24)==closingPlugin.callback,
+                "Actual first camera destructor lost its captured live registry owner or callback");
+        const auto lifetime=driver.observedCameraLifetime(closingCamera);
+        require(lifetime&&lifetime->phase==Simpsons::NativeCameraLifetimePhase::Closing&&
+                lifetime->context==closingPlugin.context&&lifetime->generation==closingPlugin.generation,
+                "Actual camera plugin destruction did not observe Closing before callbacks");
+        driver.requireContext(closingPlugin.context);
+        rejects([&]{driver.setUiDrawing(true);});
+        observedCameraClosing=true;
+    }
+    // Unrelated calls and the observed call retain the exact original callback.
+    originalCameraPluginDestroyBody(ctx,base);
+}
+struct CameraPluginClosingObservation {
+    uint8_t* base;
+    CameraPluginClosingObservation(uint8_t* memory,uint32_t camera):base(memory) {
+        require(!originalCameraPluginDestroyBody,"Nested camera Closing observation");
+        require(Simpsons::active&&Simpsons::active->base==base&&Simpsons::active->engineDriver,
+                "Camera plugin observation lost its actual Runtime/driver");
+        auto& runtime=*Simpsons::active;auto& driver=*runtime.engineDriver;
+        runtime.pointer(0x82CD1B30,0x18,false);
+        const uint32_t tail=PPC_LOAD_U32(0x82CD1B30+0x14);
+        require(tail&&!(tail&3),"Actual camera plugin registry has no aligned destructor tail");
+        runtime.pointer(tail,0x3C,false);
+        const CameraPluginClosingTarget target{tail,PPC_LOAD_U32(tail+0x24),PPC_LOAD_U32(tail),
+            PPC_LOAD_U32(tail+4),PPC_LOAD_U32(tail+8),PPC_LOAD_U32(0x82D6D890),0,base};
+        require(PPC_LOAD_U32(tail+0x38)==0x82CD1B30&&
+                uint64_t(target.offset)+target.size<=PPC_LOAD_U32(0x82CD1B30),
+                "Actual first camera destructor registry owner or original object extent changed");
+        require(!(target.callback&3)&&target.callback>=PPC_CODE_BASE&&
+                target.callback<PPC_CODE_BASE+PPC_CODE_SIZE,
+                "Actual first camera destructor callback is outside original code");
+        PPCFunc* const body=PPC_LOOKUP_FUNC(base,target.callback);
+        require(body&&body!=observeCameraPluginClosing,"Actual first camera plugin destructor is absent or already observed");
+        const auto birth=driver.observedCameraLifetime(camera);
+        require(birth&&birth->phase==Simpsons::NativeCameraLifetimePhase::Constructed&&
+                birth->generation&&birth->context==target.context,
+                "Camera plugin observation lacks its genuine current driver/birth receipt");
+        driver.requireContext(target.context);
+        // Every fallible capture/qualification precedes lookup replacement.
+        closingPlugin=target;closingPlugin.generation=birth->generation;
+        originalCameraPluginDestroyBody=body;closingCamera=camera;observedCameraClosing=false;
+        PPC_LOOKUP_FUNC(base,target.callback)=observeCameraPluginClosing;
+    }
+    ~CameraPluginClosingObservation() {
+        PPC_LOOKUP_FUNC(base,closingPlugin.callback)=originalCameraPluginDestroyBody;
+        originalCameraPluginDestroyBody=nullptr;closingCamera=0;closingPlugin={};
+    }
+};
+// Read-only qualification of the real original camera free-list. Keeping a
+// genuine second slot alive prevents the target block's empty retirement.
+struct CameraPoolBlock {
+    uint32_t address{},next{},previous{},firstSlot{};
+    std::vector<uint8_t> bitmap;
+};
+struct CameraPoolState {
+    uint32_t engine{},pool{},offset{},stride{},count{},bitmapBytes{},alignment{},flags{};
+    std::vector<CameraPoolBlock> blocks;
+    bool occupied(uint32_t block,uint32_t index) const {
+        return (blocks[block].bitmap[index/8]&(0x80u>>(index%8)))!=0;
+    }
+    std::array<uint32_t,2> slot(uint32_t camera) const {
+        std::array<uint32_t,2> result{};bool found=false;
+        for(uint32_t b=0;b<blocks.size();++b) {
+            const uint64_t end=uint64_t(blocks[b].firstSlot)+uint64_t(count)*stride;
+            if(camera<blocks[b].firstSlot||uint64_t(camera)>=end)continue;
+            require(!found&&(camera-blocks[b].firstSlot)%stride==0,
+                    "Original camera is not one unique aligned pool slot");
+            const uint32_t index=(camera-blocks[b].firstSlot)/stride;
+            // The original free routine uses the unaligned bitmap-end range.
+            const uint32_t freeIndex=(camera-(blocks[b].address+8+bitmapBytes))/stride;
+            require(freeIndex==index,"Original allocated/free bitmap slot indices differ");
+            result={b,index};found=true;
+        }
+        require(found,"Original camera is absent from its actual linked pool blocks");return result;
+    }
+    bool sameShape(const CameraPoolState& other) const {
+        if(engine!=other.engine||pool!=other.pool||offset!=other.offset||stride!=other.stride||
+           count!=other.count||bitmapBytes!=other.bitmapBytes||alignment!=other.alignment||
+           flags!=other.flags||blocks.size()!=other.blocks.size())return false;
+        for(size_t i=0;i<blocks.size();++i)
+            if(blocks[i].address!=other.blocks[i].address||blocks[i].next!=other.blocks[i].next||
+               blocks[i].previous!=other.blocks[i].previous||blocks[i].firstSlot!=other.blocks[i].firstSlot)return false;
+        return true;
+    }
+    std::vector<uint32_t> freeSlotsThrough(uint32_t target) const {
+        std::vector<uint32_t> addresses;
+        for(uint32_t b=0;b<blocks.size();++b)for(uint32_t i=0;i<count;++i) {
+            const uint32_t address=blocks[b].firstSlot+i*stride;
+            if(!occupied(b,i))addresses.push_back(address);
+            if(address==target) {
+                require(!occupied(b,i)&&!addresses.empty()&&addresses.size()<=128,
+                        "Original target reuse bound is absent or exceeds the finite constructor limit");
+                return addresses;
+            }
+        }
+        throw Simpsons::Failure("Original target is missing from its qualified reuse scan");
+    }
+};
+CameraPoolState captureCameraPool(Simpsons::Runtime& runtime,uint8_t* base) {
+    require(Simpsons::active==&runtime&&runtime.base==base,"Camera pool capture lost its owning Runtime");
+    CameraPoolState result;result.engine=PPC_LOAD_U32(0x82D0CA68);result.offset=PPC_LOAD_U32(0x82D0CFC0);
+    require(result.engine&&!(result.engine&3)&&result.offset>=0x100&&result.offset<=0x1000&&
+            uint64_t(result.engine)+result.offset+4<=0x100000000ull,"Original camera free-list owner/offset is invalid");
+    runtime.pointer(result.engine,0x140,false);
+    require(PPC_LOAD_U32(result.engine+312)==0x823FB768&&PPC_LOAD_U32(result.engine+316)==0x823FB920,
+            "Original camera allocation/release callbacks are not the qualified pooled pair");
+    runtime.pointer(result.engine+result.offset,4,false);result.pool=PPC_LOAD_U32(result.engine+result.offset);
+    require(result.pool==0x82D0CF9C,"Original camera free-list lost its supplied static owner header");
+    runtime.pointer(result.pool,36,false);
+    result.stride=PPC_LOAD_U32(result.pool);result.count=PPC_LOAD_U32(result.pool+4);
+    result.bitmapBytes=PPC_LOAD_U32(result.pool+8);result.alignment=PPC_LOAD_U32(result.pool+12);
+    result.flags=PPC_LOAD_U32(result.pool+24);
+    const uint32_t cameraBytes=PPC_LOAD_U32(0x82CD1B30);
+    require(result.count>=2&&result.count<=128&&result.bitmapBytes==(result.count+7)/8&&
+            result.alignment&&result.alignment<=256&&!(result.alignment&(result.alignment-1))&&
+            cameraBytes>=0x8C&&cameraBytes<=0x10000&&result.stride>=0x8C&&result.stride<=0x10000&&
+            result.stride==((uint64_t(cameraBytes)+result.alignment-1)&~uint64_t(result.alignment-1))&&
+            result.flags==3,"Original camera pool count/stride/alignment/retirement profile is unqualified");
+    const uint64_t extent=uint64_t(result.count)*result.stride+result.alignment+result.bitmapBytes+7;
+    require(extent<=0x100000,"Original camera pool block exceeds the bounded read extent");
+    const uint32_t sentinel=result.pool+16;uint32_t previous=sentinel;
+    for(uint32_t node=PPC_LOAD_U32(sentinel);node!=sentinel;node=PPC_LOAD_U32(node)) {
+        require(node&&!(node&3)&&result.blocks.size()<32&&
+                (result.blocks.size()+1)*result.count<=128&&uint64_t(node)+extent<=0x100000000ull,
+                "Original camera pool block list exceeds its finite address/count bounds");
+        require(std::none_of(result.blocks.begin(),result.blocks.end(),[&](const auto& block){return block.address==node;}),
+                "Original camera pool list repeats a non-sentinel block");
+        runtime.pointer(node,uint32_t(extent),false);
+        const uint64_t first=(uint64_t(node)+result.alignment+result.bitmapBytes+7)&~uint64_t(result.alignment-1);
+        require(first>=uint64_t(node)+8+result.bitmapBytes&&first-(uint64_t(node)+8+result.bitmapBytes)<result.stride&&
+                first+uint64_t(result.count)*result.stride<=uint64_t(node)+extent,
+                "Original aligned camera slots exceed their actual block range");
+        CameraPoolBlock block{node,PPC_LOAD_U32(node),PPC_LOAD_U32(node+4),uint32_t(first),{}};
+        require(block.previous==previous,"Original camera pool reciprocal previous link differs");
+        for(uint32_t i=0;i<result.bitmapBytes;++i)block.bitmap.push_back(PPC_LOAD_U8(node+8+i));
+        for(uint32_t i=result.count;i<result.bitmapBytes*8;++i)
+            require(!(block.bitmap[i/8]&(0x80u>>(i%8))),"Original camera pool has occupied padding bitmap bits");
+        result.blocks.push_back(std::move(block));previous=node;
+    }
+    require(!result.blocks.empty()&&PPC_LOAD_U32(result.pool+20)==previous,
+            "Original camera pool tail/sentinel ownership differs");return result;
+}
+// Diagnostic only: faithful original LOC bootstrap stops BEFORE forwarding
+// the first real row-zero depth clear. No camera clear/history is substituted.
+struct MainCameraOwnerObserved {};
+PPCFunc* originalMainOwnerClearBody{};
+PPCFunc* originalMainOwnerPresentBody{};
+Simpsons::Runtime* mainOwnerRuntime{};
+uint32_t mainOwnerForwardedClears{},mainOwnerPresents{};
+void observeMainCameraOwnerClear(PPCContext& ctx,uint8_t* base) {
+    using namespace Simpsons;
+    require(mainOwnerRuntime&&active==mainOwnerRuntime&&base==mainOwnerRuntime->base,
+            "Main camera diagnostic lost its owning Runtime");
+    auto& runtime=*mainOwnerRuntime;
+    const uint32_t camera=ctx.r3.u32,selector=ctx.r5.u32,manager=PPC_LOAD_U32(0x82D08B10);
+    bool target=false;
+    if(manager&&camera&&camera!=PPC_LOAD_U32(0x82E07248)&&(selector&2)&&selector<=7) {
+        runtime.pointer(manager,0x140,false);
+        require(PPC_LOAD_U32(manager)==0x820B6DEC&&PPC_LOAD_U32(manager+8)==0x820B6DE8&&
+                PPC_LOAD_U32(manager+0x128)==4,"Main camera diagnostic encountered an invalid viewport manager");
+        target=PPC_LOAD_U32(manager+0x14)==camera;
+    }
+    if(!target) {
+        require(++mainOwnerForwardedClears<=2048,"Main camera diagnostic exceeded its ordinary clear bound");
+        originalMainOwnerClearBody(ctx,base);return;
+    }
+    std::array<uint8_t,sizeof(PPCContext)> originalContext{};
+    std::memcpy(originalContext.data(),&ctx,sizeof(ctx));
+    require(ctx.lr==0x823F1BA8&&currentContext==&ctx&&runtime.firstMissionCompletion&&
+            runtime.videoSettings.antialiasing==uint32_t(Graphics::Antialiasing::DLAA),
+            "Main camera diagnostic did not reach the genuine AA11 LOC camera-clear callback");
+    require(runtime.engineDriver&&runtime.engineAudio,"Main camera diagnostic lacks original driver/allocation observers");
+    auto& driver=*runtime.engineDriver;
+    const auto birth=driver.observedCameraLifetime(camera);
+    const uint32_t context=PPC_LOAD_U32(0x82D6D890);
+    std::optional<EngineAudioOwners::AllocationSpan> span;
+    std::string spanError;
+    try {span=runtime.engineAudio->allocationSpan(camera);}catch(const std::exception& error){spanError=error.what();}
+    const uint64_t cameraEnd=uint64_t(camera)+0x8C;
+    const uint64_t spanEnd=span?uint64_t(span->address)+span->extent:0;
+    const bool contained=span&&span->generation&&camera>=span->address&&cameraEnd<=spanEnd;
+    // Preserve the primary ownership tuple before incidental routed-view checks.
+    std::fprintf(stderr,"[DRIVER TEST MAIN CAMERA BIRTH] camera=%08X present=%u phase=%u generation=%llu context=%08X\n",
+        camera,unsigned(bool(birth)),birth?unsigned(birth->phase):~0u,
+        static_cast<unsigned long long>(birth?birth->generation:0),birth?birth->context:0);
+    std::fprintf(stderr,"[DRIVER TEST MAIN CAMERA SPAN] camera=%08X present=%u address=%08X requestedExtent=%08X bankGeneration=%llu cameraOffset=%llu cameraEnd=%llu spanEnd=%llu full8C=%u queryError=%s; private clear-span/frame receipt has no public getter\n",
+        camera,unsigned(bool(span)),span?span->address:0,span?span->extent:0,
+        static_cast<unsigned long long>(span?span->generation:0),
+        static_cast<unsigned long long>(span&&camera>=span->address?uint64_t(camera)-span->address:~uint64_t(0)),
+        static_cast<unsigned long long>(cameraEnd),static_cast<unsigned long long>(spanEnd),unsigned(contained),spanError.c_str());
+    std::fflush(stderr);
+    driver.requireContext(context);
+    const auto binding=driver.cameraBinding();
+    require(binding.camera==camera&&binding.viewport==std::array<uint32_t,6>{0,0,1280,720,0x3F800000,0},
+            "Main camera diagnostic did not retain the actual selected row-zero full-size pair");
+    const uint32_t colorRaster=PPC_LOAD_U32(camera+0x60),depthRaster=PPC_LOAD_U32(camera+0x64);
+    require(binding.colorRaster==colorRaster&&binding.depthRaster==depthRaster&&depthRaster&&
+            PPC_LOAD_U8(colorRaster+0x20)==5&&PPC_LOAD_U8(depthRaster+0x20)==1,
+            "Main camera diagnostic did not retain the actual type5/type1 original raster pair");
+    bool alphaOne=false;const auto color=driver.color(binding.colorIdentity,alphaOne);
+    const auto depth=driver.depth(binding.depthIdentity);
+    require(color&&depth,"Main camera diagnostic lacks nonnull actual public routed attachment lookup owners");
+    // These are routed public lookups, not private original C/D getters.
+    // Depth pixelWidth/Height is logical; storageWidth/Height is physical.
+    std::fprintf(stderr,"[DRIVER TEST MAIN CAMERA OWNER] camera=%08X loading=%08X manager=%08X row0=%08X engine=%08X current=%08X inPass=%u selector=%u caller=%08X sp=%08X context=%08X routedColor=%p routedDepth=%p C=%08X/%08X D=%08X/%08X colorLogical=%ux%u colorPhysical=%ux%u depthLogical=%ux%u depthPhysical=%ux%u alphaOne=%u copies=%llu attempts=%llu clears=%llu forwardedClears=%u; public routed lookups, not private original C/D getters\n",
+        camera,PPC_LOAD_U32(0x82E07248),manager,PPC_LOAD_U32(manager+0x14),PPC_LOAD_U32(0x82D0CA68),
+        PPC_LOAD_U32(0x82E3DD60),PPC_LOAD_U32(0x82D0CB1C),selector,uint32_t(ctx.lr),ctx.r1.u32,context,
+        static_cast<void*>(color.get()),static_cast<void*>(depth.get()),colorRaster,binding.colorIdentity,
+        depthRaster,binding.depthIdentity,color->width,color->height,color->pixelWidth(),color->pixelHeight(),
+        depth->pixelWidth(),depth->pixelHeight(),depth->storageWidth(),depth->storageHeight(),unsigned(alphaOne),
+        static_cast<unsigned long long>(driver.frontCopyCount()),static_cast<unsigned long long>(driver.presentationAttemptCount()),
+        static_cast<unsigned long long>(driver.cameraClearCount()),mainOwnerForwardedClears);
+    require(birth&&birth->camera==camera&&birth->phase==NativeCameraLifetimePhase::Constructed&&
+            birth->generation&&birth->context==context,"Main camera diagnostic lacks a genuine current constructor/context receipt");
+    const auto pool=captureCameraPool(runtime,base);const auto slot=pool.slot(camera);
+    const auto& block=pool.blocks[slot[0]];
+    const uint64_t blockExtent=uint64_t(pool.count)*pool.stride+pool.alignment+pool.bitmapBytes+7;
+    std::fprintf(stderr,"[DRIVER TEST MAIN CAMERA POOL] E=%08X allocate=%08X release=%08X backingAllocate=%08X backingRelease=%08X offset=%08X F=%08X stride=%u count=%u bitmapBytes=%u alignment=%u flags=%08X block=%08X blockExtent=%llu firstSlot=%08X blockIndex=%u slotIndex=%u occupied=%u next=%08X previous=%08X linkedBlocks=%zu\n",
+        pool.engine,PPC_LOAD_U32(pool.engine+312),PPC_LOAD_U32(pool.engine+316),PPC_LOAD_U32(pool.engine+264),
+        PPC_LOAD_U32(pool.engine+268),pool.offset,pool.pool,pool.stride,pool.count,pool.bitmapBytes,pool.alignment,
+        pool.flags,block.address,static_cast<unsigned long long>(blockExtent),block.firstSlot,slot[0],slot[1],
+        unsigned(pool.occupied(slot[0],slot[1])),block.next,block.previous,pool.blocks.size());
+    // Current callback/manager identity distinguishes observer coverage routes.
+    const uint32_t heapManager=PPC_LOAD_U32(0x82D57244);
+    if(heapManager) {
+        runtime.pointer(heapManager,4,false);const uint32_t vtable=PPC_LOAD_U32(heapManager);
+        runtime.pointer(vtable,24,false);
+        std::fprintf(stderr,"[DRIVER TEST MAIN CAMERA HEAP] manager=%08X vtable=%08X allocate=%08X directAllocate=%08X\n",
+            heapManager,vtable,PPC_LOAD_U32(vtable),PPC_LOAD_U32(vtable+20));
+    } else std::fprintf(stderr,"[DRIVER TEST MAIN CAMERA HEAP] manager=00000000; no manager identity inferred\n");
+    require(pool.occupied(slot[0],slot[1])&&cameraEnd<=uint64_t(block.firstSlot)+uint64_t(slot[1]+1)*pool.stride,
+            "Main camera diagnostic lacks an occupied full8C original pool slot");
+    require(spanError.empty(),"Main camera diagnostic encountered a Closing/failed bank-span query; tuple retained");
+    require(std::memcmp(originalContext.data(),&ctx,sizeof(ctx))==0,
+            "Read-only main camera diagnostic changed guest registers/context padding");
+    std::fflush(stderr);
+    throw MainCameraOwnerObserved{}; // Target clear is deliberately NOT forwarded.
+}
+void observeMainCameraOwnerPresent(PPCContext& ctx,uint8_t* base) {
+    require(mainOwnerRuntime&&Simpsons::active==mainOwnerRuntime&&base==mainOwnerRuntime->base,
+            "Main camera diagnostic presentation lost its owning Runtime");
+    originalMainOwnerPresentBody(ctx,base);
+    require(++mainOwnerPresents<=512,"Main camera diagnostic exceeded its real presentation bound without row-zero clear");
+}
+struct MainCameraOwnerObservation {
+    uint8_t* base;
+    explicit MainCameraOwnerObservation(Simpsons::Runtime& runtime):base(runtime.base) {
+        require(!mainOwnerRuntime&&!originalMainOwnerClearBody&&!originalMainOwnerPresentBody,
+                "Main camera diagnostic observer is already active");
+        const auto clear=PPC_LOOKUP_FUNC(base,0x823EE940),present=PPC_LOOKUP_FUNC(base,0x823EE820);
+        require(clear&&present,"Main camera diagnostic lacks original clear/presentation dispatch");
+        mainOwnerRuntime=&runtime;originalMainOwnerClearBody=clear;originalMainOwnerPresentBody=present;
+        mainOwnerForwardedClears=mainOwnerPresents=0;
+        PPC_LOOKUP_FUNC(base,0x823EE940)=observeMainCameraOwnerClear;
+        PPC_LOOKUP_FUNC(base,0x823EE820)=observeMainCameraOwnerPresent;
+    }
+    ~MainCameraOwnerObservation() {
+        PPC_LOOKUP_FUNC(base,0x823EE940)=originalMainOwnerClearBody;
+        PPC_LOOKUP_FUNC(base,0x823EE820)=originalMainOwnerPresentBody;
+        originalMainOwnerClearBody=originalMainOwnerPresentBody=nullptr;mainOwnerRuntime=nullptr;
+    }
+};
+void temporalMainCameraOwnerContracts(const char* image,const char* privateProfile,const char* privateContent,const char* profileId) {
+    using namespace Simpsons;
+    Runtime runtime;runtime.firstMissionCompletion=true;
+    const auto profile=std::filesystem::absolute(privateProfile).lexically_normal();
+    const auto content=std::filesystem::absolute(privateContent).lexically_normal();
+    require(std::filesystem::is_directory(profile)&&std::filesystem::is_directory(content)&&profile!=content&&profileId&&*profileId,
+            "Main camera diagnostic requires existing separate private profile/content clones and profile ID");
+    runtime.videoSettingsPath=profile;runtime.videoSettingsPath+=L".video.cfg";
+    runtime.videoSettings=NativeVideoSettings::load(runtime.videoSettingsPath);
+    require(runtime.videoSettings.antialiasing==uint32_t(Graphics::Antialiasing::DLAA),
+            "Main camera diagnostic private v8 settings must select AA11 before driver creation");
+    runtime.requestedFrameRate=runtime.videoSettings.frameRate;
+    runtime.uncappedFrameRate=runtime.videoSettings.frameRate==0;runtime.vsyncEnabled=runtime.videoSettings.vsync;
+    runtime.configureLocalPlayers(profile);runtime.load(image);runtime.contentRoot=content;
+    runtime.activateLocalPlayer(0,profileId);
+    PPCContext startup{};runtime.initialize(startup);
+    bool observed=false;std::atomic<bool> expired=false;
+    {
+        MainCameraOwnerObservation observation(runtime);
+        // Cancellation is the existing Runtime stop path, never a success marker.
+        // This owned thread joins before Runtime or dispatch-owner destruction.
+        std::jthread watchdog([&](std::stop_token stop) {
+            for(unsigned i=0;i<600&&!stop.stop_requested();++i)std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if(!stop.stop_requested()) {expired=true;runtime.requestStop("Main camera owner diagnostic exceeded60seconds without its real row-zero clear");}
+        });
+        try {runOriginal(startup,runtime.base);}catch(const MainCameraOwnerObserved&){observed=true;}
+    }
+    require(observed&&!expired,"Actual AA11 LOC startup did not reach the bounded original row-zero depth clear");
+    require(!mainOwnerRuntime&&!originalMainOwnerClearBody&&!originalMainOwnerPresentBody&&
+            PPC_LOOKUP_FUNC(runtime.base,0x823EE940)!=observeMainCameraOwnerClear&&
+            PPC_LOOKUP_FUNC(runtime.base,0x823EE820)!=observeMainCameraOwnerPresent,
+            "Main camera diagnostic failed to restore original dispatch mappings");
+    std::printf("PASS: actual AA11 original LOC row-zero camera constructor/pair/pool and allocation-span tuple captured BEFORE target clear; no main clear/frame/history/NGX evaluation success claim / %zu checks\n",checks);
+}
+// Separate main-camera lifetime regression. Reuse the read-only owner diagnostic
+// and its real loading presentations; only its genuine target clear is advanced.
+struct MainCameraLifetimeClearObserved {};
+struct MainCameraLifetimeClearCapture {
+    uint32_t camera{},manager{},context{},targetForwards{},ordinaryPresents{};
+    uint32_t currentCamera{},inPass{},engineCamera{};
+    uint64_t clears{},copies{},attempts{};
+    Simpsons::NativeCameraBinding binding{};
+    Simpsons::NativeCameraLifetime birth{};
+    Simpsons::Graphics::NativeTemporalSceneOrigins before{},cleared{};
+};
+MainCameraLifetimeClearCapture* mainLifetimeClearCapture{};
+void observeMainCameraLifetimeClear(PPCContext& ctx,uint8_t* base) {
+    // The existing exact diagnostic validates the original Runtime, LOC/AA11,
+    // manager, row0, base birth, raster pair and occupied camera pool slot.
+    try {observeMainCameraOwnerClear(ctx,base);return;}
+    catch(const MainCameraOwnerObserved&) {}
+    using namespace Simpsons;
+    require(mainLifetimeClearCapture&&mainOwnerRuntime&&active==mainOwnerRuntime,
+            "Main camera lifetime clear lost its composed owner observation");
+    auto& capture=*mainLifetimeClearCapture;auto& runtime=*mainOwnerRuntime;
+    auto& driver=*runtime.engineDriver;
+    require(!capture.targetForwards&&ctx.r5.u32==2&&ctx.lr==0x823F1BA8&&currentContext==&ctx,
+            "Main camera lifetime did not stop at its first genuine row-zero selector2 clear");
+    capture.camera=ctx.r3.u32;capture.manager=PPC_LOAD_U32(0x82D08B10);
+    capture.context=PPC_LOAD_U32(0x82D6D890);capture.binding=driver.cameraBinding();
+    const auto birth=driver.observedCameraLifetime(capture.camera);
+    require(birth&&birth->phase==NativeCameraLifetimePhase::Constructed&&birth->generation&&
+            birth->context==capture.context,"Main camera lifetime clear lacks its genuine base construction");
+    capture.birth=*birth;
+    require(!runtime.engineAudio->allocationSpan(capture.camera),
+            "Main camera lifetime fixture did not reproduce actual U absent bank-span coverage");
+    capture.before=driver.temporalSceneOrigins();
+    capture.clears=driver.cameraClearCount();capture.copies=driver.frontCopyCount();
+    capture.attempts=driver.presentationAttemptCount();capture.ordinaryPresents=mainOwnerPresents;
+    capture.currentCamera=PPC_LOAD_U32(0x82E3DD60);capture.inPass=PPC_LOAD_U32(0x82D0CB1C);
+    capture.engineCamera=PPC_LOAD_U32(PPC_LOAD_U32(0x82D0CA68));
+    ++capture.targetForwards;
+    originalMainOwnerClearBody(ctx,base); // Exactly one real target dispatch.
+    require(ctx.r3.u32==1&&capture.targetForwards==1&&driver.cameraClearCount()==capture.clears+1&&
+            driver.frontCopyCount()==capture.copies&&driver.presentationAttemptCount()==capture.attempts&&
+            mainOwnerPresents==capture.ordinaryPresents,
+            "Genuine main selector2 clear failed or submitted a new presentation");
+    const auto binding=driver.cameraBinding();bool alphaOne=false;
+    capture.cleared=driver.temporalSceneOrigins();
+    require(binding.camera==capture.camera&&binding.colorRaster==capture.binding.colorRaster&&
+            binding.depthRaster==capture.binding.depthRaster&&binding.colorIdentity==capture.binding.colorIdentity&&
+            binding.depthIdentity==capture.binding.depthIdentity&&binding.viewport==capture.binding.viewport&&
+            capture.cleared.color==capture.before.color&&capture.cleared.depth==capture.before.depth&&
+            driver.color(binding.colorIdentity,alphaOne)==capture.cleared.color&&
+            driver.depth(binding.depthIdentity)==capture.cleared.depth,
+            "Genuine main depth clear lost its actual selected original Scene owners");
+    require(capture.cleared.components[1].kind==Graphics::TemporalRasterOriginKind::Uniform&&
+            capture.cleared.components[1].jitter==std::array<float,2>{}&&
+            capture.cleared.components[1].revision>capture.before.components[1].revision,
+            "Genuine selector2 clear did not publish a new invariant actual depth origin");
+    for(const auto& origin:capture.cleared.components)
+        require(origin.kind!=Graphics::TemporalRasterOriginKind::Unknown&&origin.revision,
+                "Main clear retained an unknown or unwritten actual component origin");
+    const auto clearedDepth=driver.readbackDepth(binding.depthIdentity);
+    require(clearedDepth.size()==size_t(capture.cleared.depth->storageWidth())*
+            capture.cleared.depth->storageHeight()*8,"Main selector2 depth readback has the wrong physical extent");
+    bool allCleared=true;
+    for(size_t i=0;i<clearedDepth.size();i+=8) {
+        float depth{};std::memcpy(&depth,clearedDepth.data()+i,4);allCleared=allCleared&&depth==0.0f;
+    }
+    require(allCleared,"Genuine selector2 clear did not clear every actual D32 depth value");
+    throw MainCameraLifetimeClearObserved{}; // No original geometry follows.
+}
+struct MainCameraLifetimeClearObservation {
+    MainCameraOwnerObservation owner;
+    MainCameraLifetimeClearObservation(Simpsons::Runtime& runtime,MainCameraLifetimeClearCapture& capture):owner(runtime) {
+        require(!mainLifetimeClearCapture,"Nested main camera lifetime clear observation");
+        mainLifetimeClearCapture=&capture;
+        PPC_LOOKUP_FUNC(owner.base,0x823EE940)=observeMainCameraLifetimeClear;
+    }
+    ~MainCameraLifetimeClearObservation() {
+        PPC_LOOKUP_FUNC(owner.base,0x823EE940)=observeMainCameraOwnerClear;
+        mainLifetimeClearCapture=nullptr; // owner then restores both real dispatches.
+    }
+};
+void rejectsMainCameraLifetime(const std::function<void()>& operation) {
+    bool rejected=false;std::string actual;
+    try {operation();}catch(const Simpsons::Failure& error) {rejected=true;actual=error.what();}
+    if(rejected&&actual!="Temporal selected main camera lost its original construction lifetime")
+        std::fprintf(stderr,"[DRIVER TEST MAIN LIFETIME] unexpected rejection: %s\n",actual.c_str());
+    require(rejected&&actual=="Temporal selected main camera lost its original construction lifetime",
+            "Main camera stale selection was not rejected at its exact construction lifetime guard");
+}
+struct MainCameraPluginClosingCapture {
+    CameraPluginClosingTarget target{};
+    uint32_t camera{},observations{},forwards{},completions{};
+};
+PPCFunc* originalMainCameraPluginDestroyBody{};
+MainCameraPluginClosingCapture* mainCameraPluginClosingCapture{};
+void observeMainCameraPluginClosing(PPCContext& ctx,uint8_t* base) {
+    require(mainCameraPluginClosingCapture&&originalMainCameraPluginDestroyBody,
+            "Main camera plugin callback lost its actual observation owner");
+    auto& capture=*mainCameraPluginClosingCapture;const auto& target=capture.target;
+    const bool observed=ctx.r3.u32==capture.camera&&ctx.r31.u32==target.tail;
+    if(observed) {
+        require(++capture.observations==1&&Simpsons::active&&Simpsons::active->base==base&&base==target.base&&
+                Simpsons::currentContext==&ctx&&uint32_t(ctx.lr)==0x823FB3DC&&
+                ctx.r30.u32==0x82CD1B30&&ctx.ctr.u32==target.callback&&
+                ctx.r4.u32==target.offset&&ctx.r5.u32==target.size,
+                "Main first plugin destructor changed its original callback context or ABI");
+        require(PPC_LOAD_U32(0x82CD1B30+0x14)==target.tail&&
+                PPC_LOAD_U32(target.tail+0x38)==0x82CD1B30&&
+                PPC_LOAD_U32(target.tail)==target.offset&&PPC_LOAD_U32(target.tail+4)==target.size&&
+                PPC_LOAD_U32(target.tail+8)==target.id&&PPC_LOAD_U32(target.tail+0x24)==target.callback,
+                "Main first plugin destructor lost its live original registry/record owner");
+        auto& driver=*Simpsons::active->engineDriver;
+        const auto lifetime=driver.observedCameraLifetime(capture.camera);
+        require(lifetime&&lifetime->phase==Simpsons::NativeCameraLifetimePhase::Closing&&
+                lifetime->generation==target.generation&&lifetime->context==target.context,
+                "Main camera was not genuinely Closing before its first original plugin callback");
+        driver.requireContext(target.context);
+        rejectsMainCameraLifetime([&]{(void)driver.cameraBinding();});
+        rejectsMainCameraLifetime([&]{driver.setUiDrawing(true);});
+        ++capture.forwards;
+    }
+    originalMainCameraPluginDestroyBody(ctx,base); // Every real callback forwards.
+    if(observed)++capture.completions;
+}
+struct MainCameraPluginClosingObservation {
+    uint8_t* base;
+    MainCameraPluginClosingCapture& capture;
+    MainCameraPluginClosingObservation(uint8_t* memory,uint32_t camera,MainCameraPluginClosingCapture& value):base(memory),capture(value) {
+        require(!mainCameraPluginClosingCapture&&!originalMainCameraPluginDestroyBody,
+                "Nested main camera plugin Closing observation");
+        require(Simpsons::active&&Simpsons::active->base==base&&Simpsons::active->engineDriver,
+                "Main plugin Closing observation lacks its actual Runtime/driver");
+        auto& runtime=*Simpsons::active;auto& driver=*runtime.engineDriver;
+        runtime.pointer(0x82CD1B30,0x18,false);
+        const uint32_t tail=PPC_LOAD_U32(0x82CD1B30+0x14);
+        require(tail&&!(tail&3),"Main first plugin destructor has no aligned actual registry tail");
+        runtime.pointer(tail,0x3C,false);
+        CameraPluginClosingTarget target{tail,PPC_LOAD_U32(tail+0x24),PPC_LOAD_U32(tail),
+            PPC_LOAD_U32(tail+4),PPC_LOAD_U32(tail+8),PPC_LOAD_U32(0x82D6D890),0,base};
+        require(PPC_LOAD_U32(tail+0x38)==0x82CD1B30&&
+                uint64_t(target.offset)+target.size<=PPC_LOAD_U32(0x82CD1B30)&&
+                !(target.callback&3)&&target.callback>=PPC_CODE_BASE&&target.callback<PPC_CODE_BASE+PPC_CODE_SIZE,
+                "Main first plugin destructor registry extent or callback is unqualified");
+        const auto body=PPC_LOOKUP_FUNC(base,target.callback);
+        require(body&&body!=observeMainCameraPluginClosing&&body!=observeCameraPluginClosing,
+                "Main first plugin destructor lacks its exact original indirect dispatch");
+        const auto birth=driver.observedCameraLifetime(camera);
+        require(birth&&birth->phase==Simpsons::NativeCameraLifetimePhase::Constructed&&birth->generation&&
+                birth->context==target.context,"Main Closing callback capture lacks its genuine current birth");
+        driver.requireContext(target.context);target.generation=birth->generation;
+        capture.target=target;capture.camera=camera;capture.observations=capture.forwards=capture.completions=0;
+        originalMainCameraPluginDestroyBody=body;mainCameraPluginClosingCapture=&capture;
+        PPC_LOOKUP_FUNC(base,target.callback)=observeMainCameraPluginClosing;
+    }
+    ~MainCameraPluginClosingObservation() {
+        PPC_LOOKUP_FUNC(base,capture.target.callback)=originalMainCameraPluginDestroyBody;
+        originalMainCameraPluginDestroyBody=nullptr;mainCameraPluginClosingCapture=nullptr;
+    }
+};
+// Independent bounded source-grid transport gold from the existing native UI
+// fixture. This accepts the proven FP nearest interval, never identical jittered RGB.
+std::array<uint32_t,2> mainLifetimeBackgroundCandidates(uint32_t pixel,uint32_t source,uint32_t output,float jitter) {
+    require(source&&output&&std::isfinite(jitter)&&std::abs(jitter)<=0.5f,
+            "Main UI source-grid gold has an invalid physical extent or jitter");
+    if(jitter==0.0f) {
+        const uint32_t selected=uint32_t(std::min((uint64_t(2)*pixel+1)*source/(uint64_t(2)*output),uint64_t(source-1)));
+        return {selected,selected};
+    }
+    const long double coordinate=(static_cast<long double>(pixel)+0.5L)*source/output+static_cast<long double>(jitter);
+    const long double error=8*std::numeric_limits<float>::epsilon()*std::max(1.0L,std::abs(coordinate));
+    const int64_t low=int64_t(std::floor(coordinate-error)),high=int64_t(std::floor(coordinate+error));
+    require(high-low<=1,"Main UI source-grid nearest interval exceeded its proven FP bound");
+    return {uint32_t(std::clamp(low,int64_t(0),int64_t(source-1))),uint32_t(std::clamp(high,int64_t(0),int64_t(source-1)))};
+}
+void mainLifetimeDefinedTransportGold(const std::vector<uint8_t>& sourceColor,const std::vector<uint8_t>& sourceDepth,
+        uint32_t sw,uint32_t sh,const std::vector<uint8_t>& outputColor,const std::vector<uint8_t>& outputDepth,
+        uint32_t ow,uint32_t oh,std::array<float,2> sourceJitter) {
+    require(sw&&sh&&ow&&oh&&sourceColor.size()==size_t(sw)*sh*4&&sourceDepth.size()==size_t(sw)*sh*8&&
+            outputColor.size()==size_t(ow)*oh*4&&outputDepth.size()==size_t(ow)*oh*8,
+            "Main UI transport lost its actual paired physical readback extents");
+    // A bounded real alpha/D32/S8 sample complements the complete depth-clear
+    // scan. Renderer-wide transport and RGB oracles remain in their own fixtures.
+    auto samples=[](uint32_t extent) {
+        return std::array<uint32_t,7>{0,extent/8,extent/4,extent/2,
+            uint32_t(uint64_t(extent)*3/4),uint32_t(uint64_t(extent)*7/8),extent-1};
+    };
+    bool matched=true;
+    for(uint32_t y:samples(oh))for(uint32_t x:samples(ow)) {
+        const size_t at=size_t(y)*ow+x;uint32_t outputPacked{};
+        std::memcpy(&outputPacked,outputColor.data()+at*4,4);bool paired=false;
+        const auto xs=mainLifetimeBackgroundCandidates(x,sw,ow,sourceJitter[0]);
+        const auto ys=mainLifetimeBackgroundCandidates(y,sh,oh,sourceJitter[1]);
+        for(uint32_t sy:ys)for(uint32_t sx:xs) {
+            const size_t sourceAt=size_t(sy)*sw+sx;uint32_t sourcePacked{};
+            std::memcpy(&sourcePacked,sourceColor.data()+sourceAt*4,4);
+            paired=paired||((outputPacked>>30)==(sourcePacked>>30)&&
+                std::memcmp(outputDepth.data()+at*8,sourceDepth.data()+sourceAt*8,5)==0);
+        }
+        matched=matched&&paired;
+    }
+    require(matched,"Main UI packed alpha and defined D32/stencil do not share the captured source-grid texel (X24 excluded)");
+}
+void temporalMainCameraLifetimeContracts(const char* image,const char* privateProfile,const char* privateContent,const char* profileId) {
+    using namespace Simpsons;
+    Runtime runtime;runtime.firstMissionCompletion=true;
+    const auto profile=std::filesystem::absolute(privateProfile).lexically_normal();
+    const auto content=std::filesystem::absolute(privateContent).lexically_normal();
+    require(std::filesystem::is_directory(profile)&&std::filesystem::is_directory(content)&&profile!=content&&profileId&&*profileId,
+            "Main camera lifetime requires existing separate private profile/content clones and profile ID");
+    runtime.videoSettingsPath=profile;runtime.videoSettingsPath+=L".video.cfg";
+    runtime.videoSettings=NativeVideoSettings::load(runtime.videoSettingsPath);
+    require(runtime.videoSettings.antialiasing==uint32_t(Graphics::Antialiasing::DLAA),
+            "Main camera lifetime private v8 settings must select AA11 before driver creation");
+    runtime.requestedFrameRate=runtime.videoSettings.frameRate;
+    runtime.uncappedFrameRate=runtime.videoSettings.frameRate==0;runtime.vsyncEnabled=runtime.videoSettings.vsync;
+    runtime.configureLocalPlayers(profile);runtime.load(image);runtime.contentRoot=content;
+    runtime.activateLocalPlayer(0,profileId);
+    PPCContext startup{};runtime.initialize(startup);const PPCContext entry=startup;auto* base=runtime.base;
+    MainCameraLifetimeClearCapture capture;bool observed=false;std::atomic<bool> expired=false;
+    {
+        MainCameraLifetimeClearObservation observation(runtime,capture);
+        std::jthread watchdog([&](std::stop_token stop) {
+            for(unsigned i=0;i<600&&!stop.stop_requested();++i)std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if(!stop.stop_requested()) {expired=true;runtime.requestStop("Main camera lifetime exceeded60seconds without its real row-zero clear");}
+        });
+        try {runOriginal(startup,base);}catch(const MainCameraLifetimeClearObserved&){observed=true;}
+    }
+    require(observed&&!expired&&capture.targetForwards==1&&!mainLifetimeClearCapture&&
+            !mainOwnerRuntime&&!originalMainOwnerClearBody&&!originalMainOwnerPresentBody&&
+            PPC_LOOKUP_FUNC(base,0x823EE940)!=observeMainCameraLifetimeClear&&
+            PPC_LOOKUP_FUNC(base,0x823EE820)!=observeMainCameraOwnerPresent,
+            "Main camera lifetime did not stop after its real clear and restore both original dispatches");
+    auto& driver=*runtime.engineDriver;EngineCpuCalls cpu(entry,base);
+    const uint32_t camera=capture.camera;const auto& binding=capture.binding;const auto& birth=capture.birth;
+    const auto sourceColorOwner=capture.cleared.color;const auto sourceDepthOwner=capture.cleared.depth;
+    require(sourceColorOwner&&sourceDepthOwner&&sourceColorOwner->width==1280&&sourceColorOwner->height==720&&
+            sourceDepthOwner->pixelWidth()==1280&&sourceDepthOwner->pixelHeight()==720&&
+            sourceColorOwner->pixelWidth()==sourceDepthOwner->storageWidth()&&
+            sourceColorOwner->pixelHeight()==sourceDepthOwner->storageHeight(),
+            "Main lifetime source owners lost their distinct logical/physical extents");
+    const auto sourceColor=driver.readbackColor(binding.colorIdentity),sourceDepth=driver.readbackDepth(binding.depthIdentity);
+    std::optional<std::array<float,2>> sourceGrid;
+    for(const auto& component:capture.cleared.components)if(component.kind==Graphics::TemporalRasterOriginKind::Grid) {
+        require(!sourceGrid||*sourceGrid==component.jitter,"Main clear retained incompatible actual component grids");
+        sourceGrid=component.jitter;
+    }
+    const auto sourceJitter=sourceGrid.value_or(std::array<float,2>{});
+    driver.setUiDrawing(false);driver.setUiDrawing(true);
+    bool alphaOne=false;const auto promotedColor=driver.color(binding.colorIdentity,alphaOne);
+    const auto promotedDepth=driver.depth(binding.depthIdentity);
+    require(driver.cameraBinding().camera==camera&&PPC_LOAD_U32(capture.manager+0x14)==camera&&
+            camera!=PPC_LOAD_U32(0x82E07248)&&promotedColor&&promotedDepth&&
+            promotedColor!=sourceColorOwner&&promotedDepth!=sourceDepthOwner&&
+            promotedColor->width==1280&&promotedColor->height==720&&
+            promotedDepth->pixelWidth()==1280&&promotedDepth->pixelHeight()==720&&
+            promotedColor->pixelWidth()==promotedDepth->storageWidth()&&
+            promotedColor->pixelHeight()==promotedDepth->storageHeight(),
+            "Real zero-geometry main UI begin did not retain its selected row-zero camera and promote both actual owners");
+    const auto uiOrigins=driver.temporalSceneOrigins();
+    require(uiOrigins.color==sourceColorOwner&&uiOrigins.depth==sourceDepthOwner&&
+            uiOrigins.components==capture.cleared.components,
+            "Main UI background transport changed its retained original Scene origins");
+    mainLifetimeDefinedTransportGold(sourceColor,sourceDepth,sourceColorOwner->pixelWidth(),sourceColorOwner->pixelHeight(),
+        driver.readbackColor(binding.colorIdentity),driver.readbackDepth(binding.depthIdentity),
+        promotedColor->pixelWidth(),promotedColor->pixelHeight(),sourceJitter);
+    driver.setUiDrawing(true); // Exercise the already-promoted positive shortcut.
+    require(driver.color(binding.colorIdentity,alphaOne)==promotedColor&&driver.depth(binding.depthIdentity)==promotedDepth,
+            "Repeated genuine main UI begin changed the captured promoted owner pair");
+    uint64_t expectedClears=capture.clears+1;
+    auto expectedOrigins=uiOrigins.components;
+    auto unchanged=[&] {
+        require(PPC_LOAD_U32(capture.manager+0x14)==camera&&PPC_LOAD_U32(0x82E3DD60)==capture.currentCamera&&
+                PPC_LOAD_U32(0x82D0CB1C)==capture.inPass&&PPC_LOAD_U32(PPC_LOAD_U32(0x82D0CA68))==capture.engineCamera&&
+                driver.color(binding.colorIdentity,alphaOne)==promotedColor&&driver.depth(binding.depthIdentity)==promotedDepth&&
+                driver.cameraClearCount()==expectedClears&&driver.frontCopyCount()==capture.copies&&
+                driver.presentationAttemptCount()==capture.attempts,
+                "Main lifetime negative changed the stale row-zero/guest selection, promoted owners, clear or presentation counts");
+        const auto origins=driver.temporalSceneOrigins();
+        require(origins.color==sourceColorOwner&&origins.depth==sourceDepthOwner&&origins.components==expectedOrigins,
+                "Main lifetime rejection changed the still-live original Scene owner/origin receipt");
+    };
+    unchanged();
+    // Original main clear does not select: preserve its explicit admission while
+    // a genuine loading camera is bound, then return through the real RW clear.
+    const uint32_t loading=PPC_LOAD_U32(0x82E07248);
+    require(loading&&loading!=camera,"Main roundtrip has no distinct actual loading camera");
+    const auto loadingBirth=driver.observedCameraLifetime(loading);
+    require(loadingBirth&&loadingBirth->phase==NativeCameraLifetimePhase::Constructed&&
+            loadingBirth->generation&&loadingBirth->context==birth.context,
+            "Main roundtrip loading camera lacks its genuine live context/birth");
+    cpu.invoke(0x823EE6C8,loading); // Existing original selection callback.
+    require(driver.cameraBinding().camera==loading,"Genuine loading selection did not bind its actual original camera");
+    driver.setUiDrawing(true); // A retained main admission must not poison a valid nonmain binding.
+    unchanged();
+    driver.setUiDrawing(false);
+    require(cpu.invoke(0x823F1B80,camera,0x82D6C09C,7)==camera,
+            "Original main selector7 clear failed after loading selection without an explicit main reselect");
+    require(driver.cameraBinding().camera==camera&&driver.cameraClearCount()==capture.clears+2&&
+            driver.frontCopyCount()==capture.copies&&driver.presentationAttemptCount()==capture.attempts,
+            "Main roundtrip did not submit exactly its real clear before binding the remembered original camera");
+    const auto roundtripOrigins=driver.temporalSceneOrigins();
+    require(roundtripOrigins.color==sourceColorOwner&&roundtripOrigins.depth==sourceDepthOwner,
+            "Main roundtrip clear changed the strong original Scene owners");
+    for(const auto& origin:roundtripOrigins.components)
+        require(origin.kind==Graphics::TemporalRasterOriginKind::Uniform,
+                "Original main selector7 did not publish its actual full color/depth/stencil clear origins");
+    driver.setUiDrawing(true);
+    require(driver.color(binding.colorIdentity,alphaOne)==promotedColor&&driver.depth(binding.depthIdentity)==promotedDepth,
+            "Main roundtrip UI promotion changed its cached full-output owner pair");
+    const auto roundtripUiOrigins=driver.temporalSceneOrigins();
+    require(roundtripUiOrigins.color==sourceColorOwner&&roundtripUiOrigins.depth==sourceDepthOwner&&
+            roundtripUiOrigins.components==roundtripOrigins.components,
+            "Main roundtrip UI transport changed the real successful clear origins");
+    expectedClears=capture.clears+2;expectedOrigins=roundtripUiOrigins.components;
+    unchanged();
+    std::fprintf(stderr,"[DRIVER TEST MAIN NONMAIN ROUNDTRIP] main=%08X birth=%llu loading=%08X loadingBirth=%llu selector=7 originalWrapper=823F1B80 explicitMainReselect=0 clears=%llu\n",
+        camera,static_cast<unsigned long long>(birth.generation),loading,static_cast<unsigned long long>(loadingBirth->generation),
+        static_cast<unsigned long long>(driver.cameraClearCount()));
+    std::vector<uint32_t> constructed;
+    const auto poolBeforeAnchor=captureCameraPool(runtime,base);const auto targetBeforeAnchor=poolBeforeAnchor.slot(camera);
+    require(poolBeforeAnchor.occupied(targetBeforeAnchor[0],targetBeforeAnchor[1]),
+            "Genuine main camera lost its original occupied pool slot before retention setup");
+    auto printTargetBitmap=[&](const char* stage,const CameraPoolState& pool,const std::array<uint32_t,2>& target) {
+        const auto& block=pool.blocks[target[0]];
+        std::fprintf(stderr,"[DRIVER TEST MAIN RETENTION POOL] stage=%s target=%08X block=%08X blockIndex=%u slotIndex=%u count=%u bitmap=",
+            stage,camera,block.address,target[0],target[1],pool.count);
+        for(uint8_t byte:block.bitmap)std::fprintf(stderr,"%02X",unsigned(byte));
+        std::fprintf(stderr," occupied=%u linkedBlocks=%zu\n",unsigned(pool.occupied(target[0],target[1])),pool.blocks.size());
+    };
+    printTargetBitmap("before-setup",poolBeforeAnchor,targetBeforeAnchor);
+    uint32_t firstSibling=0,freeSiblingCount=0;
+    for(uint32_t slot=0;slot<poolBeforeAnchor.count;++slot)if(!poolBeforeAnchor.occupied(targetBeforeAnchor[0],slot)) {
+        const uint32_t address=poolBeforeAnchor.blocks[targetBeforeAnchor[0]].firstSlot+slot*poolBeforeAnchor.stride;
+        if(!firstSibling)firstSibling=address;
+        ++freeSiblingCount;
+    }
+    uint32_t anchor=0;std::array<uint32_t,2> anchorSlot{};NativeCameraLifetime anchorBirth{};bool anchorOwned=false;
+    std::fprintf(stderr,"[DRIVER TEST MAIN RETENTION] freeSiblings=%u firstSibling=%08X branch=%s\n",
+        freeSiblingCount,firstSibling,firstSibling?"owned-original-constructors":"existing-authenticated-peer");
+    if(firstSibling) {
+        // Fill only the actual free prefix in the original list/MSB-first scan.
+        // Every result stays live and is owned until normal original cleanup.
+        const auto anchorCandidates=poolBeforeAnchor.freeSlotsThrough(firstSibling);
+        require(!anchorCandidates.empty()&&anchorCandidates.back()==firstSibling,
+                "Main retention has no qualified constructor prefix through its free target-block sibling");
+        std::fprintf(stderr,"[DRIVER TEST MAIN RETENTION] originalConstructorPrefix=%zu\n",anchorCandidates.size());
+        for(size_t attempt=0;attempt<anchorCandidates.size();++attempt) {
+            const uint32_t next=cpu.invoke(0x823F1DB0);
+            std::fprintf(stderr,"[DRIVER TEST MAIN RETENTION CONSTRUCTOR] attempt=%zu expected=%08X actual=%08X\n",
+                attempt,anchorCandidates[attempt],next);
+            require(next!=0,"Original main retention constructor failed within its derived finite prefix");
+            constructed.push_back(next);
+            require(next==anchorCandidates[attempt],"Original main retention constructor changed its qualified pool scan order");
+            const auto nextBirth=driver.observedCameraLifetime(next);
+            require(nextBirth&&nextBirth->camera==next&&nextBirth->phase==NativeCameraLifetimePhase::Constructed&&
+                    nextBirth->generation>birth.generation&&nextBirth->context==birth.context,
+                    "Owned main retention candidate lacks a genuine new constructor/context receipt");
+            const auto currentPool=captureCameraPool(runtime,base);
+            require(poolBeforeAnchor.sameShape(currentPool),"Owned main retention constructor changed the qualified pool shape");
+            const auto currentTarget=currentPool.slot(camera),currentSlot=currentPool.slot(next);
+            printTargetBitmap("owned-constructor",currentPool,currentTarget);
+            std::fprintf(stderr,"[DRIVER TEST MAIN RETENTION CONSTRUCTOR] camera=%08X block=%08X slot=%u generation=%llu context=%08X\n",
+                next,currentPool.blocks[currentSlot[0]].address,currentSlot[1],
+                static_cast<unsigned long long>(nextBirth->generation),nextBirth->context);
+            require(currentTarget==targetBeforeAnchor,"Owned main retention constructor changed the target's qualified slot");
+            require(currentPool.occupied(currentTarget[0],currentTarget[1]),"Owned main retention constructor cleared the target occupied bit");
+            require(currentPool.occupied(currentSlot[0],currentSlot[1]),"Owned main retention candidate lacks its actual occupied bit");
+            if(next==firstSibling) {anchor=next;anchorSlot=currentSlot;anchorBirth=*nextBirth;anchorOwned=true;}
+        }
+        require(anchor==firstSibling&&anchorOwned,"Original constructor prefix did not reach its actual target-block sibling");
+    } else {
+        // A full target block cannot accept a new owned sibling. Keep an already
+        // live, typed peer untouched; this is no ownership or destructor claim.
+        for(uint32_t slot=0;slot<poolBeforeAnchor.count&&!anchor;++slot) {
+            if(slot==targetBeforeAnchor[1])continue;
+            require(poolBeforeAnchor.occupied(targetBeforeAnchor[0],slot),"Full main target block unexpectedly contains a free sibling");
+            const uint32_t peer=poolBeforeAnchor.blocks[targetBeforeAnchor[0]].firstSlot+slot*poolBeforeAnchor.stride;
+            const auto peerBirth=driver.observedCameraLifetime(peer);
+            std::fprintf(stderr,"[DRIVER TEST MAIN RETENTION PEER] camera=%08X slot=%u receipt=%u phase=%u generation=%llu context=%08X\n",
+                peer,slot,unsigned(bool(peerBirth)),peerBirth?uint32_t(peerBirth->phase):~0u,
+                peerBirth?static_cast<unsigned long long>(peerBirth->generation):0ull,peerBirth?peerBirth->context:0u);
+            if(peerBirth&&peerBirth->camera==peer&&peerBirth->phase==NativeCameraLifetimePhase::Constructed&&
+               peerBirth->generation&&peerBirth->context==birth.context) {
+                require(poolBeforeAnchor.slot(peer)==std::array<uint32_t,2>{targetBeforeAnchor[0],slot},
+                        "Existing main retention peer is not its full aligned original pool slot");
+                anchor=peer;anchorSlot={targetBeforeAnchor[0],slot};anchorBirth=*peerBirth;
+            }
+        }
+        require(anchor&&!anchorOwned,"Full main target block lacks an authenticated live same-context retention peer");
+    }
+    const auto poolAnchored=captureCameraPool(runtime,base);
+    require(poolBeforeAnchor.sameShape(poolAnchored),"Main retention setup changed the qualified linked pool shape");
+    const auto targetAnchored=poolAnchored.slot(camera),actualAnchorSlot=poolAnchored.slot(anchor);
+    require(targetAnchored==targetBeforeAnchor,"Main retention setup changed the target's exact original slot");
+    require(actualAnchorSlot==anchorSlot,"Main retention witness changed its captured original slot");
+    require(anchorSlot[0]==targetAnchored[0],"Main retention witness is not in the exact target block");
+    require(anchorSlot[1]!=targetAnchored[1],"Main retention witness aliases the target slot");
+    require(poolAnchored.occupied(targetAnchored[0],targetAnchored[1]),"Main target lost its occupied bit before genuine destruction");
+    auto requireRetention=[&](const CameraPoolState& pool,const char* stage) {
+        const auto currentBirth=driver.observedCameraLifetime(anchor);
+        std::fprintf(stderr,"[DRIVER TEST MAIN RETENTION WITNESS] stage=%s camera=%08X owned=%u receipt=%u phase=%u generation=%llu context=%08X\n",
+            stage,anchor,unsigned(anchorOwned),unsigned(bool(currentBirth)),currentBirth?uint32_t(currentBirth->phase):~0u,
+            currentBirth?static_cast<unsigned long long>(currentBirth->generation):0ull,currentBirth?currentBirth->context:0u);
+        require(currentBirth&&currentBirth->camera==anchorBirth.camera&&currentBirth->phase==NativeCameraLifetimePhase::Constructed&&
+                currentBirth->generation==anchorBirth.generation&&currentBirth->context==anchorBirth.context,
+                "Main retention witness lost its exact genuine captured birth/context");
+        require(poolAnchored.sameShape(pool),"Main retention witness lost its qualified linked pool shape");
+        const auto target=pool.slot(camera),actual=pool.slot(anchor);printTargetBitmap(stage,pool,target);
+        require(target==targetAnchored,"Main retention target changed its exact original slot");
+        require(actual==anchorSlot,"Main retention witness changed its exact full original slot");
+        require(pool.occupied(actual[0],actual[1]),"Main retention witness lost its actual occupied bit");
+        require((std::find(constructed.begin(),constructed.end(),anchor)!=constructed.end())==anchorOwned,
+                "Main retention peer ownership differs from the actual constructed cleanup vector");
+    };
+    requireRetention(poolAnchored,"before-target-free");
+    MainCameraPluginClosingCapture closing;
+    {
+        MainCameraPluginClosingObservation observation(base,camera,closing);
+        require(cpu.invoke(0x823F1D48,camera)==1,"Actual generic main camera destruction failed");
+        require(closing.observations==1&&closing.forwards==1&&closing.completions==1,
+                "Actual first main plugin callback did not observe Closing and forward exactly once");
+    }
+    require(!mainCameraPluginClosingCapture&&!originalMainCameraPluginDestroyBody&&
+            PPC_LOOKUP_FUNC(base,closing.target.callback)!=observeMainCameraPluginClosing,
+            "Main plugin Closing observation did not restore its original indirect dispatch");
+    const auto freed=driver.observedCameraLifetime(camera);
+    require(freed&&freed->phase==NativeCameraLifetimePhase::Freed&&freed->generation==birth.generation&&
+            freed->context==birth.context,"Actual generic main free did not revoke its genuine original construction");
+    rejectsMainCameraLifetime([&]{(void)driver.cameraBinding();});
+    rejectsMainCameraLifetime([&]{driver.setUiDrawing(true);});
+    unchanged(); // No freed camera/raster-field read is used to reject this interval.
+    const auto poolAfterFree=captureCameraPool(runtime,base);requireRetention(poolAfterFree,"after-target-free");
+    const auto freedSlot=poolAfterFree.slot(camera);
+    require(freedSlot==targetAnchored,"Actual main free changed its original target slot");
+    require(!poolAfterFree.occupied(freedSlot[0],freedSlot[1]),"Actual main free did not clear its target occupied bit");
+    const auto reuseCandidates=poolAfterFree.freeSlotsThrough(camera);uint32_t reused=0;
+    for(size_t attempt=0;attempt<reuseCandidates.size()&&!reused;++attempt) {
+        const uint32_t next=cpu.invoke(0x823F1DB0);
+        require(next!=0,"Original main reuse constructor failed within its derived finite bound");constructed.push_back(next);
+        require(next==reuseCandidates[attempt],"Original main reuse constructor changed its qualified pool scan order");
+        const auto nextBirth=driver.observedCameraLifetime(next);
+        require(nextBirth&&nextBirth->phase==NativeCameraLifetimePhase::Constructed&&
+                nextBirth->generation>birth.generation&&nextBirth->context==birth.context,
+                "Main reuse candidate lacks its genuine new constructor/context receipt");
+        const auto currentPool=captureCameraPool(runtime,base);requireRetention(currentPool,"reuse-constructor");
+        const auto currentSlot=currentPool.slot(next);
+        require(poolAfterFree.sameShape(currentPool)&&currentPool.occupied(currentSlot[0],currentSlot[1]),
+                "Main reuse constructor changed the retained original pool/candidate ownership");
+        if(next==camera)reused=next;
+    }
+    require(reused==camera,"Original main pool did not exercise actual same-address reuse within its qualified bound");
+    const auto secondBirth=driver.observedCameraLifetime(camera);
+    require(secondBirth&&secondBirth->phase==NativeCameraLifetimePhase::Constructed&&
+            secondBirth->generation>birth.generation&&secondBirth->context==birth.context&&
+            !PPC_LOAD_U32(camera+0x60)&&!PPC_LOAD_U32(camera+0x64),
+            "Same-address main base constructor did not leave a new genuine lifetime with unassigned rasters");
+    // Selection still carries the old generation. Do not assign rasters or select
+    // the new object: the exact lifetime error must precede its zero C60/C64 reads.
+    rejectsMainCameraLifetime([&]{(void)driver.cameraBinding();});
+    rejectsMainCameraLifetime([&]{driver.setUiDrawing(true);});
+    unchanged();
+    // The remembered old main birth must reject a same-address new base object
+    // BEFORE its zero C60/C64 reads, even after another legitimate selection.
+    cpu.invoke(0x823EE6C8,loading);
+    require(driver.cameraBinding().camera==loading,
+            "Remembered stale main lifetime poisoned an unrelated valid loading binding");
+    rejectsMainCameraLifetime([&]{cpu.invoke(0x823F1B80,camera,0,0);});
+    rejectsMainCameraLifetime([&]{driver.preflightCameraPass(base,camera,true);});
+    rejectsMainCameraLifetime([&]{driver.setUiDrawing(true);}); // Real main clear/post owner remains independently stale.
+    require(driver.cameraBinding().camera==loading,
+            "Remembered main rejection changed its still-live unrelated loading binding");
+    unchanged();
+    std::fprintf(stderr,"[DRIVER TEST MAIN NONMAIN STALE REUSE] main=%08X oldBirth=%llu newBirth=%llu loading=%08X rememberedClearRejected=1 unassignedRasters=1 unrelatedBindingLive=1\n",
+        camera,static_cast<unsigned long long>(birth.generation),static_cast<unsigned long long>(secondBirth->generation),loading);
+    for(auto object=constructed.rbegin();object!=constructed.rend();++object)
+        require(cpu.invoke(0x823F1D48,*object)==1,"Main lifetime anchor/reuse camera release failed");
+    require(driver.cameraClearCount()==expectedClears&&driver.frontCopyCount()==capture.copies&&
+            driver.presentationAttemptCount()==capture.attempts,
+            "Main lifetime fixture submitted a main presentation or advanced another clear");
+    std::printf("PASS: actual AA11 LOC absent-bankspan main row-zero selector2 clear, real zero-geometry UI promotion, original first plugin Closing/free and same-address new-birth stale-selection rejection / %zu checks; no world, NGX evaluation, post phase or main presentation claim\n",checks);
+}
+void temporalLoadingUiLifetimeContracts(const char* image) {
+    using namespace Simpsons;
+    Runtime runtime;runtime.videoSettings.antialiasing=uint32_t(Graphics::Antialiasing::DLAA);
+    runtime.load(image);PPCContext startup{};runtime.initialize(startup);
+    const PPCContext entry=startup;auto* base=runtime.base;bool reached=false;
+    {
+        PresentObservation observation(base);
+        try {runOriginal(startup,base);}catch(const FirstPresentObserved&) {reached=true;}
+    }
+    require(reached,"Hardware DLAA startup did not complete its actual loading UI/first present");
+    auto& driver=*runtime.engineDriver;EngineCpuCalls cpu(entry,base);
+    const uint32_t camera=PPC_LOAD_U32(0x82E07248);
+    const auto birth=driver.observedCameraLifetime(camera);
+    require(birth&&birth->camera==camera&&birth->generation&&
+            birth->phase==NativeCameraLifetimePhase::Constructed&&birth->context==PPC_LOAD_U32(0x82D6D890),
+            "Loading UI did not retain a genuine successful original constructor/context receipt");
+    const auto binding=driver.cameraBinding();
+    require(binding.camera==camera&&binding.colorIdentity==PPC_LOAD_U32(0x82D0CB00)&&
+            binding.depthIdentity==PPC_LOAD_U32(0x82D0CAFC),"Actual first UI lost its original loading default pair");
+    const auto origins=driver.temporalSceneOrigins();
+    for(const auto& component:origins.components)
+        require(component.kind==Graphics::TemporalRasterOriginKind::Grid&&component.jitter==std::array<float,2>{},
+                "Actual loading UI/present did not publish the retained unjittered component origins");
+    cameraClearContracts(runtime,cpu,base); // The original eight-selector/pixel/rejection oracle remains unchanged.
+    const auto sourceColor=driver.readbackColor(binding.colorIdentity);
+    const auto sourceDepth=driver.readbackDepth(binding.depthIdentity);
+    const auto clearedOrigins=driver.temporalSceneOrigins();
+    driver.setUiDrawing(false);driver.setUiDrawing(true);
+    bool sampledAlphaOne=false;
+    require(driver.color(binding.colorIdentity,sampledAlphaOne)!=clearedOrigins.color&&
+            driver.depth(binding.depthIdentity),"Real loading UI did not route to its owned reconstructed-output bundle");
+    require(driver.readbackColor(binding.colorIdentity)==sourceColor,
+            "Zero-grid DLAA loading UI changed actual packed color pixels");
+    const auto outputDepth=driver.readbackDepth(binding.depthIdentity);
+    require(outputDepth.size()==sourceDepth.size(),"Loading UI changed the expected physical depth extent");
+    for(size_t i=0;i<sourceDepth.size();i+=8)
+        require(std::memcmp(sourceDepth.data()+i,outputDepth.data()+i,5)==0,
+                "Loading UI changed defined D32/stencil bytes (undefined X24 excluded)");
+    // Keep actual promoted Output active across every lifetime negative.
+    // Repeated UI begins and direct present cannot bypass the loading receipt.
+    const auto promoted=driver.color(binding.colorIdentity,sampledAlphaOne);
+    PPCContext call=cpu.registers();call.r3.u32=binding.colorRaster;call.lr=0x8240806C;
+    PPC_STORE_U32(0x82E07248,0);rejects([&]{driver.setUiDrawing(true);});PPC_STORE_U32(0x82E07248,camera);
+    require(driver.color(binding.colorIdentity,sampledAlphaOne)==promoted,
+            "A changed loading global bypassed or reset its captured promoted admission");
+    std::vector<uint32_t> constructed;
+    const auto poolBeforeAnchor=captureCameraPool(runtime,base);
+    const auto targetBeforeAnchor=poolBeforeAnchor.slot(camera);
+    require(poolBeforeAnchor.occupied(targetBeforeAnchor[0],targetBeforeAnchor[1]),
+            "Genuine selected camera does not occupy its original pool bit");
+    const uint32_t anchor=cpu.invoke(0x823F1DB0);
+    require(anchor&&anchor!=camera,"Genuine anchor constructor did not produce a separate original camera");
+    constructed.push_back(anchor);
+    const auto anchorBirth=driver.observedCameraLifetime(anchor);
+    require(anchorBirth&&anchorBirth->phase==NativeCameraLifetimePhase::Constructed&&
+            anchorBirth->generation>birth->generation&&anchorBirth->context==birth->context,
+            "Pool anchor lacks its genuine successful original constructor/context receipt");
+    const auto poolAnchored=captureCameraPool(runtime,base);
+    const auto targetAnchored=poolAnchored.slot(camera),anchorSlot=poolAnchored.slot(anchor);
+    require(poolBeforeAnchor.sameShape(poolAnchored)&&targetAnchored==targetBeforeAnchor&&
+            anchorSlot[0]==targetAnchored[0]&&anchorSlot[1]!=targetAnchored[1]&&
+            poolAnchored.occupied(targetAnchored[0],targetAnchored[1])&&
+            poolAnchored.occupied(anchorSlot[0],anchorSlot[1]),
+            "Genuine anchor did not retain a different occupied slot in the exact target pool block");
+    {
+        CameraPluginClosingObservation observation(base,camera);
+        require(cpu.invoke(0x823F1D48,camera)==1,"Actual generic camera destruction failed");
+        require(observedCameraClosing,"Actual camera Closing boundary was not observed before plugin teardown");
+    }
+    const auto freed=driver.observedCameraLifetime(camera);
+    require(freed&&freed->phase==NativeCameraLifetimePhase::Freed&&freed->generation==birth->generation,
+            "Actual camera free completion did not revoke its original birth receipt");
+    require(PPC_LOAD_U32(0x82E07248)==camera,"Fixture did not retain the original stale loading-global interval");
+    rejects([&]{driver.setUiDrawing(true);});
+    rejects([&]{driver.present(call,base,binding.colorRaster);});
+    require(driver.color(binding.colorIdentity,sampledAlphaOne)==promoted,
+            "Lifetime rejection reset the promoted route instead of checking its admission");
+    // The live anchor prevents empty-block retirement. Derive the exact finite
+    // constructor bound from valid free slots before target in original scan order.
+    const auto poolAfterFree=captureCameraPool(runtime,base);
+    const auto freedSlot=poolAfterFree.slot(camera),retainedAnchor=poolAfterFree.slot(anchor);
+    require(poolAnchored.sameShape(poolAfterFree)&&freedSlot==targetAnchored&&retainedAnchor==anchorSlot&&
+            !poolAfterFree.occupied(freedSlot[0],freedSlot[1])&&
+            poolAfterFree.occupied(retainedAnchor[0],retainedAnchor[1]),
+            "Actual target free did not retain the linked anchor block and clear only its target slot");
+    const auto reuseCandidates=poolAfterFree.freeSlotsThrough(camera);uint32_t reused=0;
+    for(size_t attempt=0;attempt<reuseCandidates.size()&&!reused;++attempt) {
+        const uint32_t next=cpu.invoke(0x823F1DB0);
+        require(next!=0,"Real camera constructor failed during the bounded reuse fixture");
+        constructed.push_back(next);
+        require(next==reuseCandidates[attempt],"Real camera constructor deviated from the qualified original pool scan order");
+        const auto currentPool=captureCameraPool(runtime,base);
+        const auto currentSlot=currentPool.slot(next);
+        require(poolAfterFree.sameShape(currentPool)&&currentPool.occupied(currentSlot[0],currentSlot[1])&&
+                currentPool.occupied(anchorSlot[0],anchorSlot[1]),
+                "Real reuse constructor changed the retained original pool/anchor ownership");
+        if(next==camera)reused=next;
+    }
+    require(reused==camera,"Real camera allocator did not exercise same-address reuse within the fixed bound");
+    const auto secondBirth=driver.observedCameraLifetime(camera);
+    require(secondBirth&&secondBirth->phase==NativeCameraLifetimePhase::Constructed&&
+            secondBirth->generation>birth->generation&&secondBirth->context==birth->context,
+            "Same-address constructor did not publish a new genuine object lifetime");
+    // Restore only guest association words to the still-live original type2/1
+    // rasters. This negative fixture deliberately makes every other owner check
+    // match, so a current-Live map lookup alone cannot accidentally pass.
+    PPC_STORE_U32(reused+0x60,binding.colorRaster);PPC_STORE_U32(reused+0x64,binding.depthRaster);
+    rejects([&]{driver.setUiDrawing(true);});
+    rejects([&]{driver.present(call,base,binding.colorRaster);});
+    require(driver.color(binding.colorIdentity,sampledAlphaOne)==promoted,
+            "Same-address rejection changed the already-promoted Output route");
+    // A real new selection/clear may capture the new generation and same live pair.
+    cpu.invoke(0x823EE6C8,reused);
+    driver.setUiDrawing(true);
+    require(driver.observedCameraLifetime(camera)->generation==secondBirth->generation,
+            "Legitimate re-selection lost its observed constructor generation");
+    for(uint32_t object:constructed)require(cpu.invoke(0x823F1D48,object)==1,"Reuse fixture camera release failed");
+    std::printf("PASS: actual hardware DLAA loading UI/real first present, typed constructor Closing/free, stale-global and same-address selection-generation rejection / %zu checks; no temporal world or NGX evaluation claim\n",checks);
 }
 void cameraPassContracts(Simpsons::Runtime& runtime,Simpsons::EngineCpuCalls& cpu,uint8_t* base) {
     auto& driver=*runtime.engineDriver;
@@ -510,12 +1509,29 @@ void rasterContracts(Simpsons::Runtime& runtime,Simpsons::EngineCpuCalls& cpu,ui
     require(PPC_LOAD_U32(0x82CD1E3C)==registryTail && !PPC_LOAD_U32(0x82D0D01C),"Raster fixture changed unrelated registry/list ownership");
 }
 }
+#include "beam_lifetime_contracts.h"
 int main(int argc,char** argv) {
     using namespace Simpsons;
     SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);
     SetUnhandledExceptionFilter(exceptionFilter);
     try {
+        if(argc==3&&std::strcmp(argv[2],"--temporal-beam-lifetime")==0) {
+            temporalBeamLifetimeContracts(argv[1]);return 0;
+        }
+        if(argc==3&&std::strcmp(argv[2],"--temporal-loading")==0) {
+            temporalLoadingCameraContracts(argv[1]);return 0;
+        }
+        if(argc==3&&std::strcmp(argv[2],"--temporal-loading-ui")==0) {
+            temporalLoadingUiLifetimeContracts(argv[1]);return 0;
+        }
+        if(argc==6&&std::strcmp(argv[2],"--temporal-main-camera-owner")==0) {
+            temporalMainCameraOwnerContracts(argv[1],argv[3],argv[4],argv[5]);return 0;
+        }
+        if(argc==6&&std::strcmp(argv[2],"--temporal-main-camera-lifetime")==0) {
+            temporalMainCameraLifetimeContracts(argv[1],argv[3],argv[4],argv[5]);return 0;
+        }
         if(argc!=2) throw Failure("Original flat image path required");
+        overlayExpandedNoRuntimeContracts();
         Runtime runtime;runtime.load(argv[1]);PPCContext original{};runtime.initialize(original);
         const PPCContext entry=original;auto* base=runtime.base;
         bool reached=false;

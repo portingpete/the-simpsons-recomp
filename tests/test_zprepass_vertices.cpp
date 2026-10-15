@@ -8,10 +8,16 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <emmintrin.h>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <memory>
+#include <new>
+#include <span>
 #include <tuple>
 #include <vector>
 #ifdef _WIN32
@@ -23,6 +29,65 @@
 #endif
 #include <windows.h>
 #endif
+
+// Only this fixture executable replaces allocation. Preparation is outside the
+// observed interval; actual production insertion allocations are counted and
+// failed one at a time, including the list/map/vector allocations behind STL.
+struct OwnedSourceAllocationObservation {
+    const std::vector<uint8_t>* inputs[3]{};
+    const uint8_t* pointers[3]{};
+    size_t calls{},fail{SIZE_MAX};
+    bool injected{},afterConsume{};
+    void (*onAllocation)(size_t,void*) noexcept=nullptr;
+    void* argument{};
+};
+static thread_local OwnedSourceAllocationObservation* ownedSourceAllocationObservation=nullptr;
+void* operator new(std::size_t size) {
+    if(auto* observation=ownedSourceAllocationObservation) {
+        for(size_t plane=0;plane<3;++plane)
+            if(observation->inputs[plane]->data()!=observation->pointers[plane])observation->afterConsume=true;
+        const size_t ordinal=observation->calls++;
+        if(observation->onAllocation)observation->onAllocation(ordinal,observation->argument);
+        if(ordinal==observation->fail) {
+            observation->injected=true;
+            throw std::bad_alloc();
+        }
+    }
+    if(void* value=std::malloc(size?size:1))return value;
+    throw std::bad_alloc();
+}
+void* operator new[](std::size_t size) {return ::operator new(size);}
+void operator delete(void* value) noexcept {std::free(value);}
+void operator delete[](void* value) noexcept {std::free(value);}
+void operator delete(void* value,std::size_t) noexcept {std::free(value);}
+void operator delete[](void* value,std::size_t) noexcept {std::free(value);}
+
+namespace Simpsons {
+// Const observations only. No mutation or allocation is hidden in this probe.
+struct StaticMeshSourceCacheTestProbe {
+    struct Entry {
+        bool found{};
+        std::array<std::span<const uint8_t>,3> planes{};
+        std::array<size_t,3> capacities{};
+        size_t charge{};
+    };
+    template<class Mesh>static Entry entry(const StaticMeshSourceCache<Mesh>& cache,const Mesh* mesh) noexcept {
+        for(const auto& candidate:cache.lru_)if(candidate.mesh.get()==mesh)
+            return {true,{candidate.vertices,candidate.indices,candidate.declaration},
+                {candidate.vertices.capacity(),candidate.indices.capacity(),candidate.declaration.capacity()},candidate.charge};
+        return {};
+    }
+    template<class Mesh>static size_t hints(const StaticMeshSourceCache<Mesh>& cache) noexcept {return cache.hints_.size();}
+    template<class Mesh>static size_t hints(const StaticMeshSourceCache<Mesh>& cache,const Mesh* mesh) noexcept {
+        size_t result{};
+        for(const auto& [key,hint]:cache.hints_) {
+            (void)key;
+            if(hint.entry&&hint.entry->mesh.get()==mesh)++result;
+        }
+        return result;
+    }
+};
+}
 
 namespace {
 using Bytes=std::vector<uint8_t>;
@@ -158,8 +223,142 @@ void finiteAndExtents() {
          "Valid original65536 Z-prepass owner rejected or decoded incorrectly");
     need(largeOwner==ownerBefore,"Large Z-prepass decoder changed its owner");
 }
+// Decoder-only ownership/bit controls; no cache, GPU or timing changes.
+void staticPositionCase(std::span<const uint8_t> bytes,std::span<const uint8_t> decl,
+    uint32_t stride,size_t count,uint32_t offset,const char* failure=nullptr) {
+    struct RestoreCSR {uint32_t saved=_mm_getcsr();~RestoreCSR(){_mm_setcsr(saved);}} restore;
+    const Bytes beforeBytes(bytes.begin(),bytes.end()),beforeDeclaration(decl.begin(),decl.end());
+    std::array<uint32_t,36> states{};size_t next{};
+    for(uint32_t round=0;round<4;++round)for(uint32_t flush=0;flush<4;++flush)for(uint32_t sticky:{0u,0x3Fu})
+        states[next++]=0x1F80u|(round<<13)|((flush&1u)?0x40u:0u)|((flush&2u)?0x8000u:0u)|sticky;
+    for(uint32_t round=0;round<4;++round)states[next++]=round<<13;
+    need(next==states.size(),"Static position host-state inventory differs");
+    for(uint32_t control:states) {
+        _mm_setcsr(control);bool rejected{};
+        try {
+            const auto actual=decodeStaticZPrepassVertices(bytes,decl,stride);
+            const auto afterCSR=_mm_getcsr();
+            need(afterCSR==control,"Static position decode changed full MXCSR");
+            need(!failure&&actual.size()==count,"Static position success/count differs");
+            for(size_t vertex=0;vertex<actual.size();++vertex) {
+                for(size_t lane=0;lane<3;++lane) {
+                    const size_t at=vertex*stride+offset+4*lane;
+                    const uint32_t gold=uint32_t(bytes[at])<<24|uint32_t(bytes[at+1])<<16|
+                        uint32_t(bytes[at+2])<<8|bytes[at+3];
+                    need(std::bit_cast<uint32_t>(actual[vertex].position[lane])==gold,
+                         "Static position ordered BE bits differ");
+                }
+                inert(actual[vertex]);
+            }
+        } catch(const Simpsons::Failure& error) {
+            const auto afterCSR=_mm_getcsr();rejected=true;
+            need(afterCSR==control,"Rejected static position decode changed full MXCSR");
+            need(failure&&std::strcmp(error.what(),failure)==0,"Static position exact Failure message differs");
+        }
+        need(rejected==(failure!=nullptr),"Static position expected failure was absent");
+        need(std::equal(bytes.begin(),bytes.end(),beforeBytes.begin())&&
+             std::equal(decl.begin(),decl.end(),beforeDeclaration.begin()),"Static position decode changed borrowed inputs");
+    }
+}
+void staticPositionOwnedBounds() {
+    const auto d=declaration(),full=vertices();
+    constexpr std::array<uint32_t,12> bits={0u,0x80000000u,1u,0x80000001u,0x007FFFFFu,0x807FFFFFu,
+        0x00800000u,0x80800000u,0x7F7FFFFFu,0xFF7FFFFFu,0x3E000001u,0xC1480000u};
+    for(size_t rotation=0;rotation<bits.size();++rotation) {
+        Bytes source(72,0xFF); // NaN poison in every dead original attribute.
+        for(size_t vertex=0;vertex<2;++vertex)for(size_t lane=0;lane<3;++lane)
+            put(source,36*vertex+4*lane,bits[(rotation+3*vertex+lane)%bits.size()]);
+        staticPositionCase(source,d,36,2,0);
+    }
+    // Two owned XYZ records end at48. Trailing padding and the next partial
+    // record's NaNs do not create a third addressable position.
+    for(size_t padding=0;padding<=32;padding+=4) {
+        Bytes source(48+padding,0xFF);
+        std::copy_n(full.begin(),12,source.begin());std::copy_n(full.begin()+36,12,source.begin()+36);
+        staticPositionCase(source,d,36,2,0);
+    }
+    Bytes third(84,0xFF);
+    std::copy_n(full.begin(),12,third.begin());std::copy_n(full.begin()+36,12,third.begin()+36);
+    staticPositionCase(third,d,36,0,0,"Nonfinite static Z-prepass position");
+    auto moved=d;for(size_t row=0;row<5;++row)put(moved,12*row,word(moved,12*row)+4);
+    Bytes movedSource(56,0xFF);
+    std::copy_n(full.begin(),12,movedSource.begin()+4);std::copy_n(full.begin()+36,12,movedSource.begin()+44);
+    staticPositionCase(movedSource,moved,40,2,4);
+    auto incomplete=movedSource;incomplete.resize(52);put(incomplete,44,0x7FC12345u);
+    staticPositionCase(incomplete,moved,40,1,4);
+    Bytes positionOnly(d.begin(),d.begin()+12);positionOnly.insert(positionOnly.end(),d.end()-12,d.end());
+    Bytes shortOwner(8,0xFF);
+    staticPositionCase(shortOwner,positionOnly,12,0,0,"Static Z-prepass vertex owner lacks its first consumed record");
+    for(size_t vertex=0;vertex<2;++vertex)for(size_t lane=0;lane<3;++lane)
+        for(uint32_t invalid:{0x7FC12345u,0x7F800000u,0xFF800000u}) {
+            auto bad=movedSource;put(bad,4+40*vertex+4*lane,invalid);
+            staticPositionCase(bad,moved,40,0,4,"Nonfinite static Z-prepass position");
+        }
+    auto poisoned=full;put(poisoned,0,0x7FC12345u);
+    auto badTerminator=d;put(badTerminator,badTerminator.size()-4,1);
+    staticPositionCase(poisoned,badTerminator,36,0,0,"Static Z-prepass declaration terminator differs");
+    staticPositionCase(poisoned,badTerminator,0,0,0,"Static Z-prepass vertex stride or extent is invalid");
+    staticPositionCase(d,d,36,2,0); // Source/declaration overlap is read-only.
+    for(size_t residue=1;residue<=3;++residue) {
+        Bytes unaligned(movedSource.size()+8,0xA5),unalignedDeclaration(moved.size()+8,0x5A);
+        std::copy(movedSource.begin(),movedSource.end(),unaligned.begin()+residue);
+        std::copy(moved.begin(),moved.end(),unalignedDeclaration.begin()+4-residue);
+        const auto beforeV=unaligned,beforeD=unalignedDeclaration;
+        staticPositionCase({unaligned.data()+residue,movedSource.size()},
+            {unalignedDeclaration.data()+4-residue,moved.size()},40,2,4);
+        need(unaligned==beforeV&&unalignedDeclaration==beforeD,"Unaligned static input sentinels changed");
+    }
+}
+void staticPositionProtectedEnd() {
+#ifdef _WIN32
+    // The prior private static_positions_controls.h guard pattern, scoped to
+    // these decoder cases. Source/declaration are read-only up to NOACCESS.
+    struct Guard {
+        uint8_t* base{};size_t page{},size{};
+        explicit Guard(std::span<const uint8_t> bytes):size(bytes.size()) {
+            SYSTEM_INFO info{};GetSystemInfo(&info);page=info.dwPageSize;
+            need(page>=4096&&size<=page,"Static position guard extent differs");
+            base=static_cast<uint8_t*>(VirtualAlloc(nullptr,2*page,MEM_RESERVE|MEM_COMMIT,PAGE_NOACCESS));
+            need(base!=nullptr,"Static position guard allocation failed");DWORD previous{};
+            if(!VirtualProtect(base,page,PAGE_READWRITE,&previous)) {
+                if(!VirtualFree(base,0,MEM_RELEASE))std::abort();
+                base=nullptr;throw std::runtime_error("Static position guard writable admission failed");
+            }
+            std::memcpy(base+page-size,bytes.data(),size);
+            if(!VirtualProtect(base,page,PAGE_READONLY,&previous)) {
+                if(!VirtualFree(base,0,MEM_RELEASE))std::abort();
+                base=nullptr;throw std::runtime_error("Static position guard read-only admission failed");
+            }
+        }
+        Guard(const Guard&)=delete;Guard& operator=(const Guard&)=delete;
+        ~Guard(){if(base&&!VirtualFree(base,0,MEM_RELEASE))std::abort();}
+        std::span<const uint8_t> view()const noexcept{return {base+page-size,size};}
+    };
+    const auto d=declaration(),full=vertices();
+    Bytes positionOnly(d.begin(),d.begin()+12);positionOnly.insert(positionOnly.end(),d.end()-12,d.end());
+    Bytes one(full.begin(),full.begin()+12);Guard exactOne(one),exactDeclaration(positionOnly);
+    staticPositionCase(exactOne.view(),exactDeclaration.view(),12,1,0);
+    Bytes endOwned(full.begin(),full.begin()+48);Guard exactTwo(endOwned),exactFullDeclaration(d);
+    staticPositionCase(exactTwo.view(),exactFullDeclaration.view(),36,2,0);
+    for(size_t vertex=0;vertex<2;++vertex)for(size_t lane=0;lane<3;++lane)
+        for(uint32_t invalid:{0x7FC12345u,0x7F800000u,0xFF800000u}) {
+            auto bad=endOwned;put(bad,36*vertex+4*lane,invalid);Guard exactBad(bad);
+            staticPositionCase(exactBad.view(),exactFullDeclaration.view(),36,0,0,"Nonfinite static Z-prepass position");
+        }
+    Bytes eight(full.begin(),full.begin()+8);Guard shortOwner(eight);
+    staticPositionCase(shortOwner.view(),exactDeclaration.view(),12,0,0,
+        "Static Z-prepass vertex owner lacks its first consumed record");
+    staticPositionCase({exactOne.base+exactOne.page,0},exactDeclaration.view(),12,0,0,
+        "Static Z-prepass vertex stride or extent is invalid");
+#endif
+}
+
 // Exact raw-source cache coverage on the production cache implementation.
-struct FakeMesh {uint32_t tag;};
+struct FakeMesh {
+    uint32_t tag;
+    size_t* destroyed{};
+    ~FakeMesh(){if(destroyed)++*destroyed;}
+};
 using SourceCache=Simpsons::StaticMeshSourceCache<FakeMesh>;
 Bytes indices() {
     Bytes result(12);
@@ -169,7 +368,7 @@ Bytes indices() {
 uint64_t sourceKey(const Bytes& v,const Bytes& i,const Bytes& d,uint32_t stride) {
     return SourceCache::contentKey(v,i,d,stride);
 }
-std::shared_ptr<FakeMesh> sourceMesh(uint32_t tag) {return std::make_shared<FakeMesh>(FakeMesh{tag});}
+std::shared_ptr<FakeMesh> sourceMesh(uint32_t tag) {return std::make_shared<FakeMesh>(FakeMesh{tag,nullptr});}
 void sourceCacheExactHitSharesMesh() {
     SourceCache cache;
     const auto v=vertices(),i=indices(),d=declaration();
@@ -629,6 +828,511 @@ void sourceCacheForcedHashBoundaries() {
         need(!cache.find(v,i,other,stride,forced),"Forced hash must not mask declaration boundary bytes");
     }
 }
+void sourceWatchObservationsPreserveResults() {
+    struct WatchedSource {
+        std::array<uint8_t,3*4096> bytes{};
+        std::array<std::atomic<uint8_t>,3> armed{};
+        std::array<std::atomic<uint32_t>,3> version{};
+        ~WatchedSource() {
+            for(uint32_t page=0;page<3;++page)
+                if(armed[page].exchange(0))Simpsons::guestWatchBlockAdjust(page,-1);
+        }
+        void stored(uint32_t page) {
+            if(armed[page].exchange(0))Simpsons::guestWatchBlockAdjust(page,-1);
+            version[page].fetch_add(1);
+        }
+    } source;
+    const auto v=vertices(),i=indices(),d=declaration();
+    std::copy(v.begin(),v.end(),source.bytes.begin());
+    std::copy(i.begin(),i.end(),source.bytes.begin()+4096);
+    std::copy(d.begin(),d.end(),source.bytes.begin()+8192);
+    const std::span<const uint8_t> vv(source.bytes.data(),v.size());
+    const std::span<const uint8_t> ii(source.bytes.data()+4096,i.size());
+    const std::span<const uint8_t> dd(source.bytes.data()+8192,d.size());
+    SourceCache cache(2,1024*1024);
+    cache.setWriteWatch({source.bytes.data(),source.armed.data(),source.version.data()},true);
+    const auto original=sourceMesh(70);
+    auto first=cache.lookup(vv,ii,dd,36);
+    need(!first.mesh&&first.pending.valid,"Initial watched source must miss and arm before capture");
+    cache.insert(vv,ii,dd,36,first.key,original,&first.pending);
+    need(cache.lookup(vv,ii,dd,36).mesh==original,"Unchanged watched source lost its exact mesh");
+    need(cache.watchHits()==1&&cache.statistics().fullLookups==1,"Watch observations confused fast/full lookups");
+    source.stored(0);source.bytes[0]^=1;
+    auto changed=cache.lookup(vv,ii,dd,36);
+    need(!changed.mesh&&cache.statistics().dirtyBindings==1,"Changed watched bytes reused stale mesh");
+    const auto replacement=sourceMesh(71);
+    cache.insert(vv,ii,dd,36,changed.key,replacement,&changed.pending);
+    need(cache.lookup(vv,ii,dd,36).mesh==replacement,"Changed watched bytes did not bind replacement");
+    source.stored(1); // Same bytes still require full equality after a store.
+    need(cache.lookup(vv,ii,dd,36).mesh==replacement,"Same-byte store changed the exact result");
+    need(cache.statistics().dirtyBindings==2&&cache.statistics().exactHits==1,
+         "Same-byte invalidation must count as a full exact hit");
+    for(uint64_t n=0;n<2*Simpsons::kStaticMeshSourceCacheRevalidateLookups&&
+            !cache.statistics().revalidations;++n)
+        need(cache.lookup(vv,ii,dd,36).mesh==replacement,"Bounded revalidation changed exact mesh identity");
+    const auto& stats=cache.statistics();
+    need(stats.revalidations==1&&stats.exactHits==2&&stats.misses==2,
+         "Expired watched binding did not perform its full comparison");
+    need(stats.lookups==cache.watchHits()+stats.fullLookups&&stats.fullLookups==stats.exactHits+stats.misses,
+         "Source lookup observations do not partition actual results");
+    need(stats.insertions==2&&!stats.evictions&&stats.peakEntries==2&&stats.peakBytes==cache.residentBytes(),
+         "Source observations changed bounded residency");
+    const auto beforeClear=stats.lookups;
+    cache.clear();
+    need(!cache.size()&&!cache.residentBytes()&&cache.statistics().lookups==beforeClear,
+         "Clearing residency must preserve lifetime observations");
+    need(!cache.lookup(vv,ii,dd,36).mesh,"Cleared source retained a stale watched binding");
+    SourceCache tiny(2,32);
+    tiny.insert(v,i,d,36,sourceKey(v,i,d,36),original);
+    need(tiny.statistics().oversizedSkips==1&&!tiny.statistics().insertions&&!tiny.residentBytes(),
+         "Oversized source observation changed rejection or residency");
+}
+
+struct OwnedSources {
+    std::array<Bytes,3> planes{vertices(),indices(),declaration()};
+    explicit OwnedSources(uint32_t bits=0x3E000001u) {
+        put(planes[0],0,bits);
+        // Logical bytes fit small budgets; spare retained capacity must still
+        // be charged. Observe actual capacities instead of assuming growth.
+        for(size_t plane=0;plane<3;++plane)planes[plane].reserve(planes[plane].size()+97+31*plane);
+    }
+    size_t logical() const noexcept {return planes[0].size()+planes[1].size()+planes[2].size();}
+    size_t charge() const noexcept {return planes[0].capacity()+planes[1].capacity()+planes[2].capacity();}
+    uint64_t key(uint64_t stride=36) const noexcept {
+        return SourceCache::contentKey(planes[0],planes[1],planes[2],stride);
+    }
+};
+struct OwnedSourceSnapshot {
+    std::array<Bytes,3> bytes;
+    std::array<const uint8_t*,3> pointers;
+    std::array<size_t,3> capacities;
+    explicit OwnedSourceSnapshot(const OwnedSources& sources):bytes(sources.planes) {
+        for(size_t plane=0;plane<3;++plane) {
+            pointers[plane]=sources.planes[plane].data();
+            capacities[plane]=sources.planes[plane].capacity();
+        }
+    }
+    size_t logical() const noexcept {return bytes[0].size()+bytes[1].size()+bytes[2].size();}
+    size_t charge() const noexcept {return capacities[0]+capacities[1]+capacities[2];}
+};
+void untouchedOwnedSources(const OwnedSources& sources,const OwnedSourceSnapshot& before) {
+    for(size_t plane=0;plane<3;++plane)
+        need(sources.planes[plane]==before.bytes[plane]&&sources.planes[plane].data()==before.pointers[plane]&&
+             sources.planes[plane].capacity()==before.capacities[plane],"Rejected owned source changed bytes, pointer or capacity");
+}
+void transferredOwnedSources(const SourceCache& cache,const OwnedSources& sources,
+                             const OwnedSourceSnapshot& before,const FakeMesh* mesh) {
+    const auto entry=Simpsons::StaticMeshSourceCacheTestProbe::entry(cache,mesh);
+    need(entry.found&&entry.charge==before.charge(),"Owned entry missing or charged by logical size");
+    for(size_t plane=0;plane<3;++plane) {
+        need(sources.planes[plane].empty(),"Owned insertion did not consume every input");
+        need(entry.planes[plane].data()==before.pointers[plane]&&entry.capacities[plane]==before.capacities[plane],
+             "Owned insertion copied or discarded a source allocation");
+        need(entry.planes[plane].size()==before.bytes[plane].size()&&
+             std::equal(entry.planes[plane].begin(),entry.planes[plane].end(),before.bytes[plane].begin()),
+             "Owned insertion changed a source plane's extent or bytes");
+    }
+}
+bool ownedInsert(SourceCache& cache,OwnedSources& sources,uint64_t key,const std::shared_ptr<FakeMesh>& mesh,
+                 const SourceCache::PendingArm* pending=nullptr,uint64_t stride=36) {
+    return cache.insertOwned(sources.planes[0],sources.planes[1],sources.planes[2],stride,key,mesh,pending);
+}
+void ownedStatistics(const SourceCache& cache,uint64_t insertions,uint64_t logical,uint64_t capacity) {
+    const auto& stats=cache.statistics();
+    need(stats.ownedInsertions==insertions&&stats.ownedLogicalBytes==logical&&stats.ownedCapacityBytes==capacity,
+         "Owned observations must count only successful commits and their original logical/capacity bytes");
+}
+struct ObserveOwnedAllocations {
+    OwnedSourceAllocationObservation observation;
+    explicit ObserveOwnedAllocations(const OwnedSources& sources,size_t fail=SIZE_MAX) {
+        need(!ownedSourceAllocationObservation,"Nested owned allocation observation");
+        observation.fail=fail;
+        for(size_t plane=0;plane<3;++plane) {
+            observation.inputs[plane]=&sources.planes[plane];
+            observation.pointers[plane]=sources.planes[plane].data();
+        }
+        ownedSourceAllocationObservation=&observation;
+    }
+    ~ObserveOwnedAllocations(){ownedSourceAllocationObservation=nullptr;}
+};
+struct OwnedWatchedSource {
+    std::array<uint8_t,6*4096> bytes{};
+    std::array<std::atomic<uint8_t>,6> armed{};
+    std::array<std::atomic<uint32_t>,6> version{};
+    ~OwnedWatchedSource() {
+        for(uint32_t page=0;page<6;++page)
+            if(armed[page].exchange(0))Simpsons::guestWatchBlockAdjust(page,-1);
+    }
+    void stored(uint32_t page) {
+        need(page<6,"Owned watch fixture page outside allocation");
+        if(armed[page].exchange(0))Simpsons::guestWatchBlockAdjust(page,-1);
+        version[page].fetch_add(1);
+    }
+    void seed(size_t slot,const OwnedSources& sources) {
+        need(slot<2,"Owned watch fixture slot outside allocation");
+        for(size_t plane=0;plane<3;++plane) {
+            need(sources.planes[plane].size()<=4096,"Owned watch plane crosses fixture slot");
+            std::copy(sources.planes[plane].begin(),sources.planes[plane].end(),bytes.begin()+(3*slot+plane)*4096);
+        }
+    }
+    std::array<std::span<const uint8_t>,3> ranges(size_t slot=0) const {
+        need(slot<2,"Owned watch fixture range outside allocation");
+        return {std::span<const uint8_t>(bytes.data()+3*slot*4096,72),
+                std::span<const uint8_t>(bytes.data()+(3*slot+1)*4096,12),
+                std::span<const uint8_t>(bytes.data()+(3*slot+2)*4096,72)};
+    }
+    OwnedSources capture(size_t slot=0) const {
+        OwnedSources result;
+        const auto spans=ranges(slot);
+        for(size_t plane=0;plane<3;++plane)result.planes[plane].assign(spans[plane].begin(),spans[plane].end());
+        return result;
+    }
+    SourceCache::LookupResult lookup(SourceCache& cache,size_t slot=0) const {
+        const auto spans=ranges(slot);
+        return cache.lookup(spans[0],spans[1],spans[2],36);
+    }
+    void attach(SourceCache& cache) {cache.setWriteWatch({bytes.data(),armed.data(),version.data()},true);}
+};
+void unchangedPending(const SourceCache::PendingArm& pending,const SourceCache::PendingArm& before,
+                      const uint32_t* versions,size_t capacity) {
+    need(pending.valid==before.valid&&pending.stride==before.stride&&pending.versions==before.versions&&
+         pending.versions.data()==versions&&pending.versions.capacity()==capacity,"Owned insertion changed its borrowed pending arm");
+    for(size_t plane=0;plane<3;++plane)
+        need(pending.plane[plane]==before.plane[plane]&&pending.size[plane]==before.size[plane]&&
+             pending.first[plane]==before.first[plane]&&pending.last[plane]==before.last[plane],
+             "Owned insertion changed pending arm planes or page extents");
+}
+void ownedSourceTransferAndSkips() {
+    OwnedSources sources;
+    const OwnedSourceSnapshot before(sources);
+    const auto key=sources.key();const auto mesh=sourceMesh(81);
+    SourceCache exact(2,before.charge());
+    need(ownedInsert(exact,sources,key,mesh),"Exact retained-capacity budget rejected owned insertion");
+    transferredOwnedSources(exact,sources,before,mesh.get());
+    need(exact.residentBytes()==before.charge()&&exact.size()==1,"Owned capacity residency differs");
+    need(exact.find(before.bytes[0],before.bytes[1],before.bytes[2],36,key)==mesh,"Transferred source cannot hit exact original bytes");
+    ownedStatistics(exact,1,before.logical(),before.charge());
+    for(unsigned reason=0;reason<4;++reason) {
+        OwnedSources rejected;
+        const OwnedSourceSnapshot snapshot(rejected);
+        SourceCache cache(reason==1?0:2,reason==2?0:(reason==3?snapshot.charge()-1:SIZE_MAX));
+        const auto retained=reason==0?std::shared_ptr<FakeMesh>{}:mesh;
+        need(!ownedInsert(cache,rejected,rejected.key(),retained),"Null/disabled/oversized owned insertion was retained");
+        untouchedOwnedSources(rejected,snapshot);
+        need(!cache.size()&&!cache.residentBytes(),"Owned skip changed cache residency");
+        ownedStatistics(cache,0,0,0);
+        need(cache.statistics().oversizedSkips==uint64_t(reason==3),"Disabled or oversized owned skip observation differs");
+    }
+    // Object aliasing is rejected even when all three logical planes are
+    // legal; distinct vector objects with equal bytes remain legal.
+    for(size_t pair=0;pair<3;++pair) {
+        OwnedSources aliased;
+        const OwnedSourceSnapshot snapshot(aliased);
+        SourceCache cache;
+        Bytes* a=&aliased.planes[0];Bytes* b=&aliased.planes[1];Bytes* c=&aliased.planes[2];
+        if(pair==0)b=a;else if(pair==1)c=a;else c=b;
+        need(!cache.insertOwned(*a,*b,*c,36,aliased.key(),mesh),"Repeated vector object accepted as distinct owned planes");
+        untouchedOwnedSources(aliased,snapshot);
+        need(!cache.size()&&!cache.residentBytes(),"Aliased owned skip published an entry");
+        ownedStatistics(cache,0,0,0);
+    }
+    OwnedSources equal;
+    equal.planes[1]=equal.planes[0];equal.planes[2]=equal.planes[0];
+    const OwnedSourceSnapshot equalBefore(equal);
+    SourceCache equalCache;
+    need(ownedInsert(equalCache,equal,equal.key(),mesh),"Distinct equal-byte owned vectors were mistaken for aliases");
+    transferredOwnedSources(equalCache,equal,equalBefore,mesh.get());
+}
+void ownedSourceCollisionAndExtents() {
+    OwnedSources sources;
+    const OwnedSourceSnapshot before(sources);
+    const auto key=sources.key();const auto mesh=sourceMesh(82);
+    SourceCache cache;
+    need(ownedInsert(cache,sources,key,mesh),"Owned collision fixture did not insert");
+    for(size_t plane=0;plane<3;++plane) {
+        for(size_t position:{size_t(0),before.bytes[plane].size()/2,before.bytes[plane].size()-1}) {
+            auto changed=before.bytes;changed[plane][position]^=0xFF;
+            need(!cache.find(changed[0],changed[1],changed[2],36,key),"Owned forced key accepted changed plane bytes");
+        }
+        auto changed=before.bytes;changed[plane].pop_back();
+        need(!cache.find(changed[0],changed[1],changed[2],36,key),"Owned forced key accepted truncated plane");
+        changed=before.bytes;changed[plane].push_back(0);
+        need(!cache.find(changed[0],changed[1],changed[2],36,key),"Owned forced key accepted enlarged plane");
+    }
+    need(!cache.find(before.bytes[0],before.bytes[1],before.bytes[2],40,key),"Owned forced key accepted different stride");
+    need(cache.find(before.bytes[0],before.bytes[1],before.bytes[2],36,key)==mesh&&cache.size()==1,
+         "Owned misses changed exact original mesh or residency");
+    ownedStatistics(cache,1,before.logical(),before.charge());
+}
+void ownedSourceMixedBudgetAndLifetime() {
+    const auto v=vertices(),i=indices(),d=declaration();
+    const size_t legacyCharge=v.size()+i.size()+d.size();
+    OwnedSources owned(0x40000000);
+    const OwnedSourceSnapshot before(owned);
+    size_t destroyed{};
+    SourceCache cache(3,legacyCharge+before.charge());
+    const auto legacy=sourceMesh(83);
+    cache.insert(v,i,d,36,sourceKey(v,i,d,36),legacy);
+    auto ownedMesh=sourceMesh(84);std::weak_ptr<FakeMesh> weak=ownedMesh;
+    ownedMesh->destroyed=&destroyed;
+    const auto ownedKey=owned.key();
+    need(ownedInsert(cache,owned,ownedKey,ownedMesh),"Mixed cache did not accept exact capacity boundary");
+    transferredOwnedSources(cache,owned,before,ownedMesh.get());
+    const auto legacyEntry=Simpsons::StaticMeshSourceCacheTestProbe::entry(cache,legacy.get());
+    need(legacyEntry.found&&legacyEntry.charge==legacyCharge&&cache.residentBytes()==cache.maxBytes(),
+         "Mixed legacy size and owned capacity accounting differs");
+    // Retain a real returned mesh owner, then remove the setup owner so it
+    // cannot hide premature eviction/destruction of the shared mesh.
+    auto live=cache.find(before.bytes[0],before.bytes[1],before.bytes[2],36,ownedKey);
+    ownedMesh.reset();
+    need(live&&weak.use_count()==2,"Owned cache did not retain exactly its mesh plus the live caller");
+    need(cache.find(v,i,d,36,sourceKey(v,i,d,36))==legacy,"Mixed legacy promotion failed");
+    auto fresh=v;put(fresh,0,0x40400000);
+    const auto newest=sourceMesh(85);
+    cache.insert(fresh,i,d,36,sourceKey(fresh,i,d,36),newest);
+    need(cache.size()==2&&cache.residentBytes()==2*legacyCharge,"Mixed byte eviction subtracted logical bytes from owned capacity");
+    need(!cache.find(before.bytes[0],before.bytes[1],before.bytes[2],36,ownedKey),"Owned LRU survived capacity eviction");
+    need(cache.find(v,i,d,36,sourceKey(v,i,d,36))==legacy&&
+         cache.find(fresh,i,d,36,sourceKey(fresh,i,d,36))==newest,"Mixed byte eviction removed a retained legacy mesh");
+    need(!weak.expired()&&!destroyed&&live->tag==84&&weak.use_count()==1,"Eviction invalidated the live mesh caller");
+    ownedStatistics(cache,1,before.logical(),before.charge());
+    const auto insertions=cache.statistics().insertions;
+    cache.clear();
+    need(!cache.size()&&!cache.residentBytes()&&cache.statistics().insertions==insertions&&!destroyed,
+         "Mixed clear changed observations or a live evicted owner");
+    ownedStatistics(cache,1,before.logical(),before.charge());
+    live.reset();need(weak.expired()&&destroyed==1,"Live evicted mesh did not retire exactly on its final owner");
+}
+void ownedSourcePendingAndRevalidation() {
+    OwnedWatchedSource source;
+    OwnedSources initial;
+    source.seed(0,initial);
+    const auto guestBefore=source.bytes;
+    SourceCache cache(2,SIZE_MAX);source.attach(cache);
+    auto miss=source.lookup(cache);
+    need(!miss.mesh&&miss.pending.valid,"Owned watched miss did not arm original guest source before capture");
+    auto captured=source.capture();const OwnedSourceSnapshot before(captured);
+    const auto pendingBefore=miss.pending;
+    const auto* versions=miss.pending.versions.data();const auto versionCapacity=miss.pending.versions.capacity();
+    const auto mesh=sourceMesh(86);
+    need(ownedInsert(cache,captured,miss.key,mesh,&miss.pending),"Owned watched insertion did not commit");
+    transferredOwnedSources(cache,captured,before,mesh.get());
+    unchangedPending(miss.pending,pendingBefore,versions,versionCapacity);
+    need(source.bytes==guestBefore&&Simpsons::StaticMeshSourceCacheTestProbe::hints(cache,mesh.get())==1,
+         "Owned capture changed guest bytes or retained a host-vector binding instead of original guest spans");
+    const auto fullBefore=cache.statistics().fullLookups;
+    need(source.lookup(cache).mesh==mesh&&cache.watchHits()==1&&cache.statistics().fullLookups==fullBefore,
+         "Original unchanged guest spans did not use the owned watched binding");
+    for(uint64_t tick=0;tick<2*Simpsons::kStaticMeshSourceCacheRevalidateLookups&&!cache.statistics().revalidations;++tick)
+        need(source.lookup(cache).mesh==mesh,"Owned periodic revalidation changed exact mesh identity");
+    need(cache.statistics().revalidations==1&&cache.statistics().fullLookups==fullBefore+1&&
+         cache.statistics().exactHits==1,"Owned binding failed to repeat bounded full-byte equality");
+    transferredOwnedSources(cache,captured,before,mesh.get());
+    const auto observations=cache.statistics();
+    const auto bindings=cache.watchBindings();
+    cache.clear();
+    need(!cache.size()&&!cache.residentBytes()&&!Simpsons::StaticMeshSourceCacheTestProbe::hints(cache),
+         "Owned clear retained source bytes or dangling hints");
+    ownedStatistics(cache,1,before.logical(),before.charge());
+    need(cache.statistics().insertions==observations.insertions&&cache.watchBindings()==bindings,
+         "Owned clear reset cumulative insertion/binding observations");
+    need(!source.lookup(cache).mesh,"Owned clear retained a stale fast-hit mesh");
+}
+void ownedSourceInterveningMutationAndInvalidArm() {
+    for(size_t changedPlane=0;changedPlane<3;++changedPlane) {
+        OwnedWatchedSource source;OwnedSources initial;source.seed(0,initial);
+        SourceCache cache;source.attach(cache);
+        auto miss=source.lookup(cache);auto captured=source.capture();const OwnedSourceSnapshot before(captured);
+        need(!miss.mesh&&miss.pending.valid,"Intervening mutation fixture did not arm before capture");
+        const auto pendingBefore=miss.pending;
+        const auto* versions=miss.pending.versions.data();const auto capacity=miss.pending.versions.capacity();
+        source.stored(uint32_t(changedPlane));source.bytes[changedPlane*4096]^=1;
+        const auto guestAfterMutation=source.bytes;
+        const auto mesh=sourceMesh(uint32_t(90+changedPlane));
+        need(ownedInsert(cache,captured,miss.key,mesh,&miss.pending),"Stale pending arm incorrectly prevented retaining validated owned bytes");
+        transferredOwnedSources(cache,captured,before,mesh.get());
+        unchangedPending(miss.pending,pendingBefore,versions,capacity);
+        need(!cache.watchBindings()&&!Simpsons::StaticMeshSourceCacheTestProbe::hints(cache)&&source.bytes==guestAfterMutation,
+             "Intervening source mutation was silently rebound or changed by insertion");
+        need(!source.lookup(cache).mesh&&!cache.watchHits(),"Changed guest plane reused a stale owned snapshot");
+        need(cache.find(before.bytes[0],before.bytes[1],before.bytes[2],36,miss.key)==mesh,
+             "Stale binding rejection lost the immutable captured bytes");
+        source.stored(uint32_t(changedPlane));source.bytes[changedPlane*4096]^=1;
+        need(source.lookup(cache).mesh==mesh&&cache.watchBindings()==1,"Restored source did not bind after new full equality");
+        const auto full=cache.statistics().fullLookups;
+        need(source.lookup(cache).mesh==mesh&&cache.statistics().fullLookups==full&&cache.watchHits()==1,
+             "Restored source did not use its newly proven original-span binding");
+    }
+    for(unsigned invalid=0;invalid<7;++invalid) {
+        OwnedWatchedSource source;OwnedSources initial;source.seed(0,initial);
+        SourceCache cache;source.attach(cache);
+        auto miss=source.lookup(cache);auto captured=source.capture();const OwnedSourceSnapshot before(captured);
+        need(miss.pending.valid,"Malformed pending fixture lacked an original arm");
+        auto malformed=miss.pending;
+        if(invalid==0)malformed.valid=false;
+        else if(invalid==1)++malformed.stride;
+        else if(invalid==2)++malformed.size[0];
+        else if(invalid==3)++malformed.size[1];
+        else if(invalid==4)++malformed.size[2];
+        else if(invalid==5)++malformed.first[0];
+        else malformed.versions.pop_back();
+        const auto malformedBefore=malformed;
+        const auto* versions=malformed.versions.data();const auto capacity=malformed.versions.capacity();
+        const auto mesh=sourceMesh(uint32_t(94+invalid));
+        need(ownedInsert(cache,captured,miss.key,mesh,&malformed),"Invalid hint must not reject valid owned source retention");
+        transferredOwnedSources(cache,captured,before,mesh.get());
+        unchangedPending(malformed,malformedBefore,versions,capacity);
+        need(!cache.watchBindings()&&!Simpsons::StaticMeshSourceCacheTestProbe::hints(cache),
+             "Mismatched stride/extent/page/version pending arm published a binding");
+        const auto full=cache.statistics().fullLookups;
+        need(source.lookup(cache).mesh==mesh&&cache.statistics().fullLookups==full+1&&!cache.watchHits(),
+             "Rejected pending arm bypassed the required original guest byte comparison");
+        ownedStatistics(cache,1,before.logical(),before.charge());
+    }
+}
+struct OwnedInsertionFixture {
+    unsigned mode;
+    size_t oldDestroyed{};
+    OwnedWatchedSource source;
+    SourceCache cache{1,SIZE_MAX};
+    OwnedSources captured;
+    SourceCache::LookupResult miss;
+    std::shared_ptr<FakeMesh> mesh{sourceMesh(104)};
+    std::weak_ptr<FakeMesh> old;
+    FakeMesh* oldPointer{};
+    size_t oldCharge{};
+    size_t slot{};
+    explicit OwnedInsertionFixture(unsigned value):mode(value) {
+        need(mode<4,"Unknown owned allocation fixture mode");
+        if(mode)source.attach(cache);
+        OwnedSources fresh(0x40000000u);
+        if(mode>=2) {
+            OwnedSources original(0x3F800000u);source.seed(0,original);
+            auto oldMiss=source.lookup(cache);
+            auto previous=sourceMesh(103);previous->destroyed=&oldDestroyed;
+            oldPointer=previous.get();old=previous;oldCharge=original.logical();
+            cache.insert(original.planes[0],original.planes[1],original.planes[2],36,oldMiss.key,previous,&oldMiss.pending);
+            previous.reset();
+            need(!old.expired()&&cache.watchBindings()==1,"Allocation fixture failed to retain original watched mesh");
+            if(mode==2)slot=1;
+            else for(uint32_t page=0;page<3;++page)source.stored(page);
+        }
+        source.seed(slot,fresh);
+        miss=source.lookup(cache,slot);
+        need(!miss.mesh&&miss.pending.valid==bool(mode),"Owned allocation fixture did not reach a new cache miss");
+        captured=source.capture(slot);
+    }
+    bool commit() {return ownedInsert(cache,captured,miss.key,mesh,mode?&miss.pending:nullptr);}
+    void committed(const OwnedSourceSnapshot& before) {
+        transferredOwnedSources(cache,captured,before,mesh.get());
+        need(cache.size()==1&&cache.residentBytes()==before.charge(),"Owned commit did not apply exact entry/capacity limits");
+        ownedStatistics(cache,1,before.logical(),before.charge());
+        if(mode>=2)need(old.expired()&&oldDestroyed==1,"Successful owned replacement did not retire the old cache-only mesh");
+        if(mode) {
+            const auto full=cache.statistics().fullLookups;
+            const auto hits=cache.watchHits();
+            need(Simpsons::StaticMeshSourceCacheTestProbe::hints(cache)==1&&
+                 Simpsons::StaticMeshSourceCacheTestProbe::hints(cache,mesh.get())==1,
+                 "Owned replacement published dangling or duplicate original-span hints");
+            need(source.lookup(cache,slot).mesh==mesh&&cache.statistics().fullLookups==full&&cache.watchHits()==hits+1,
+                 "New original-span hint was erased while evicting the old entry");
+        }
+    }
+    void failed(const OwnedSourceSnapshot& before,const SourceCache::Statistics& statistics,uint64_t bindings) {
+        untouchedOwnedSources(captured,before);
+        need(cache.size()==size_t(mode>=2)&&cache.residentBytes()==oldCharge&&cache.statistics().insertions==statistics.insertions&&
+             cache.statistics().evictions==statistics.evictions&&cache.watchBindings()==bindings,
+             "Failed owned preparation evicted or published an entry/binding");
+        ownedStatistics(cache,0,0,0);
+        need(Simpsons::StaticMeshSourceCacheTestProbe::hints(cache)==size_t(mode>=2),
+             "Failed pre-cap owned preparation changed old hint residency");
+        if(mode>=2) {
+            need(!old.expired()&&!oldDestroyed&&Simpsons::StaticMeshSourceCacheTestProbe::entry(cache,oldPointer).found,
+                 "Failed owned preparation destroyed the old cache-only mesh");
+            if(mode==2) {
+                const auto full=cache.statistics().fullLookups;
+                const auto hits=cache.watchHits();
+                need(source.lookup(cache,0).mesh.get()==oldPointer&&cache.statistics().fullLookups==full&&cache.watchHits()==hits+1,
+                     "Failed owned preparation damaged an unchanged old fast-hit binding");
+            }
+        }
+    }
+};
+void ownedSourceEveryAllocationBeforeTransfer() {
+    for(unsigned mode=0;mode<4;++mode) {
+        size_t points{};
+        {
+            OwnedInsertionFixture fixture(mode);
+            const OwnedSourceSnapshot before(fixture.captured);
+            bool committed{},lateAllocation{};
+            {
+                ObserveOwnedAllocations audit(fixture.captured);
+                committed=fixture.commit();points=audit.observation.calls;lateAllocation=audit.observation.afterConsume;
+            }
+            need(committed&&points>0&&!lateAllocation,"Successful owned insertion allocated after consuming any input plane");
+            if(mode==1)need(points>=4,"Watched allocation audit missed list, versions, hint keys or map preparation");
+            fixture.committed(before);
+        }
+        for(size_t point=0;point<points;++point) {
+            OwnedInsertionFixture fixture(mode);
+            const OwnedSourceSnapshot before(fixture.captured);
+            const auto statistics=fixture.cache.statistics();const auto bindings=fixture.cache.watchBindings();
+            const auto pending=fixture.miss.pending;
+            const auto* versions=fixture.miss.pending.versions.data();const auto capacity=fixture.miss.pending.versions.capacity();
+            bool rejected{},injected{},lateAllocation{};
+            {
+                ObserveOwnedAllocations audit(fixture.captured,point);
+                try {(void)fixture.commit();}catch(const std::bad_alloc&){rejected=true;}
+                injected=audit.observation.injected;lateAllocation=audit.observation.afterConsume;
+            }
+            need(rejected&&injected&&!lateAllocation,"Owned actual-allocation failure was absent or occurred after input consumption");
+            unchangedPending(fixture.miss.pending,pending,versions,capacity);
+            fixture.failed(before,statistics,bindings);
+            need(fixture.commit(),"Owned insertion did not recover after a preparation allocation failure");
+            fixture.committed(before);
+        }
+    }
+}
+void ownedSourceMutationDuringFinalAllocation() {
+    size_t points{};
+    {
+        OwnedInsertionFixture fixture(1);
+        ObserveOwnedAllocations audit(fixture.captured);
+        const bool committed=fixture.commit();
+        points=audit.observation.calls;
+        need(committed&&points>=4&&!audit.observation.afterConsume,"Final allocation mutation audit lacked staged watched insertion");
+    }
+    OwnedInsertionFixture fixture(1);
+    const OwnedSourceSnapshot before(fixture.captured);
+    struct Mutation {
+        OwnedWatchedSource* source;
+        size_t ordinal;
+        bool fired{};
+        static void allocation(size_t at,void* argument) noexcept {
+            auto& self=*static_cast<Mutation*>(argument);
+            if(at!=self.ordinal)return;
+            self.fired=true;
+            if(self.source->armed[0].exchange(0))Simpsons::guestWatchBlockAdjust(0,-1);
+            self.source->version[0].fetch_add(1);
+            self.source->bytes[0]^=1;
+        }
+    } mutation{&fixture.source,points-1};
+    bool committed{},lateAllocation{};
+    {
+        ObserveOwnedAllocations audit(fixture.captured);
+        audit.observation.onAllocation=Mutation::allocation;audit.observation.argument=&mutation;
+        committed=fixture.commit();lateAllocation=audit.observation.afterConsume;
+    }
+    need(committed&&mutation.fired&&!lateAllocation,"Final allocation mutation did not occur inside real pre-consume preparation");
+    transferredOwnedSources(fixture.cache,fixture.captured,before,fixture.mesh.get());
+    need(!fixture.cache.watchBindings()&&!Simpsons::StaticMeshSourceCacheTestProbe::hints(fixture.cache),
+         "Source mutation during final map allocation survived pending version recheck");
+    need(!fixture.source.lookup(fixture.cache).mesh&&!fixture.cache.watchHits(),
+         "Changed guest bytes used the new default hint placeholder");
+    need(fixture.cache.find(before.bytes[0],before.bytes[1],before.bytes[2],36,fixture.miss.key)==fixture.mesh,
+         "Final version recheck lost valid immutable captured source bytes");
+    ownedStatistics(fixture.cache,1,before.logical(),before.charge());
+}
 Bytes read(const std::filesystem::path& path) {
     std::ifstream in(path,std::ios::binary);need(bool(in),"Optional capture could not be opened");
     Bytes bytes{std::istreambuf_iterator<char>(in),std::istreambuf_iterator<char>()};need(!in.bad(),"Capture read failed");return bytes;
@@ -646,11 +1350,18 @@ void captured(const std::filesystem::path& directory) {
 int main(int argc,char** argv)try {
     need(argc<=2,"Usage: ZPrepassVerticesTests [capture-directory]");
     consumedAndDeadInputs();declarationGuards();tangentProfile();finiteAndExtents();
+    const auto positionCallerCSR=_mm_getcsr();
+    staticPositionOwnedBounds();staticPositionProtectedEnd();
+    need(_mm_getcsr()==positionCallerCSR,"Static position controls did not restore caller MXCSR");
     sourceCacheExactHitSharesMesh();sourceCachePlaneAndStrideMiss();sourceCacheSnapshotsSurviveCallerMutation();
     sourceCacheForcedHashRejects();sourceCacheForcedHashBoundaries();sourceCacheEviction();
     sourceLookupEmptyAndOneEntry();sourceLookupRepeatedCycleIdenticalExtents();sourceLookupPlaneMutationsMiss();
     sourceLookupSnapshotsSurviveCallerMutation();sourceLookupOversizeAndEvictionBounded();
+    sourceWatchObservationsPreserveResults();
+    ownedSourceTransferAndSkips();ownedSourceCollisionAndExtents();ownedSourceMixedBudgetAndLifetime();
+    ownedSourcePendingAndRevalidation();ownedSourceInterveningMutationAndInvalidArm();
+    ownedSourceEveryAllocationBeforeTransfer();ownedSourceMutationDuringFinalAllocation();
     byteRangeEqualMatchesScalar();byteRangeEqualEveryByteMismatch();byteRangeEqualIgnoresTrailingBytes();
     byteRangeEqualGuardPages();if(argc==2)captured(argv[1]);
-    std::printf("PASS static Z-prepass vertices: %zu checks; exact position bits, eight zero inputs, dead payloads, declaration guards, exact-source cache and SSE2 byte-range equality\n",checks);return 0;
+    std::printf("PASS static Z-prepass vertices: %zu checks; exact position bits, eight zero inputs, dead payloads, declaration guards, exact-source cache, transactional owned raw sources and SSE2 byte-range equality\n",checks);return 0;
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL static Z-prepass vertices after %zu checks: %s\n",checks,e.what());return 1;}

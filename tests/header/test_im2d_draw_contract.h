@@ -34,6 +34,7 @@ void im2dDrawContracts(Simpsons::Runtime& runtime,Simpsons::EngineCpuCalls& cpu,
         const uint32_t rgba=source+128;PPC_STORE_U32(rgba,0);
         require(cpu.invoke(0x823EE940,camera,rgba,1)==1,"Im2D draw color clear failed");
         const auto binding=driver.cameraBinding();const auto depth=driver.readbackDepth(binding.depthIdentity);
+        const auto disabledOrigins=driver.temporalSceneOrigins();
         const auto physicalCount=runtime.physicalAllocations.size();
         const auto uploads=driver.im2DUploadCount(),draws=driver.im2DDrawCount(),screens=driver.screenDrawCount(),presents=driver.presentationCount();
         driver.directScalar(base,0x134,1); // Actual boot140's retained target0 expansion request.
@@ -64,6 +65,12 @@ void im2dDrawContracts(Simpsons::Runtime& runtime,Simpsons::EngineCpuCalls& cpu,
         }
         ++checks;
         require(driver.readbackDepth(binding.depthIdentity)==depth,"Original Im2D altered disabled depth/stencil");
+        const auto disabledAfter=driver.temporalSceneOrigins();
+        require(disabledAfter.components[0].compatible({})&&
+            disabledAfter.components[0].revision>disabledOrigins.components[0].revision&&
+            disabledAfter.components[1]==disabledOrigins.components[1]&&
+            disabledAfter.components[2]==disabledOrigins.components[2],
+            "Actual original disabled-DS Im2D lost color origin or altered retained depth/stencil receipts");
         require(driver.screenDrawCount()==screens && driver.presentationCount()==presents,"Original Im2D fabricated screen draw or presentation");
         require(runtime.physicalAllocations.size()==physicalCount,"Original Im2D leaked upload/program scratch");
         // Cached declaration and stream must still have real native owners on
@@ -94,8 +101,14 @@ void im2dDrawContracts(Simpsons::Runtime& runtime,Simpsons::EngineCpuCalls& cpu,
         for(auto [id,value]:std::array<std::pair<uint32_t,uint32_t>,6>{{{8,0},{6,0},{8,1},{6,1},{8,1},{6,0}}})
             require(cpu.invoke(0x824025A8,id,value)==1,"Im2D UI original RW depth request failed");
         for(auto [id,value]:std::array<std::pair<uint32_t,uint32_t>,3>{{{0x38,0},{0x60,0},{0x68,7}}})cpu.invoke(0x82400170,id,value);
-        const auto uiCall=cpu.registers();
+        const auto uiCall=cpu.registers();const auto uiOrigins=driver.temporalSceneOrigins();
         require(cpu.invoke(0x82409308,4,source,4)==1,"Original UI Im2D ALWAYS-write draw failed");
+        const auto uiAfter=driver.temporalSceneOrigins();
+        require(uiAfter.components[0].compatible({})&&uiAfter.components[1].compatible({})&&
+            uiAfter.components[1].kind==TemporalRasterOriginKind::Grid&&
+            uiAfter.components[1].revision>uiOrigins.components[1].revision&&
+            uiAfter.components[2]==uiOrigins.components[2],
+            "Actual original UI ALWAYS-write did not publish zero-grid depth while preserving stencil");
         require(cpu.registers().r1.u32==uiCall.r1.u32 && cpu.registers().lr==uiCall.lr &&
             cpu.registers().r31.u64==uiCall.r31.u64,"Original UI Im2D epilogue changed ABI state");
         require(driver.effectiveState().scalar(ScalarState::DepthEnable)==1 &&

@@ -14,6 +14,9 @@ SkinOutput skinDrawInput(SkinDrawVarying input) {
     SkinOutput result;
     result.position=input.position; result.t0=input.t0; result.t1=input.t1;
     result.t2=input.t2; result.t3=input.t3;
-    result.t3.x=input.rimControl;
+    // Video menu "Character eyes: Clean" (b1 reserved bit 0): the artists'
+    // no-rim-shadow flag counts from 0.5 instead of only at exactly 1, so
+    // partially flagged eye-white triangles do not speckle with rim shadow.
+    result.t3.x=(reserved&1u)!=0&&input.rimControl>=0.5?1.0:input.rimControl;
     return result;
 }

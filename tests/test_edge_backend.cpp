@@ -1,4 +1,5 @@
 #include "renderer/native_material_compiler.h"
+#include "renderer/temporal_scene.h"
 #include <fstream>
 #include <iterator>
 #include <cstdio>
@@ -12,6 +13,29 @@ namespace Simpsons::Graphics {
 struct NativeIm2DProbe {
     static ID3D11DeviceContext* context(const NativeBackend& backend){return backend.context.Get();}
     static ID3D11Device* device(const NativeBackend& backend){return backend.device.Get();}
+    static DlssFrame frame(const NativeBackend& backend){return backend.temporalScene->frame();}
+    static void installTemporalPipeline(NativeBackend& backend,uint32_t width,uint32_t height) {
+        // Actual temporal ownership/raster pipeline on WARP or hardware;
+        // this fixture does not claim an NGX SDK evaluation.
+        backend.temporalScene=std::make_shared<TemporalScenePipeline>(backend.device.Get(),backend.context.Get(),
+            DlssExtent{width,height,width,height});
+    }
+};
+struct NativeRecordingProbe {
+    template<class F>static void withReplacement(const std::shared_ptr<RenderTarget>& target,
+        const std::shared_ptr<RenderTarget>& replacement,F action) {
+        const auto saved=*target;*target=*replacement;
+        try {action();}catch(...){*target=saved;throw;}
+        *target=saved;
+    }
+};
+struct NativeUiCompositeProbe {
+    template<class F>static void withReplacement(const std::shared_ptr<DepthTarget>& target,
+        const std::shared_ptr<DepthTarget>& replacement,F action) {
+        const auto saved=*target;*target=*replacement;
+        try {action();}catch(...){*target=saved;throw;}
+        *target=saved;
+    }
 };
 }
 namespace {
@@ -207,6 +231,104 @@ void run(const char* image,bool software) {
     backend.clearBindings();commit.reset();source.reset();target.reset();depth.reset();for(auto id:ids)registry.release(id);
     need(!registry.liveCount(),"Edge shader owners leaked");
 }
+bool sameDefinedDepth(const std::vector<uint8_t>& a,const std::vector<uint8_t>& b) {
+    if(a.size()!=b.size()||a.size()%8)return false;
+    for(size_t at=0;at<a.size();at+=8)if(std::memcmp(a.data()+at,b.data()+at,5))return false;
+    return true; // D32_FLOAT plus low S8 byte; X24 padding has no defined value.
+}
+void runTemporalCopyChain(const char* image,bool software) {
+    std::ifstream file(image,std::ios::binary);const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)),{});
+    NativeBackend backend(software);backend.configureRendering(1280,720,1,Antialiasing::Original,50);
+    NativeIm2DProbe::installTemporalPipeline(backend,16,16);
+    NativeMaterialCompiler compiler(backend);MaterialRegistry registry;
+    constexpr std::array<uint32_t,6> addresses={0x8202E6F0,0x8202E840,0x820301A0,0x820302EC,0x820347B0,0x82034900};
+    std::array<const CompiledMaterial*,6> shaders{};std::vector<MaterialId> ids;
+    for(size_t i=0;i<addresses.size();++i)for(const auto& record:originalMaterialIdentities())if(record.originalAddress==addresses[i]) {
+        const auto id=registry.create(record.originalAddress,std::span<const uint8_t>(bytes).subspan(record.originalAddress-0x82000000,record.recordBytes));
+        ids.push_back(id);shaders[i]=&registry.prepareForBind(id,compiler);
+    }
+    for(auto* shader:shaders)need(bool(shader),"Temporal edge shader profile is missing");
+    const auto target=[&]{return backend.createTarget(32,32,TargetFormat::RGB10A2,TargetScale::Scene);};
+    auto color=target(),base=target(),line=target(),copiedColor=target(),privateColor=target(),replacementColor=target();
+    auto depth=backend.createDepthTarget(32,32,TargetScale::Scene),copiedDepth=backend.createDepthTarget(32,32,TargetScale::Scene);
+    auto replacementDepth=backend.createDepthTarget(32,32,TargetScale::Scene);
+    backend.registerTemporalWorldTargets(color,depth);backend.clearTarget(color,{.25f,.5f,.75f,1});backend.clearDepthTarget(depth,.25f,37);
+    backend.bindTargets({color,nullptr,nullptr,nullptr},depth);backend.setViewport({0,0,32,32,0,1});
+    backend.beginTemporalScene(color,depth,0x3000,1);
+    const auto originalDepth=backend.readbackDepthTarget(depth);const auto initial=backend.temporalSceneOrigins();
+    const auto initialFrame=NativeIm2DProbe::frame(backend);
+    const auto bind=[&](size_t shader) {backend.bindTargets({color,nullptr,nullptr,nullptr},depth);backend.setViewport({0,0,32,32,0,1});
+        backend.bindEdgeShaders(*shaders[shader],*shaders[shader+1]);backend.bindEdgeDeclaration();};
+    EdgeConstants constants{};constants.kernel[0]={0,1,0,1};constants.kernel[1]={1,0,0,1};
+    constants.kernel[2]={0,-1,0,1};constants.kernel[3]={-1,0,0,1};constants.dimensions={32,32,1,0};
+    D3D11_SAMPLER_DESC sampler{};sampler.Filter=D3D11_FILTER_MIN_MAG_POINT_MIP_LINEAR;
+    sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D11_TEXTURE_ADDRESS_WRAP;
+    sampler.ComparisonFunc=D3D11_COMPARISON_NEVER;sampler.MaxAnisotropy=1;sampler.MaxLOD=13;
+    const std::array<ScreenVertex,3> corners={ScreenVertex{-1,1,0,0},ScreenVertex{1,1,1,0},ScreenVertex{-1,-1,0,1}};
+    const auto verify=[&] {
+        const auto origins=backend.temporalSceneOrigins();
+        need(origins.components[0].kind==TemporalRasterOriginKind::Uniform,"Whole filter of copied Uniform inputs did not publish Uniform");
+        need(origins.components[1]==initial.components[1]&&origins.components[2]==initial.components[2],"Color filter changed depth/stencil origin revisions");
+        need(sameDefinedDepth(backend.readbackDepthTarget(depth),originalDepth),"Color filter changed actual disabled depth/stencil pixels");
+        const auto actualFrame=NativeIm2DProbe::frame(backend);
+        need(actualFrame.geometryDraws==initialFrame.geometryDraws&&actualFrame.motionDraws==initialFrame.motionDraws,
+             "Uniform copy/filter chain changed actual owning temporal geometry/motion counts");
+        need(!backend.temporalSceneHasGeometry()&&!backend.rigidMeshDrawCount()&&!backend.skinMeshDrawCount()&&
+             !backend.ballEffectDrawCount()&&!backend.recordingExecutedDrawCount(),"A full-screen filter falsely counted as world geometry");
+    };
+    // A copied source remains valid after later Scene writes. Poison the actual
+    // destination through a real incoming private copy, then recover by complete
+    // replacement from the earlier Uniform snapshot, not by partial-write note.
+    backend.copyFront(color,base);const auto basePixels=backend.readbackTarget(base);
+    backend.clearTarget(privateColor,{.9f,.2f,.1f,0});backend.bindTargets({privateColor,nullptr,nullptr,nullptr},depth);
+    backend.copyFront(privateColor,color);
+    need(backend.temporalSceneOrigins().components[0].kind==TemporalRasterOriginKind::Unknown,"Incoming private copy did not poison main color");
+    bind(0);auto commit=backend.commitEdge(base,constants,sampler);backend.drawEdge(color,depth,commit,corners,*shaders[0],*shaders[1]);verify();
+    need(backend.readbackTarget(base)==basePixels,"Filter changed its retained copied source");
+    backend.copyFront(color,line);bind(2);commit=backend.commitEdge(line,constants,sampler,true);
+    backend.drawEdge(color,depth,commit,corners,*shaders[2],*shaders[3]);verify();
+    backend.copyFront(color,copiedColor);backend.copyDepth(depth,copiedDepth);
+    std::vector<uint8_t> palette(64*64*4);for(size_t at=0;at<palette.size();at+=4){palette[at]=51;palette[at+1]=102;palette[at+2]=204;palette[at+3]=255;}
+    EdgeAAInputs inputs{copiedColor,base,line,copiedDepth,backend.createTexture(64,64,TextureFormat::RGBA8,palette)};
+    EdgeAAConstants composite{};composite.c20_27={std::array<float,4>{64,0,0,1},{160,0,0,1},{.4f,0,0,1},{32,0,0,1},
+        {32,0,0,1},{1,0,0,1},{0,0,0,1},{1,0,0,1}};
+    composite.c48_50={std::array<float,4>{10,0,0,1},{1.5f,0,0,1},{1,0,0,1}};
+    const std::array<D3D11_SAMPLER_DESC,5> samplers={sampler,sampler,sampler,sampler,sampler};
+    bind(4);auto compositeCommit=backend.commitEdgeAA(inputs,composite,samplers);
+    backend.drawEdge(color,depth,compositeCommit,corners,*shaders[4],*shaders[5]);verify();
+    const auto filtered=backend.readbackTarget(color);uint32_t uniform{};std::memcpy(&uniform,filtered.data(),4);
+    for(size_t at=0;at<filtered.size();at+=4) {uint32_t packed{};std::memcpy(&packed,filtered.data()+at,4);
+        need(packed==uniform,"All-Uniform copy/filter chain produced spatially varying pixels");}
+    // All mutations below use real backend writer paths and actual resources.
+    // No test installs fabricated revisions or public origin receipts.
+    const auto expectUnchanged=[&](auto action) {const auto pixels=backend.readbackTarget(color);const auto before=backend.temporalSceneOrigins();
+        const auto count=backend.edgeDrawCount()+backend.aaDrawCount()+backend.edgeAADrawCount();rejects(action);
+        need(backend.readbackTarget(color)==pixels&&backend.temporalSceneOrigins().components==before.components&&
+             backend.edgeDrawCount()+backend.aaDrawCount()+backend.edgeAADrawCount()==count,"Rejected filter mutated output/origins/draw count");};
+    backend.clearTarget(base,{0,0,0,1});bind(0);commit=backend.commitEdge(base,constants,sampler);
+    expectUnchanged([&]{backend.drawEdge(color,depth,commit,corners,*shaders[0],*shaders[1]);});
+    backend.copyFront(color,base);bind(0);commit=backend.commitEdge(base,constants,sampler);
+    backend.copyFront(color,base); // Actual overwrite has identical COM owners but a new copy epoch.
+    expectUnchanged([&]{backend.drawEdge(color,depth,commit,corners,*shaders[0],*shaders[1]);});
+    ScreenDraw stripe{};stripe.vertices={ScreenVertex{-1,1,0,0},ScreenVertex{0,1,1,0},ScreenVertex{-1,-1,0,1},ScreenVertex{0,-1,1,1}};
+    stripe.color={1,0,0,1};stripe.blendSelector=3;stripe.colorWriteMask=15;
+    backend.drawScreen(base,stripe);bind(0);commit=backend.commitEdge(base,constants,sampler);
+    expectUnchanged([&]{backend.drawEdge(color,depth,commit,corners,*shaders[0],*shaders[1]);});
+    backend.copyFront(color,base);backend.clearBindings();
+    NativeRecordingProbe::withReplacement(base,replacementColor,[&] {bind(0);const auto replaced=backend.commitEdge(base,constants,sampler);
+        expectUnchanged([&]{backend.drawEdge(color,depth,replaced,corners,*shaders[0],*shaders[1]);});});
+    backend.clearBindings();backend.bindTargets({color,nullptr,nullptr,nullptr},depth);backend.copyDepth(depth,copiedDepth);
+    NativeUiCompositeProbe::withReplacement(copiedDepth,replacementDepth,[&] {bind(4);const auto replaced=backend.commitEdgeAA(inputs,composite,samplers);
+        expectUnchanged([&]{backend.drawEdge(color,depth,replaced,corners,*shaders[4],*shaders[5]);});});
+    backend.clearBindings();backend.clearDepthTarget(copiedDepth,0,19,false,true);bind(4);
+    compositeCommit=backend.commitEdgeAA(inputs,composite,samplers);
+    expectUnchanged([&]{backend.drawEdge(color,depth,compositeCommit,corners,*shaders[4],*shaders[5]);});
+    const auto wrongExtent=backend.createTarget(32,32,TargetFormat::RGB10A2,TargetScale::Fixed);backend.clearTarget(wrongExtent,{0,0,0,1});
+    bind(0);commit=backend.commitEdge(wrongExtent,constants,sampler);
+    expectUnchanged([&]{backend.drawEdge(color,depth,commit,corners,*shaders[0],*shaders[1]);});
+    backend.clearBindings();for(auto id:ids)registry.release(id);need(!registry.liveCount(),"Temporal copy-chain shader owners leaked");
+    std::printf("Verified real copy/filter Uniform recovery, clear/draw/copy epochs, backing replacement and physical coverage rejection\n");
+}
 void runScaledSampling(const char* image,bool software) {
     std::ifstream file(image,std::ios::binary);const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)),{});
     need(bytes.size()==15466496,"Wrong original image for scaled edge test");
@@ -301,5 +423,5 @@ void runScaledSampling(const char* image,bool software) {
 }
 }
 int main(int argc,char** argv){try{need(argc==2 || (argc==3 && std::string(argv[2])=="--hardware"),"Image and optional --hardware required");
-    run(argv[1],argc==2);runScaledSampling(argv[1],argc==2);std::printf("PASS %zu native edge resource/commit/geometry/pixel/depth checks\n",checks);return 0;
+    run(argv[1],argc==2);runScaledSampling(argv[1],argc==2);runTemporalCopyChain(argv[1],argc==2);std::printf("PASS %zu native edge resource/commit/geometry/pixel/depth checks\n",checks);return 0;
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL native edge after%zu checks: %s\n",checks,e.what());return 1;}}

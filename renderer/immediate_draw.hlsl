@@ -2,6 +2,7 @@
 #include "projected_immediate_shader.hlsl"
 #include "shadow_mesh.hlsl"
 cbuffer ImmediateDrawState:register(b2) {uint immediateBlend;float immediateAlphaReference;uint immediateBlendEnable;uint immediateAlphaTest;};
+#ifndef IMMEDIATE_UNORM_SNAPSHOT
 Texture2D<uint4> immediateDestination:register(t3);
 struct ImmediatePixelOutput {uint4 color:SV_Target0;float depth:SV_Depth;};
 ImmediatePixelOutput packImmediate(float4 source,float4 position) {
@@ -32,3 +33,35 @@ ImmediatePixelOutput PSRadialDraw(ImmediateOutput input) {
     precise float4 source=(immediateAlphaTest&2u)?PSRadialQuery(input):PSRadial(input);
     return packImmediate(source,input.position);
 }
+// The original packed shader has already quantized every channel. The typed
+// UNORM store recovers these codes exactly; it does not re-run the blend math.
+float4 PSImmediateUNormDraw(ImmediateOutput input,out float depth:SV_Depth):SV_Target0 {
+    ImmediatePixelOutput packed=PSImmediateDraw(input);
+    depth=packed.depth;
+    precise float4 normalized=float4(packed.color)/float4(1023,1023,1023,3);
+    return normalized;
+}
+float4 PSImmediateDualUNormDraw(ImmediateOutput input,out float depth:SV_Depth):SV_Target0 {
+    ImmediatePixelOutput packed=PSImmediateDualDraw(input);
+    depth=packed.depth;
+    precise float4 normalized=float4(packed.color)/float4(1023,1023,1023,3);
+    return normalized;
+}
+// Radial fans read their destination only at the shaded pixel, like every
+// other immediate, so they share the per-triangle snapshot instead of copying
+// the whole scene target once per triangle.
+float4 PSRadialUNormDraw(ImmediateOutput input,out float depth:SV_Depth):SV_Target0 {
+    ImmediatePixelOutput packed=PSRadialDraw(input);
+    depth=packed.depth;
+    precise float4 normalized=float4(packed.color)/float4(1023,1023,1023,3);
+    return normalized;
+}
+#else
+// Only the geometry snapshot entry sees the actual typed UNORM target at t3.
+// Keep the original VS/raster/scissor coverage, without alpha/depth rejection.
+Texture2D<float4> immediateUNormSource:register(t3);
+uint4 PSImmediateSnapshotDraw(ImmediateOutput input):SV_Target0 {
+    precise float4 codes=immediateUNormSource.Load(int3(int2(input.position.xy),0))*float4(1023,1023,1023,3);
+    return uint4(round(codes));
+}
+#endif

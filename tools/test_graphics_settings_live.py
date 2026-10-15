@@ -113,10 +113,18 @@ class Run:
     def down(self, count):
         for _ in range(count):self.send('DOWN_HOLD')
 
+    def up(self, count):
+        for _ in range(count):self.send('UP_HOLD')
+
+    def page(self, count):
+        # The menu opens on page 1 (Display) with its page row selected.
+        for _ in range(count):self.send('RIGHT_HOLD')
+
     def edit_all(self):
-        self.down(5);self.send('RIGHT_HOLD')  # 120 -> 144 FPS.
-        self.down(3);self.send('LEFT_HOLD')   # Original -> 110-degree reference.
-        self.down(1);self.send('LEFT_HOLD')   # 100 -> 75% render scale.
+        self.down(6);self.send('RIGHT_HOLD')  # Display: 120 -> 144 FPS.
+        self.down(2);self.send('LEFT_HOLD')   # Display: 100 -> 75% render scale.
+        self.up(8);self.page(2)               # Page 3 Effects.
+        self.down(1);self.send('LEFT_HOLD')   # Original -> 110-degree reference.
         for _ in range(3):
             self.down(1);self.send('RIGHT_HOLD')  # Bloom/DOF/blur Off.
 
@@ -175,11 +183,12 @@ def main():
     shutil.copytree(ROOT/config['profile_store'],folder/'profile')
     shutil.copytree(ROOT/config['content_store'],folder/'content')
     prefs=folder/'profile.video.cfg'
-    initial=['5','0','0','0','120','0','3','0','0','100','1','1','1']
-    accepted=['5','0','0','0','144','0','3','0','110','75','0','0','0']
+    initial=('10 0 0 0 120 9 0 0 0 100 1 1 1 1 1 1 0 30 1 0 '
+             '0 0 0 0 1 1 1 1 0 0 0 0 0 0 0 0 50 0 0 0 0 0 0 0').split()
+    accepted=initial.copy();accepted[4]='144';accepted[8]='110';accepted[9]='75';accepted[10:13]=['0','0','0']
     if options.probe:
         accepted[9]=str(options.probe_scale)
-        accepted[10:]=['1' if options.probe_effects=='on' else '0']*3
+        accepted[10:13]=['1' if options.probe_effects=='on' else '0']*3
         prefs.write_text(' '.join(accepted)+'\n')
         probe=folder/'probe';probe.mkdir();run=Run(probe,config)
         try:
@@ -196,11 +205,11 @@ def main():
     try:
         run.start();run.capture('scene-original',[1280,720],True)
         run.enter_video();run.capture('video-all-rows',[1280,720])
-        run.edit_all();run.capture('video-edited-bottom',[1280,720])
+        run.edit_all();run.capture('video-edited-bottom',[960,540])  # Render scale previews live.
         assert prefs.read_text().split()==initial,'Preview wrote preferences'
         run.send('B');run.send('A');run.capture('cancel-restored',[1280,720])
         assert prefs.read_text().split()==initial,'Cancel wrote preferences'
-        run.edit_all();run.resume();run.capture('scene-wide-fov-live',[1280,720],True)
+        run.edit_all();run.resume();run.capture('scene-wide-fov-live',[960,540],True)
         assert prefs.read_text().split()==accepted,prefs.read_text()
         text=run.log_path.read_text(errors='replace')
         for marker in ('fov_reference_16_9=110','frame_rate=144','bloom=0 dof=0 motion_blur=0'):
@@ -210,7 +219,7 @@ def main():
     try:
         run.start();run.capture('scene-scaled-after-restart',[960,540],True)
         run.enter_video();run.capture('video-persisted',[960,540])
-        run.down(8);run.send('RIGHT_HOLD')  # 110 -> Original; live restore.
+        run.page(2);run.down(1);run.send('RIGHT_HOLD')  # Effects: 110 -> Original; live restore.
         run.resume();run.capture('scene-original-fov-restored',[960,540],True)
         restored=accepted.copy();restored[8]='0'
         assert prefs.read_text().split()==restored,prefs.read_text()

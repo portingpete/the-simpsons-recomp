@@ -15,6 +15,15 @@ public:
     std::shared_ptr<Buffer> createBuffer(uint32_t size,BufferKind kind) override {
         return backend.createBuffer(size,kind);
     }
+    std::shared_ptr<RenderTarget> createGeometryTarget(uint32_t width,uint32_t height,TargetFormat format) override {
+        return backend.createTarget(width,height,format,TargetScale::Scene);
+    }
+    std::shared_ptr<DepthTarget> createGeometryDepthTarget(uint32_t width,uint32_t height) override {
+        return backend.createDepthTarget(width,height,TargetScale::Scene);
+    }
+    std::shared_ptr<RenderTarget> createPresentationTarget(uint32_t width,uint32_t height,TargetFormat format) override {
+        return backend.createTarget(width,height,format,TargetScale::Output);
+    }
 };
 
 template<class T> std::shared_ptr<T> owned(std::shared_ptr<T> resource) {
@@ -64,11 +73,11 @@ void StartupResources::initialize(StartupResourceFactory& factory,uint32_t width
 
     auto pending=std::make_unique<Resources>();
     pending->width=width;pending->height=height;
-    pending->defaultColor=owned(factory.createTarget(width,height,TargetFormat::RGB10A2));
-    pending->defaultDepth=owned(factory.createDepthTarget(width,height));
+    pending->defaultColor=owned(factory.createGeometryTarget(width,height,TargetFormat::RGB10A2));
+    pending->defaultDepth=owned(factory.createGeometryDepthTarget(width,height));
     pending->depthCopy=owned(factory.createDepthTarget(width,height));
-    pending->frontColor0=owned(factory.createTarget(width,height,TargetFormat::RGB10A2));
-    pending->frontColor1=owned(factory.createTarget(width,height,TargetFormat::RGB10A2));
+    pending->frontColor0=owned(factory.createPresentationTarget(width,height,TargetFormat::RGB10A2));
+    pending->frontColor1=owned(factory.createPresentationTarget(width,height,TargetFormat::RGB10A2));
     pending->colorCopy=owned(factory.createTarget(width,height,TargetFormat::RGB10A2));
     pending->scratchIndex=owned(factory.createBuffer(ScratchIndexBytes,BufferKind::Index16));
     for(auto& vertex:pending->vertices) vertex=owned(factory.createBuffer(VertexBytes,BufferKind::Vertex));

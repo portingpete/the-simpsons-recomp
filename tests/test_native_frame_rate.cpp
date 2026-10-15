@@ -1,11 +1,14 @@
 #include "runtime/runtime.h"
 #include "runtime/engine_cpu_calls.h"
+#include "header/test_frame_pacer.h"
+#include <dwmapi.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <bit>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 void SimpsonsNativeGameplayClockAdvance(PPCContext&,uint8_t*);
 
@@ -277,7 +280,7 @@ int main(int argc,char** argv){try {
         c.lr=0x82867A78;const auto sp=c.r1.u32;
         need(cpu.invoke(0x82718D48,owner,2)==owner,"Original scheduler constructor return changed");
         need(c.r1.u32==sp && c.lr==0x82867A78,"Frame-rate selection changed the constructor ABI");
-        need(PPC_LOAD_U32(owner+144)==(rate==60?1u:(rate?0u:2u)),"Original scheduler did not publish the selected interval");
+        need(PPC_LOAD_U32(owner+144)==(rate?0u:2u),"Original scheduler did not publish the selected interval");
         if(!rate)std::memcpy(original.data(),rt.pointer(owner,148,false),148);
         else for(uint32_t i=0;i<148;++i)if(i<136 || (i>=140 && i<144))
             need(rt.pointer(owner,148,false)[i]==original[i],"Frame-rate option changed another original constructor field");
@@ -304,7 +307,7 @@ int main(int argc,char** argv){try {
     for(const auto rate:{120u,0u,60u,30u,90u,144u,165u,240u}) {
         std::array<uint8_t,148> before{};std::memcpy(before.data(),rt.pointer(owner,148,false),148);
         rt.videoSettings.frameRate=rate;applyNativeFrameRate(rt);
-        need(PPC_LOAD_U32(owner+144)==(rate==60?1u:0u),"Live Video menu limit did not update the original scheduler");
+        need(PPC_LOAD_U32(owner+144)==0u,"Live Video menu limit did not disable the original refresh wait");
         need(rt.requestedFrameRate==rate&&rt.uncappedFrameRate==(rate==0),"Live Video menu and native pacing disagree");
         need(!std::memcmp(before.data(),rt.pointer(owner,144,false),144),"Live Video limit modified another scheduler field");
     }
@@ -363,7 +366,29 @@ int main(int argc,char** argv){try {
         need(releases[300]-releases[299]==500*ms,"A stall was shortened or lengthened by the limiter");
         for(size_t i=500;i<releases.size();++i)need(releases[i]-releases[i-1]==10*ms,"The target did not recover after a stall");
     }
-    for(const auto rate:{30u,90u,144u,165u,240u}) {
+    FramePacerTests::run(need);
+    {   // With VSync, the live limiter follows the display's own refresh grid (DWM) instead
+        // of a free-running 120.000 FPS clock, which beats against a 119.84 Hz display.
+        DWM_TIMING_INFO info{};info.cbSize=sizeof(info);LARGE_INTEGER frequency{};QueryPerformanceFrequency(&frequency);
+        if(SUCCEEDED(DwmGetCompositionTimingInfo(nullptr,&info)) && info.qpcRefreshPeriod && frequency.QuadPart>0) {
+            const uint64_t period=uint64_t(info.qpcRefreshPeriod)*Runtime::timebaseFrequency/uint64_t(frequency.QuadPart);
+            const uint64_t cap=(Runtime::timebaseFrequency+119)/120;
+            const uint32_t refreshes=Simpsons::refreshesPerFrame(cap,period);
+            const uint64_t expected=refreshes?period*refreshes:cap;
+            rt.requestedFrameRate=120;rt.uncappedFrameRate=false;rt.vsyncEnabled=true;rt.framePacer.reset();
+            std::vector<uint64_t> wakes;
+            for(unsigned i=0;i<40;++i){SimpsonsNativeFramePace(rt);wakes.push_back(PPCQueryTimebase());}
+            std::vector<uint64_t> intervals;
+            for(size_t i=1;i<wakes.size();++i)intervals.push_back(wakes[i]-wakes[i-1]);
+            std::nth_element(intervals.begin(),intervals.begin()+intervals.size()/2,intervals.end());
+            const uint64_t median=intervals[intervals.size()/2];
+            need(rt.framePacer.locked()==(refreshes!=0),"VSync limiter did not choose refresh locking for this display");
+            need(median+Runtime::timebaseFrequency/4000>=expected && median<=expected+Runtime::timebaseFrequency/4000,
+                 "VSync limiter cadence differs from the display refresh grid");
+            rt.vsyncEnabled=false;rt.framePacer.reset();
+        } else std::printf("SKIP live refresh locking: DWM composition timing unavailable\n");
+    }
+    for(const auto rate:{30u,60u,90u,144u,165u,240u}) {
         rt.requestedFrameRate=rate;rt.uncappedFrameRate=false;
         const uint64_t floor=(Runtime::timebaseFrequency+rate-1)/rate;
         rt.framePacer.reset();SimpsonsNativeFramePace(rt);
@@ -375,7 +400,8 @@ int main(int argc,char** argv){try {
         rt.videoSettings.frameRate=120;applyNativeFrameRate(rt);
         need(rt.framePacer.target(Runtime::timebaseFrequency/120)==Runtime::timebaseFrequency/120,"Live rate change did not discard the previous pacing history");
     }
-    rt.requestedFrameRate=0;rejects([&]{SimpsonsNativeFramePace(rt);});
+    rt.requestedFrameRate=0;SimpsonsNativeFramePace(rt);
+    need(rt.pacingFrameRate==0,"Unlimited pacing retained the previous effective cap");
     rt.requestedFrameRate=121;rejects([&]{SimpsonsNativeFramePace(rt);});
     rt.requestedFrameRate=120;
     rt.requestedFrameRate=60;

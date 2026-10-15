@@ -13,6 +13,8 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <thread>
+#include <vector>
 #include <xmmintrin.h>
 
 namespace Simpsons::Audio {
@@ -47,6 +49,7 @@ struct NativeAudioOutput::State final:IXAudio2VoiceCallback,IXAudio2EngineCallba
         std::array<float,blockSamples> pcm{};
         uint64_t sequence=0; // Public API mutex only. Callbacks never read it.
         std::atomic<uint32_t> status{Free};
+        std::atomic<int64_t> due{0}; // Silent clock: QPC time this buffer is consumed.
     };
     const uint64_t generation=newGeneration();
     const Options options;
@@ -57,6 +60,11 @@ struct NativeAudioOutput::State final:IXAudio2VoiceCallback,IXAudio2EngineCallba
     IXAudio2MasteringVoice* master{};
     IXAudio2SourceVoice* source{};
     bool registered=false,configured=false,running=false,stopped=false;
+    // Silent graph: no XAudio2 objects; `clock` completes buffers in real time.
+    bool silent=false;
+    std::atomic<bool> clockRunning{false};
+    std::thread clock;
+    int64_t frequency=0,clockNext=0; // QPC ticks; clockNext under the API mutex.
     Endpoint endpoint{};
     Routing route;
     std::unique_ptr<Slot[]> slots;
@@ -100,6 +108,7 @@ struct NativeAudioOutput::State final:IXAudio2VoiceCallback,IXAudio2EngineCallba
         APTTYPE apartment;APTTYPEQUALIFIER qualifier;
         checked(CoGetApartmentType(&apartment,&qualifier),"Output creation requires caller COM initialization");
         require(apartment==APTTYPE_MTA,"Output creation requires caller MTA");
+        if(options.silent) {openSilent(S_OK);return;}
         checked(XAudio2Create(&engine,0,XAUDIO2_DEFAULT_PROCESSOR),"XAudio2Create");
         checked(engine->RegisterForCallbacks(this),"Register output error callback");registered=true;
         const auto masterStatus=engine->CreateMasteringVoice(&master,XAUDIO2_DEFAULT_CHANNELS,sampleRate,
@@ -108,6 +117,12 @@ struct NativeAudioOutput::State final:IXAudio2VoiceCallback,IXAudio2EngineCallba
             "[NATIVE AUDIO MASTER FAILURE] channels=%u rate=%u flags=%08X device=%ls effects=null category=%u HRESULT=%08X\n",
             unsigned(XAUDIO2_DEFAULT_CHANNELS),sampleRate,masteringFlags,
             options.deviceId.empty()?L"<default>":options.deviceId.c_str(),unsigned(AudioCategory_GameEffects),unsigned(masterStatus));
+        if(FAILED(masterStatus) && options.deviceId.empty() && unavailable(masterStatus)) {
+            // No default endpoint at all: keep the audio cadence silently instead
+            // of failing startup. A pinned device still fails.
+            engine->UnregisterForCallbacks(this);registered=false;engine->Release();engine=nullptr;
+            openSilent(masterStatus);return;
+        }
         checked(masterStatus,"Create output mastering voice");
         checked(master->SetVolume(options.muted?0.0f:1.0f),"Set output master volume");
         float volume=-1;master->GetVolume(&volume);
@@ -121,6 +136,42 @@ struct NativeAudioOutput::State final:IXAudio2VoiceCallback,IXAudio2EngineCallba
         std::fprintf(stderr,"[NATIVE AUDIO ENDPOINT] flags=%08X mode=%s channels=%u mask=%08X rate=%u\n",
             masteringFlags,options.deviceId.empty()?"default-virtual":"explicit-pinned",endpoint.channels,endpoint.channelMask,endpoint.sampleRate);
     }
+    static bool unavailable(HRESULT status) noexcept {
+        constexpr HRESULT audioClientDeviceInvalidated=HRESULT(0x88890004); // AUDCLNT_E_DEVICE_INVALIDATED
+        return status==HRESULT_FROM_WIN32(ERROR_NOT_FOUND) || status==XAUDIO2_E_DEVICE_INVALIDATED ||
+               status==audioClientDeviceInvalidated;
+    }
+    void openSilent(HRESULT reason) {
+        LARGE_INTEGER ticks{};QueryPerformanceFrequency(&ticks);frequency=ticks.QuadPart;
+        silent=true;
+        endpoint={2,sampleRate,SPEAKER_FRONT_LEFT|SPEAKER_FRONT_RIGHT,options.muted};
+        clock=std::thread([this]{runClock();});
+        std::fprintf(stderr,"[NATIVE AUDIO ENDPOINT] silent real-time clock channels=2 mask=00000003 rate=%u reason=%08X; no playback device\n",
+            sampleRate,unsigned(reason));
+    }
+    int64_t period() const noexcept {return frequency*blockFrames/sampleRate;}
+    // Stands in for the engine thread: completes due buffers (dues ascend with
+    // submission order) and signals every pass, like OnProcessingPassEnd. Like
+    // the XAudio2 callbacks it never takes the API mutex.
+    void runClock() noexcept {
+        HANDLE timer=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS);
+        while(!closing.load(std::memory_order_acquire)) {
+            if(clockRunning.load(std::memory_order_acquire)) {
+                LARGE_INTEGER now{};QueryPerformanceCounter(&now);
+                for(uint32_t i=0;i<options.capacity;++i) {
+                    auto& slot=slots[i];
+                    if(slot.status.load(std::memory_order_acquire)!=Pending || slot.due.load(std::memory_order_relaxed)>now.QuadPart)continue;
+                    uint32_t expected=Pending;
+                    slot.status.compare_exchange_strong(expected,Consumed,std::memory_order_release,std::memory_order_relaxed);
+                }
+            }
+            signal();
+            LARGE_INTEGER wait{};wait.QuadPart=-50000; // 5 ms, about one 256-frame block.
+            if(!timer || !SetWaitableTimerEx(timer,&wait,0,nullptr,nullptr,nullptr,0) ||
+               WaitForSingleObject(timer,100)!=WAIT_OBJECT_0)Sleep(5);
+        }
+        if(timer)CloseHandle(timer);
+    }
     // Caller owns the API mutex, or construction/destruction is exclusive.
     // Callbacks NEVER acquire that mutex, allocate, free, log or call client code.
     void close() noexcept {
@@ -133,6 +184,7 @@ struct NativeAudioOutput::State final:IXAudio2VoiceCallback,IXAudio2EngineCallba
             if(registered){engine->UnregisterForCallbacks(this);registered=false;}
             engine->Release();engine=nullptr;
         }
+        if(clock.joinable())clock.join(); // `closing` stops the silent clock.
         // The graph no longer accesses callback/context/PCM storage. No Flush:
         // its OnBufferEnd could otherwise mislabel discarded data as consumed.
         for(uint32_t i=0;i<options.capacity;++i) {
@@ -179,6 +231,7 @@ NativeAudioOutput::NativeAudioOutput(const Options& options):state(std::make_uni
 NativeAudioOutput::~NativeAudioOutput() {stop();}
 NativeAudioOutput::Endpoint NativeAudioOutput::endpoint() const {return state->endpoint;}
 uint64_t NativeAudioOutput::generation() const noexcept {return state->generation;}
+bool NativeAudioOutput::silent() const noexcept {return state->silent;}
 void NativeAudioOutput::configure(const Routing& routing) {
     auto& s=*state;std::lock_guard lock(s.mutex);FloatingPoint fp;s.usable();
     require(!s.configured,"Output routing is immutable after configuration");
@@ -191,6 +244,7 @@ void NativeAudioOutput::configure(const Routing& routing) {
     format.Format={WAVE_FORMAT_EXTENSIBLE,channels,sampleRate,sampleRate*channels*4,channels*4,32,22};
     format.Samples.wValidBitsPerSample=32;format.dwChannelMask=routing.sourceChannelMask;
     format.SubFormat=KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+    if(s.silent) {s.route=std::move(owned);s.configured=true;return;}
     try {
         s.backend(s.engine->CreateSourceVoice(&s.source,&format.Format,0,1.0f,&s,nullptr,nullptr),"Create six-channel source voice");
         s.backend(s.source->SetVolume(s.options.muted?0.0f:1.0f),"Set source volume");
@@ -200,6 +254,13 @@ void NativeAudioOutput::configure(const Routing& routing) {
         require(actual==owned.matrix,"Native output matrix readback differs");
         s.route=std::move(owned);s.configured=true;s.usable();
     }catch(...){s.close();throw;}
+}
+void NativeAudioOutput::setVolume(float volume) {
+    auto& s=*state;std::lock_guard lock(s.mutex);
+    require(std::isfinite(volume)&&volume>=0&&volume<=1,"Output volume must be within 0..1");
+    if(s.stopped||s.silent||s.options.muted||!s.master)return;
+    FloatingPoint fp;
+    s.backend(s.master->SetVolume(volume),"Set output master volume");
 }
 NativeAudioOutput::Routing NativeAudioOutput::routing() const {
     auto& s=*state;std::lock_guard lock(s.mutex);require(s.configured,"Output routing has not been configured");return s.route;
@@ -217,6 +278,12 @@ void NativeAudioOutput::configureWindows51() {
     format.Format={WAVE_FORMAT_EXTENSIBLE,channels,sampleRate,sampleRate*channels*4,channels*4,32,22};
     format.Samples.wValidBitsPerSample=32;format.dwChannelMask=owned.sourceChannelMask;
     format.SubFormat=KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+    if(s.silent) {
+        // Standard 5.1 fold-down onto the stereo stand-in endpoint.
+        constexpr float half=0.70710678f;
+        owned.matrix={1,0,half,0,half,0, 0,1,half,0,0,half};
+        s.route=std::move(owned);s.configured=true;return;
+    }
     try {
         // Poison unwritten values: GetOutputMatrix is void, so HRESULT alone
         // cannot validate its readback. Preserve the returned coefficients as-is.
@@ -240,7 +307,17 @@ void NativeAudioOutput::configureWindows51() {
 }
 void NativeAudioOutput::start() {
     auto& s=*state;std::lock_guard lock(s.mutex);FloatingPoint fp;s.usable();require(s.configured,"Output routing required before start");
-    if(!s.running){s.backend(s.source->Start(),"Start native output");s.running=true;}
+    if(s.running)return;
+    if(s.silent) {
+        // Buffers queued before start begin consuming now, in submission order.
+        std::vector<State::Slot*> queued;
+        for(uint32_t i=0;i<s.options.capacity;++i) if(s.slots[i].status.load()==State::Pending)queued.push_back(&s.slots[i]);
+        std::sort(queued.begin(),queued.end(),[](const auto* a,const auto* b){return a->sequence<b->sequence;});
+        LARGE_INTEGER now{};QueryPerformanceCounter(&now);s.clockNext=now.QuadPart;
+        for(auto* slot:queued){s.clockNext+=s.period();slot->due.store(s.clockNext,std::memory_order_relaxed);}
+        s.clockRunning.store(true,std::memory_order_release);s.running=true;return;
+    }
+    s.backend(s.source->Start(),"Start native output");s.running=true;
 }
 NativeAudioOutput::Submission NativeAudioOutput::submit(std::span<const float> samples) {
     auto& s=*state;std::lock_guard lock(s.mutex);FloatingPoint fp;s.usable();require(s.configured,"Output routing required before submission");
@@ -251,6 +328,14 @@ NativeAudioOutput::Submission NativeAudioOutput::submit(std::span<const float> s
     if(!slot) return {SubmitStatus::Backpressure,{}};
     require(s.nextSequence!=std::numeric_limits<uint64_t>::max(),"Output receipt sequence exhausted");
     std::copy(samples.begin(),samples.end(),slot->pcm.begin());slot->sequence=s.nextSequence++;
+    if(s.silent) {
+        // An idle clock restarts at the present, as a starved voice would.
+        LARGE_INTEGER now{};QueryPerformanceCounter(&now);
+        s.clockNext=std::max(s.clockNext,int64_t(now.QuadPart))+s.period();
+        slot->due.store(s.clockNext,std::memory_order_relaxed);
+        slot->status.store(State::Pending,std::memory_order_release);
+        return {SubmitStatus::Accepted,{s.generation,slot->sequence}};
+    }
     slot->status.store(State::Pending,std::memory_order_release);
     XAUDIO2_BUFFER buffer{};buffer.AudioBytes=sizeof(slot->pcm);buffer.pAudioData=reinterpret_cast<const BYTE*>(slot->pcm.data());buffer.pContext=slot;
     const HRESULT hr=s.source->SubmitSourceBuffer(&buffer);

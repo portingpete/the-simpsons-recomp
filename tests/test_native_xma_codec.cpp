@@ -155,6 +155,35 @@ int main(int argc,char** argv) {
         NativeXmaFactory factory;
         auto transferred=factory.create({1,48000,XmaVariant::Xma1});
         auto use=std::async(std::launch::async,[&]{decode(*transferred,fixtures[1],1,true);});use.get();
+        {
+            // Pooled decoders: a decoder returned mid-stream (one packet accepted,
+            // part of a frame read) comes back reset and decodes the pinned oracle
+            // exactly like a newly opened one. Formats never mix; the pool is bounded.
+            NativeXmaCodecPool pool(2);
+            const XmaFormat mono{1,48000,XmaVariant::Xma2},stereo{2,48000,XmaVariant::Xma2};
+            auto first=pool.take(mono);
+            need(push(*first,{fixtures[1].bytes.data(),2048})==PacketResult::Accepted,"Pooled decoder rejected a packet");
+            std::vector<float> partial;need(pull(*first,partial,3)==3,"Pooled decoder did not decode before return");
+            const auto* address=first.get();
+            pool.give(std::move(first));
+            need(pool.idleDecoders()==1 && !pool.reused(),"Returned decoder was not kept idle");
+            need(pool.take(stereo)->format().channels==2 && pool.idleDecoders()==1,"A pooled decoder changed format");
+            auto again=pool.take(mono);
+            need(again.get()==address && pool.reused()==1 && !pool.idleDecoders(),"Idle decoder was not reused");
+            decode(*again,fixtures[1],1,true);
+            pool.give(std::move(again));
+            pool.reserve(mono,3);
+            need(pool.idleDecoders()==2,"Pool exceeded its per-format bound");
+            pool.reserve(stereo,1);
+            need(pool.idleDecoders()==3,"Per-format bound blocked another format");
+            auto ring=pool.takeRing(4096);need(ring.size()==4096,"Ring size changed");
+            const auto* storage=ring.data();pool.giveRing(std::move(ring));
+            need(pool.takeRing(2048).size()==2048 && pool.takeRing(4096).data()==storage,"Ring was not reused by size");
+            // Factory decoders come from its shared pool.
+            NativeXmaFactory pooled;auto created=pooled.create(mono);const auto* createdAddress=created.get();
+            pooled.pool()->give(std::move(created));
+            need(pooled.create(mono).get()==createdAddress && pooled.pool()->reused()==1,"Factory did not use its pool");
+        }
         std::cout<<"Native XMA ownership PASS: "<<checks<<" checks; no output device or EOF packet\n";
         return 0;
     }catch(const std::exception& error){std::cerr<<"Native XMA ownership FAIL: "<<error.what()<<'\n';return 1;}

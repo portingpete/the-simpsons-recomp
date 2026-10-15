@@ -1,4 +1,6 @@
+#include "temporal_scene.h"
 #include "skin_mesh.h"
+#include "skin_detail.h"
 #include "runtime/stall_profiler.h"
 #include "common/geometry_extent.h"
 #include "immutable_depth_constants.h"
@@ -34,6 +36,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <map>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -165,6 +169,59 @@ struct NativeSkinMesh::State {
     ComPtr<ID3D11VertexShader> drawVertex;
     uint32_t vertexCount{},vertexAddress{};R16Indices indexValues;
     DepthConstantsCache depthConstants;
+    // Character detail (restart-only): each immediate draw range's smoothed
+    // list is built on the backend's worker after its first draw and uploaded
+    // once done; until then the original range draws. Recorded draws build
+    // theirs at record time. Kept with the cached mesh.
+    struct Detail {
+        ComPtr<ID3D11Buffer> vertices,indices;uint32_t indexCount{};
+        std::shared_ptr<SkinDetailJob> job;bool failed{};
+    };
+    uint32_t detailSegments=1;
+    std::shared_ptr<SkinDetailSource> detailSource;
+    std::map<std::tuple<uint32_t,uint32_t,int32_t>,Detail> details;
+    // now: needed at once (recorded draws keep what they record), so a range
+    // the worker has not finished is built here instead of waiting behind the
+    // worker's queue. uploads: ranges uploaded this frame; one per frame
+    // unless needed now.
+    const Detail* detail(SkinDetailWorker* worker,uint32_t& uploads,uint32_t start,uint32_t count,int32_t base,bool now) {
+        if(detailSegments<2||!detailSource||!worker)return nullptr;
+        auto& entry=details[std::make_tuple(start,count,base)];
+        if(entry.indexCount)return &entry;
+        if(entry.failed)return nullptr;
+        if(!entry.job&&!now) {
+            entry.job=std::make_shared<SkinDetailJob>();
+            entry.job->source=detailSource;entry.job->startIndex=start;entry.job->indexCount=count;
+            entry.job->baseVertex=base;entry.job->segments=detailSegments;
+            worker->submit(entry.job);
+            return nullptr;
+        }
+        const bool ready=entry.job&&entry.job->done.load(std::memory_order_acquire);
+        if(!now&&(!ready||uploads))return nullptr;
+        SkinDetailGeometry local;std::string error;
+        if(ready)error=entry.job->error;
+        else {
+            // The worker owns the mesh's shared smoothing normals; use a private
+            // copy. A queued job for this range finishes unused.
+            StallProfiler::Scope build(StallProfiler::Section::Rendering,"Mesh.skin.detail.build",nullptr,reinterpret_cast<uintptr_t>(indices.Get()));
+            const auto& source=*detailSource;
+            try {local=buildSkinDetail(source.vertices,skinSmoothingNormals(source.vertices),source.indices,start,count,base,detailSegments);}
+            catch(const std::exception& failure) {error=failure.what();}
+        }
+        const auto& geometry=ready?entry.job->geometry:local;
+        if(!error.empty())std::fprintf(stderr,"[NATIVE CHARACTER DETAIL] range %u+%u kept original: %s\n",start,count,error.c_str());
+        if(geometry.indices.empty()||!validNativeMeshBufferExtent(geometry.vertices.size(),sizeof(SkinVertex))||
+           !validNativeMeshBufferExtent(geometry.indices.size(),sizeof(uint32_t))) {
+            entry.failed=true;entry.job.reset();return nullptr;
+        }
+        StallProfiler::Scope profile(StallProfiler::Section::Rendering,"Mesh.skin.detail.upload",nullptr,reinterpret_cast<uintptr_t>(indices.Get()));
+        entry.vertices=buffer(device.Get(),geometry.vertices.data(),UINT(geometry.vertices.size()*sizeof(SkinVertex)),
+                              D3D11_BIND_VERTEX_BUFFER,D3D11_USAGE_IMMUTABLE);
+        entry.indices=buffer(device.Get(),geometry.indices.data(),UINT(geometry.indices.size()*sizeof(uint32_t)),
+                             D3D11_BIND_INDEX_BUFFER,D3D11_USAGE_IMMUTABLE);
+        entry.indexCount=uint32_t(geometry.indices.size());entry.job.reset();++uploads;
+        return &entry;
+    }
     void validate(const NativeBackend* backend,ID3D11Device* expected) const {
         need(owner==backend&&thread==GetCurrentThreadId()&&device.Get()==expected&&vertices&&indices&&layout&&pixel&&
              alphaPixel&&((vertexAddress==0x82007C1C)==bool(drawVertex)),
@@ -229,6 +286,13 @@ std::shared_ptr<NativeSkinMesh> NativeBackend::uploadSkinMesh(std::span<const Sk
     }
     auto result=std::make_unique<NativeSkinMesh::State>();result->owner=this;result->thread=owner;result->device=device;
     result->vertexCount=uint32_t(vertices.size());result->vertexAddress=profile.exactPass?vertexAddress:profile.opaqueVertex;result->indexValues.assign(indices.begin(),indices.end());
+    result->detailSegments=skinDetailSegments(characterDetail_);
+    if(result->detailSegments>1) {
+        if(!skinDetailWorker_)skinDetailWorker_=std::make_shared<SkinDetailWorker>();
+        result->detailSource=std::make_shared<SkinDetailSource>();
+        result->detailSource->vertices.assign(vertices.begin(),vertices.end());
+        result->detailSource->indices.assign(indices.begin(),indices.end());
+    }
     result->vertices=buffer(device.Get(),vertices.data(),UINT(vertices.size_bytes()),D3D11_BIND_VERTEX_BUFFER,D3D11_USAGE_IMMUTABLE);
     result->indices=buffer(device.Get(),indices.data(),UINT(indices.size_bytes()),D3D11_BIND_INDEX_BUFFER,D3D11_USAGE_IMMUTABLE);
     std::vector<D3D11_INPUT_ELEMENT_DESC> elements(SkinInputElements.begin(),SkinInputElements.end());
@@ -297,6 +361,7 @@ template<class T>void inheritSkin(T& material,const T& live,const NativeRecordin
     }
 }
 struct RecordedSkinDraw {
+    std::shared_ptr<TemporalGeometryDraw> temporal;
     ComPtr<ID3D11Device> device;
     const NativeBackend* owner{};
     DWORD thread{};
@@ -324,6 +389,7 @@ struct RecordedSkinDraw {
     D3D11_RECT scissor{};
     uint32_t indexCount{},startIndex{},sampleMask{};
     int32_t baseVertex{};
+    uint32_t detailIndexCount{}; // Nonzero: vertices/indices are the smoothed R32 list.
     NativeRecordingMask inputMask{};
     void record(ID3D11DeviceContext* destination) const {
         auto* target=color.Get();destination->OMSetRenderTargets(1,&target,depth.Get());
@@ -349,9 +415,12 @@ struct RecordedSkinDraw {
         std::array<ID3D11Buffer*,D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> streams{};streams[0]=vertices.Get();
         std::array<UINT,D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> strides{},offsets{};strides[0]=sizeof(SkinVertex);
         destination->IASetVertexBuffers(0,UINT(streams.size()),streams.data(),strides.data(),offsets.data());
-        destination->IASetInputLayout(layout.Get());destination->IASetIndexBuffer(indices.Get(),DXGI_FORMAT_R16_UINT,0);
-        destination->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-        forEachOriginalR16StripChunk(startIndex,indexCount,[&](uint32_t n,uint32_t first){destination->DrawIndexed(n,first,baseVertex);});
+        destination->IASetInputLayout(layout.Get());
+        destination->IASetIndexBuffer(indices.Get(),detailIndexCount?DXGI_FORMAT_R32_UINT:DXGI_FORMAT_R16_UINT,0);
+        destination->IASetPrimitiveTopology(detailIndexCount?D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST:D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        if(temporal)temporal->bind(destination);
+        if(detailIndexCount)destination->DrawIndexed(detailIndexCount,0,0);
+        else forEachOriginalR16StripChunk(startIndex,indexCount,[&](uint32_t n,uint32_t first){destination->DrawIndexed(n,first,baseVertex);});
     }
 };
 void NativeBackend::drawSkinMesh(const std::shared_ptr<RenderTarget>& target,const std::shared_ptr<DepthTarget>& depth,
@@ -392,7 +461,8 @@ void NativeBackend::drawSkinMesh(const std::shared_ptr<RenderTarget>& target,con
     const float bias=std::bit_cast<float>(d.depthBiasBits),slope=std::bit_cast<float>(d.slopeBiasBits);
     need(std::isfinite(bias)&&std::isfinite(slope)&&std::isfinite(slope*16),"Native skin bias is nonfinite or overflows");
     validateFrontTarget(target);validateDepthCopyTarget(depth);
-    need(depth->width==target->width&&depth->height==target->height,"Native skin attachment dimensions differ");
+    need(depth->width==target->width&&depth->height==target->height&&depth->storageWidth()==target->pixelWidth()&&depth->storageHeight()==target->pixelHeight(),
+         "Native skin attachment dimensions differ");
     const bool reverse=d.viewport[4]==0x3F800000&&d.viewport[5]==0;
     need(d.viewport[0]==0&&d.viewport[1]==0&&d.viewport[2]==target->width&&d.viewport[3]==target->height&&
          (reverse||(d.viewport[4]==0&&d.viewport[5]==0x3F800000)),"Native skin requires a full-target viewport with depth0..1 or1..0");
@@ -418,11 +488,11 @@ void NativeBackend::drawSkinMesh(const std::shared_ptr<RenderTarget>& target,con
     // All validation above precedes lookup; misses create once and publish.
     // The per-mesh depth-constant cache is retained as a fast path; the
     // backend cache covers misses across meshes for steadier frame times.
-    const DepthConstants values{uint32_t(reverse),d.depthBiasBits,d.slopeBiasBits,0};
+    const DepthConstants values{uint32_t(reverse),d.depthBiasBits,d.slopeBiasBits,uint32_t(cleanEyes_)};
     ComPtr<ID3D11Buffer> constants;
     if(auto* hit=m.depthConstants.find(values))constants=hit;
     else {
-        constants=sceneDepthConstantBuffer(uint32_t(reverse),d.depthBiasBits,d.slopeBiasBits);
+        constants=sceneDepthConstantBuffer(uint32_t(reverse),d.depthBiasBits,d.slopeBiasBits,uint32_t(cleanEyes_));
         m.depthConstants.publish(values,constants.Get());
     }
     auto depthState=sceneDepthState(d.depthEnable,d.depthWrite,d.depthCompare);
@@ -443,11 +513,30 @@ void NativeBackend::drawSkinMesh(const std::shared_ptr<RenderTarget>& target,con
         auto* cb=constants.Get();context->PSSetConstantBuffers(1,1,&cb);context->PSSetShader(alpha?m.alphaPixel.Get():m.pixel.Get(),nullptr,0);
         if(shadowed)for(UINT i=0;i<2;++i){auto* sampler=samplers[i].Get();context->PSSetSamplers(i,1,&sampler);}
         else if(material)for(UINT i=0;i<(profile.second?2u:1u);++i){auto* sampler=samplers[i].Get();context->PSSetSamplers(i,1,&sampler);}
-        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        // Character detail draws the smoothed list of the same range, then
+        // puts the original stream bindings back.
+        const auto* detail=m.detail(skinDetailWorker_.get(),skinDetailUploads_,d.startIndex,d.indexCount,d.baseVertex,false);
+        if(detail) {
+            auto* stream=detail->vertices.Get();const UINT stride=sizeof(SkinVertex),offset=0;
+            context->IASetVertexBuffers(0,1,&stream,&stride,&offset);context->IASetIndexBuffer(detail->indices.Get(),DXGI_FORMAT_R32_UINT,0);
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        } else context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
         StallProfiler::Scope drawProfile(StallProfiler::Section::Rendering,"D3D11.DrawIndexed.skin",nullptr,reinterpret_cast<uintptr_t>(m.indices.Get()));
-        forEachOriginalR16StripChunk(d.startIndex,d.indexCount,[&](uint32_t n,uint32_t first){context->DrawIndexed(n,first,d.baseVertex);});
+        auto temporal=temporalGeometryDraw(target,depth,d,vertex.originalAddress(),1);
+        if(temporal){const auto raw=temporalVertexConstants();temporal->prepare(context.Get(),raw,false);}
+        {
+            ScopedTemporalGeometryDraw temporalBindings(context.Get(),temporal);
+            if(detail){context->DrawIndexed(detail->indexCount,0,0);++skinDetailDraws;}
+            else forEachOriginalR16StripChunk(d.startIndex,d.indexCount,[&](uint32_t n,uint32_t first){context->DrawIndexed(n,first,d.baseVertex);});
+        }
+        if(detail) {
+            auto* stream=m.vertices.Get();const UINT stride=sizeof(SkinVertex),offset=0;
+            context->IASetVertexBuffers(0,1,&stream,&stride,&offset);context->IASetIndexBuffer(m.indices.Get(),DXGI_FORMAT_R16_UINT,0);
+        }
         drawProfile.finish();
         ++skinMeshDraws;
+        noteTemporalSceneDraw(target,depth,d.colorMask,d.depthEnable&&d.depthWrite,false,
+            temporal?std::optional{temporalSceneJitter()}:std::nullopt);
     }
     bindings();requireOwner();
 }
@@ -504,7 +593,8 @@ void NativeBackend::recordSkinMesh(const std::shared_ptr<NativeRecordingPayload>
     const float bias=std::bit_cast<float>(d.depthBiasBits),slope=std::bit_cast<float>(d.slopeBiasBits);
     need(std::isfinite(bias)&&std::isfinite(slope)&&std::isfinite(slope*16),"Native skin bias is nonfinite or overflows");
     validateFrontTarget(target);validateDepthCopyTarget(depth);
-    need(depth->width==target->width&&depth->height==target->height,"Native skin attachment dimensions differ");
+    need(depth->width==target->width&&depth->height==target->height&&depth->storageWidth()==target->pixelWidth()&&depth->storageHeight()==target->pixelHeight(),
+         "Native skin attachment dimensions differ");
     const bool reverse=d.viewport[4]==0x3F800000&&d.viewport[5]==0;
     need(d.viewport[0]==0&&d.viewport[1]==0&&d.viewport[2]==target->width&&d.viewport[3]==target->height&&
          (reverse||(d.viewport[4]==0&&d.viewport[5]==0x3F800000)),"Native skin requires a full-target viewport with depth0..1 or1..0");
@@ -525,6 +615,9 @@ void NativeBackend::recordSkinMesh(const std::shared_ptr<NativeRecordingPayload>
             draw->samplers[1]=sceneSamplerState(materialSampling(d.samplers[1]));}
     }
     draw->vertices=m.vertices;draw->indices=m.indices;draw->layout=m.layout;draw->drawPixel=alpha?m.alphaPixel:m.pixel;
+    if(const auto* detail=m.detail(skinDetailWorker_.get(),skinDetailUploads_,d.startIndex,d.indexCount,d.baseVertex,true)) {
+        draw->vertices=detail->vertices;draw->indices=detail->indices;draw->detailIndexCount=detail->indexCount;
+    }
     draw->color=target->view;draw->depth=depth->view;draw->indexCount=d.indexCount;draw->startIndex=d.startIndex;draw->baseVertex=d.baseVertex;
     draw->sampleMask=d.multisampleMask;draw->inputMask=receipt.inputMask;
     draw->viewport=renderViewport(target,{0,0,float(target->width),float(target->height),0,1});
@@ -536,8 +629,9 @@ void NativeBackend::recordSkinMesh(const std::shared_ptr<NativeRecordingPayload>
     // Compare bytes so signed zero changes remain observable to the shader.
     std::memcpy(draw->uploadedVertex.data(),materialVS.data(),sizeof(materialVS));
     std::memcpy(draw->uploadedPixel.data(),materialPS.data(),sizeof(materialPS));
-    const DepthConstants depthValues{uint32_t(reverse),d.depthBiasBits,d.slopeBiasBits,0};
-    draw->depthConstants=buffer(device.Get(),&depthValues,sizeof(depthValues),D3D11_BIND_CONSTANT_BUFFER,D3D11_USAGE_IMMUTABLE);
+    // Recorded owners pin immutable depth bits across cache eviction; the
+    // replay-writable material banks above remain private to this draw.
+    draw->depthConstants=sceneDepthConstantBuffer(uint32_t(reverse),d.depthBiasBits,d.slopeBiasBits,uint32_t(cleanEyes_));
     D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthEnable=d.depthEnable;dd.DepthWriteMask=d.depthWrite?D3D11_DEPTH_WRITE_MASK_ALL:D3D11_DEPTH_WRITE_MASK_ZERO;
     dd.DepthFunc=D3D11_COMPARISON_FUNC(d.depthCompare+1);
     dd.FrontFace={D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_COMPARISON_ALWAYS};dd.BackFace=dd.FrontFace;
@@ -548,9 +642,10 @@ void NativeBackend::recordSkinMesh(const std::shared_ptr<NativeRecordingPayload>
     color.DestBlend=color.DestBlendAlpha=d.blendEnable?D3D11_BLEND_INV_SRC_ALPHA:D3D11_BLEND_ZERO;
     color.BlendOp=color.BlendOpAlpha=D3D11_BLEND_OP_ADD;check(device->CreateBlendState(&bd,&draw->blend),"replace color state creation");
     D3D11_RASTERIZER_DESC rd{};rd.FillMode=D3D11_FILL_SOLID;rd.CullMode=d.cull==0?D3D11_CULL_NONE:D3D11_CULL_BACK;
-    rd.FrontCounterClockwise=d.cull==2;rd.ScissorEnable=d.scissorEnable;rd.DepthClipEnable=TRUE;
+    rd.FrontCounterClockwise=d.cull==2;rd.ScissorEnable=d.scissorEnable;rd.DepthClipEnable=TRUE;rd.MultisampleEnable=TRUE;
     check(device->CreateRasterizerState(&rd,&draw->raster),"raster state creation");
     const RecordedSkinConstants data{materialVS,materialPS,receipt.inputMask};
+    draw->temporal=temporalGeometryDraw(target,depth,d,vertex.originalAddress(),1,true);
     NativeRecordingPrepare prepare=[](ID3D11DeviceContext* immediate,const std::shared_ptr<void>& owner,std::span<const uint8_t> bytes) {
         const auto draw=std::static_pointer_cast<RecordedSkinDraw>(owner);
         need(bool(draw)&&bytes.size()==sizeof(RecordedSkinConstants),"Native skin recorded constant snapshot changed");
@@ -562,6 +657,7 @@ void NativeBackend::recordSkinMesh(const std::shared_ptr<NativeRecordingPayload>
         inheritSkin(material.vertex,draw->live->state->vertex,material.inputMask,0);
         inheritSkin(material.pixel,draw->live->state->pixel,material.inputMask,8);
         finite(material.vertex);finite(material.pixel);
+        if(draw->temporal)draw->temporal->prepare(immediate,material.vertex,false);
         if(std::memcmp(draw->uploadedVertex.data(),material.vertex.data(),sizeof(material.vertex))) {
             StallProfiler::Scope updateProfile(StallProfiler::Section::Rendering,"D3D11.UpdateSubresource.skinVertex",nullptr,reinterpret_cast<uintptr_t>(draw->vertexConstants.Get()));
             immediate->UpdateSubresource(draw->vertexConstants.Get(),0,nullptr,material.vertex.data(),0,0);
@@ -573,7 +669,29 @@ void NativeBackend::recordSkinMesh(const std::shared_ptr<NativeRecordingPayload>
             std::memcpy(draw->uploadedPixel.data(),material.pixel.data(),sizeof(material.pixel));
         }
     };
+    // Live rendering changes re-derive storage views, physical rectangles and
+    // filtered material samplers from the same owners and original state.
+    auto refresh=[this,draw,shadowed,material,second=profile.second,samplers=d.samplers,reverse,bias=d.depthBiasBits,slope=d.slopeBiasBits,
+                  scissor=d.scissorEnable?D3D11_RECT{LONG(d.scissor[0]),LONG(d.scissor[1]),LONG(d.scissor[2]),LONG(d.scissor[3])}:
+                      D3D11_RECT{0,0,LONG(target->width),LONG(target->height)}] {
+        const auto& target=draw->colorOwner;
+        draw->color=target->view;draw->depth=draw->depthOwner->view;
+        draw->depthConstants=sceneDepthConstantBuffer(uint32_t(reverse),bias,slope,uint32_t(cleanEyes_));
+        draw->viewport=renderViewport(target,{0,0,float(target->width),float(target->height),0,1});
+        draw->scissor=renderScissor(target,scissor);
+        if(shadowed) {
+            draw->shadowView=draw->shadowOwner->depthView;
+            draw->samplers[1]=sceneSamplerState(materialSampling(samplers[1]));
+        } else if(material) {
+            draw->samplers[0]=sceneSamplerState(materialSampling(samplers[0]));
+            if(second)draw->samplers[1]=sceneSamplerState(materialSampling(samplers[1]));
+        }
+    };
     recordRecordingDraw(payload,std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&data),sizeof(data)),draw,std::move(prepare),
-        [draw](ID3D11DeviceContext* deferred){draw->record(deferred);});
+        [draw](ID3D11DeviceContext* deferred){draw->record(deferred);},
+        [this,draw,colorMask=d.colorMask,depthWrite=bool(d.depthEnable&&d.depthWrite)] {
+            noteTemporalSceneDraw(draw->colorOwner,draw->depthOwner,colorMask,depthWrite,false,
+                draw->temporal?std::optional{temporalSceneJitter()}:std::nullopt);
+        },std::move(refresh));
 }
 }

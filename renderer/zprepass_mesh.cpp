@@ -1,4 +1,5 @@
 #include "zprepass_mesh.h"
+#include "runtime/stall_profiler.h"
 #include "common/geometry_extent.h"
 #include "immutable_buffer_proof.h"
 #include "immutable_depth_constants.h"
@@ -6,6 +7,9 @@
 #include "r16_index_validation.h"
 #include "r16_strip_chunks.h"
 #include "VSZPrepass.h"
+#include "VSZPrepassTemporal.h"
+#include <d3d11_1.h>
+#include <optional>
 #include "PSShadowMeshDepth.h"
 #include <algorithm>
 #include <bit>
@@ -20,9 +24,27 @@ namespace Simpsons::Graphics {
 // entries never cross devices/backends.
 struct ZPrepassMeshUploadCache {
     ExactContentMeshCache<NativeZPrepassMesh> cache;
-    ID3D11Device* device = nullptr;
+    // Every static mesh uses this exact declaration and depth adapter. Pin the
+    // device and immutable objects so cache misses only upload geometry.
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11InputLayout> layout;
+    ComPtr<ID3D11PixelShader> pixel;
+    ComPtr<ID3D11VertexShader> temporalVertex;
+    ComPtr<ID3D11Buffer> temporalControls;
+    std::array<float,4> temporalValues{};
+    bool temporalValuesValid{};
 };
 namespace {
+struct PackedZPrepassPosition {
+    std::array<float,3> position;
+    PackedZPrepassPosition()=default;
+    explicit PackedZPrepassPosition(const std::array<float,3>& value) noexcept {
+        std::memcpy(position.data(),value.data(),sizeof(position));
+    }
+};
+static_assert(sizeof(PackedZPrepassPosition)==12);
+constexpr UINT zeroInputBytes=sizeof(ZPrepassVertex)-sizeof(PackedZPrepassPosition);
+static_assert(zeroInputBytes==104);
 void need(bool value,const char* message) {if(!value)throw Error(message);}
 void check(HRESULT hr,const char* operation) {
     if(FAILED(hr)) {
@@ -30,10 +52,14 @@ void check(HRESULT hr,const char* operation) {
         throw Error(message);
     }
 }
-ComPtr<ID3D11Buffer> immutable(ID3D11Device* device,const void* data,UINT bytes,UINT binding) {
+ComPtr<ID3D11Buffer> immutable(ID3D11Device* device,const void* data,UINT bytes,UINT binding,const char* profile=nullptr) {
     D3D11_BUFFER_DESC desc{};desc.ByteWidth=bytes;desc.Usage=D3D11_USAGE_IMMUTABLE;desc.BindFlags=binding;
     D3D11_SUBRESOURCE_DATA input{data,0,0};ComPtr<ID3D11Buffer> result;
-    check(device->CreateBuffer(&desc,&input,&result),"immutable upload");return result;
+    const char* function=profile?profile:binding==D3D11_BIND_VERTEX_BUFFER?"D3D11.CreateBuffer.static.vertices":
+        binding==D3D11_BIND_INDEX_BUFFER?"D3D11.CreateBuffer.static.indices":"D3D11.CreateBuffer.static.depthConstants";
+    StallProfiler::Scope allocationProfile(StallProfiler::Section::Rendering,function,nullptr,reinterpret_cast<uintptr_t>(device));
+    const HRESULT status=device->CreateBuffer(&desc,&input,&result);
+    allocationProfile.finish();check(status,"immutable upload");return result;
 }
 template<class T>std::vector<T> readBuffer(ID3D11Device* device,ID3D11DeviceContext* context,ID3D11Buffer* buffer) {
     D3D11_BUFFER_DESC desc{};buffer->GetDesc(&desc);const auto size=desc.ByteWidth;
@@ -88,11 +114,85 @@ void requireNoAuxiliaryStages(ID3D11DeviceContext* context) {
     bool bound=false;for(auto* output:outputs)if(output){bound=true;output->Release();}
     need(!bound,"Native Z-prepass mesh stream output is unqualified");
 }
+
+// Change only VS and its private control slot. Preserve the actual original
+// ranged binding as well as its buffer identity; a regular SetCB restore would
+// erase an original D3D11.1 range.
+class ScopedTemporalZPrepass {
+    ID3D11DeviceContext* context;
+    ComPtr<ID3D11DeviceContext1> ranged;
+    ComPtr<ID3D11VertexShader> vertex;
+    ComPtr<ID3D11Buffer> constants;
+    UINT first{},count{};
+public:
+    ScopedTemporalZPrepass(ID3D11DeviceContext* c,ComPtr<ID3D11DeviceContext1> r,
+                          ID3D11VertexShader* replacement,ID3D11Buffer* controls):context(c),ranged(std::move(r)) {
+        context->VSGetShader(&vertex,nullptr,nullptr);
+        ranged->VSGetConstantBuffers1(11,1,&constants,&first,&count);
+        context->VSSetShader(replacement,nullptr,0);
+        context->VSSetConstantBuffers(11,1,&controls);
+    }
+    ScopedTemporalZPrepass(const ScopedTemporalZPrepass&)=delete;
+    ScopedTemporalZPrepass& operator=(const ScopedTemporalZPrepass&)=delete;
+    ~ScopedTemporalZPrepass() {
+        context->VSSetShader(vertex.Get(),nullptr,0);
+        auto* buffer=constants.Get();ranged->VSSetConstantBuffers1(11,1,&buffer,&first,&count);
+    }
+};
+void prepareTemporalZPrepass(ZPrepassMeshUploadCache& slot,ID3D11Device* device,
+                            ID3D11DeviceContext* context,const std::array<float,4>& values) {
+    need(slot.device.Get()==device,"Temporal Z-prepass cache belongs to another device");
+    need(std::isfinite(values[0])&&std::isfinite(values[1])&&values[2]>0&&values[3]>0,
+         "Temporal Z-prepass sample/extent is invalid");
+    if(!slot.temporalVertex)
+        check(device->CreateVertexShader(kVSZPrepassTemporal,sizeof(kVSZPrepassTemporal),nullptr,&slot.temporalVertex),
+              "temporal vertex adapter");
+    if(!slot.temporalControls) {
+        D3D11_BUFFER_DESC desc{};desc.ByteWidth=sizeof(values);desc.Usage=D3D11_USAGE_DEFAULT;
+        desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        check(device->CreateBuffer(&desc,nullptr,&slot.temporalControls),"temporal control allocation");
+        slot.temporalValuesValid=false;
+    }
+    // One immutable-in-flight value per immediate command-stream update; no
+    // per-mesh allocation or per-draw upload for an unchanged frame sample.
+    if(!slot.temporalValuesValid||slot.temporalValues!=values) {
+        context->UpdateSubresource(slot.temporalControls.Get(),0,nullptr,values.data(),0,0);
+        slot.temporalValues=values;slot.temporalValuesValid=true;
+    }
 }
+struct VertexBindings {
+    ComPtr<ID3D11Buffer> positions,zeros;
+    std::array<UINT,2> strides{},offsets{};
+    explicit VertexBindings(ID3D11DeviceContext* context) {
+        std::array<ID3D11Buffer*,2> buffers{};
+        context->IAGetVertexBuffers(0,2,buffers.data(),strides.data(),offsets.data());
+        positions.Attach(buffers[0]);zeros.Attach(buffers[1]);
+    }
+};
+}
+
+// Private device-owned immutable zero record. Its strong creation/proof refs
+// pin both object and device identities; no guest data or writable backing.
+struct ZPrepassZeroStream {
+    const ComPtr<ID3D11Device> device;
+    const ComPtr<ID3D11Buffer> buffer;
+    mutable ComPtr<ID3D11Buffer> proven;
+    ZPrepassZeroStream(ComPtr<ID3D11Device> d,ComPtr<ID3D11Buffer> b):device(std::move(d)),buffer(std::move(b)) {}
+    void validate(ID3D11Device* expected) const {
+        need(expected&&device.Get()==expected&&buffer,"Native Z-prepass zero input owner belongs to another device");
+        if(proven.Get()==buffer.Get())return;
+        ComPtr<ID3D11Device> actual;buffer->GetDevice(&actual);D3D11_BUFFER_DESC desc{};buffer->GetDesc(&desc);
+        need(actual.Get()==expected&&desc.ByteWidth==zeroInputBytes&&desc.Usage==D3D11_USAGE_IMMUTABLE&&
+             desc.BindFlags==D3D11_BIND_VERTEX_BUFFER&&!desc.CPUAccessFlags&&!desc.MiscFlags&&!desc.StructureByteStride,
+             "Native Z-prepass zero input backing differs from its immutable owner");
+        proven=buffer;
+    }
+};
 
 struct NativeZPrepassMesh::State {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11Buffer> vertices,indices;
+    std::shared_ptr<const ZPrepassZeroStream> zeros;
     ComPtr<ID3D11InputLayout> layout;
     ComPtr<ID3D11PixelShader> pixel;
     ComPtr<ID3D11BlendState> colorOff;
@@ -103,14 +203,15 @@ struct NativeZPrepassMesh::State {
     R16Indices indexValues;
     mutable ImmutableBufferPairProof proof;
     void validate(ID3D11Device* expected) const {
-        need(device.Get()==expected&&vertices&&indices&&layout&&pixel&&colorOff,
+        need(device.Get()==expected&&vertices&&indices&&zeros&&layout&&pixel&&colorOff,
              "Native Z-prepass mesh is missing, retired or belongs to another device");
+        zeros->validate(expected); // Independent bank proof always precedes pair-proof hits.
         if(proof.holds(vertices.Get(),indices.Get(),expected,vertexCount,indexValues.size()))return;
         for(auto* buffer:{vertices.Get(),indices.Get()}) {
             ComPtr<ID3D11Device> actual;buffer->GetDevice(&actual);D3D11_BUFFER_DESC desc{};buffer->GetDesc(&desc);
             const bool vertex=buffer==vertices.Get();
             need(actual.Get()==expected&&desc.Usage==D3D11_USAGE_IMMUTABLE&&
-                 desc.ByteWidth==(vertex?vertexCount*sizeof(ZPrepassVertex):indexValues.size()*sizeof(uint16_t))&&
+                 desc.ByteWidth==(vertex?vertexCount*sizeof(PackedZPrepassPosition):indexValues.size()*sizeof(uint16_t))&&
                  desc.BindFlags==(vertex?D3D11_BIND_VERTEX_BUFFER:D3D11_BIND_INDEX_BUFFER)&&
                  !desc.CPUAccessFlags&&!desc.MiscFlags&&!desc.StructureByteStride,
                  "Native Z-prepass mesh backing differs from its immutable owner");
@@ -118,12 +219,15 @@ struct NativeZPrepassMesh::State {
         proof.prove(vertices.Get(),indices.Get(),expected,vertexCount,indexValues.size());
     }
     void requireBindings(ID3D11DeviceContext* context) const {
-        ComPtr<ID3D11Buffer> vb,ib;UINT stride{},offset{},indexOffset{};DXGI_FORMAT format{};
+        const VertexBindings bound(context);
+        ComPtr<ID3D11Buffer> ib;UINT indexOffset{};DXGI_FORMAT format{};
         ComPtr<ID3D11InputLayout> input;
-        context->IAGetVertexBuffers(0,1,&vb,&stride,&offset);context->IAGetInputLayout(&input);
+        context->IAGetInputLayout(&input);
         context->IAGetIndexBuffer(&ib,&format,&indexOffset);
-        need(vb.Get()==vertices.Get()&&stride==sizeof(ZPrepassVertex)&&!offset,
+        need(bound.positions.Get()==vertices.Get()&&bound.strides[0]==sizeof(PackedZPrepassPosition)&&!bound.offsets[0],
              "Native Z-prepass mesh vertex binding is stale or has a different stride/offset");
+        need(bound.zeros.Get()==zeros->buffer.Get()&&!bound.strides[1]&&!bound.offsets[1],
+             "Native Z-prepass mesh zero input binding is stale or has a different stride/offset");
         need(input.Get()==layout.Get(),"Native Z-prepass mesh declaration binding is stale");
         need(ib.Get()==indices.Get()&&format==DXGI_FORMAT_R16_UINT&&!indexOffset,
              "Native Z-prepass mesh index binding is stale or has a different format/offset");
@@ -136,6 +240,15 @@ uint32_t NativeZPrepassMesh::indexCount() const noexcept {return uint32_t(state-
 
 std::shared_ptr<NativeZPrepassMesh> NativeBackend::uploadZPrepassMesh(
     std::span<const ZPrepassVertex> vertices,std::span<const uint16_t> indices) {
+    return uploadZPrepassMeshImpl(vertices,indices,nullptr);
+}
+std::shared_ptr<NativeZPrepassMesh> NativeBackend::uploadZPrepassMeshOwned(
+    std::vector<ZPrepassVertex>& vertices,std::span<const uint16_t> indices) {
+    return uploadZPrepassMeshImpl(vertices,indices,&vertices);
+}
+std::shared_ptr<NativeZPrepassMesh> NativeBackend::uploadZPrepassMeshImpl(
+    std::span<const ZPrepassVertex> vertices,std::span<const uint16_t> indices,
+    std::vector<ZPrepassVertex>* ownedVertices) {
     validateSubmissionContext();
     need(validNativeMeshBufferExtent(vertices.size(),sizeof(ZPrepassVertex))&&validNativeMeshBufferExtent(indices.size(),sizeof(uint16_t)),
          "Native Z-prepass mesh input exceeds buffer byte or index extent");
@@ -153,13 +266,16 @@ std::shared_ptr<NativeZPrepassMesh> NativeBackend::uploadZPrepassMesh(
         ? std::span<const uint8_t>{}
         : std::span<const uint8_t>{reinterpret_cast<const uint8_t*>(indices.data()),
                                    indices.size_bytes()};
+    StallProfiler::Scope lookupProfile(StallProfiler::Section::Rendering,"Mesh.static.decodedLookup",nullptr,reinterpret_cast<uintptr_t>(device.Get()));
     if(!zprepassMeshCache_) zprepassMeshCache_ = std::make_shared<ZPrepassMeshUploadCache>();
     auto& slot = *zprepassMeshCache_;
-    if(slot.device != device.Get()) {
+    if(slot.device.Get() != device.Get()) {
         slot.cache.clear();
-        slot.device = device.Get();
+        slot.layout.Reset();slot.pixel.Reset();slot.temporalVertex.Reset();slot.temporalControls.Reset();
+        slot.temporalValuesValid=false;slot.device = device;
     }
     const auto cached = slot.cache.lookup(vertexBytes, indexBytes);
+    lookupProfile.finish();
     if(auto hit = cached.mesh) {
         try {
             hit->state->validate(device.Get());
@@ -169,9 +285,10 @@ std::shared_ptr<NativeZPrepassMesh> NativeBackend::uploadZPrepassMesh(
             // Stale entry (e.g. device swapped under test probes): drop the
             // slot and fall through to normal validation+upload.
             slot.cache.clear();
-            slot.device = device.Get();
+            slot.device = device;
         }
     }
+    StallProfiler::Scope validationProfile(StallProfiler::Section::Rendering,"Mesh.static.validate",nullptr,reinterpret_cast<uintptr_t>(device.Get()));
     for(const auto& v:vertices) {
         for(float value:v.position)need(std::isfinite(value),"Nonfinite Z-prepass mesh position");
         const auto zero=[](float value){return std::bit_cast<uint32_t>(value)==0;};
@@ -180,50 +297,71 @@ std::shared_ptr<NativeZPrepassMesh> NativeBackend::uploadZPrepassMesh(
         for(const auto& delta:v.morph)for(float value:delta)
             need(zero(value),"Static Z-prepass requires zero unused morph inputs");
     }
+    validationProfile.finish();
+    // Keep every logical input/cache byte and its original admission bound.
+    // Only the immutable GPU representation changes; copy finite position bits
+    // exactly, including -0. No float arithmetic or narrower precision.
+    StallProfiler::Scope packProfile(StallProfiler::Section::Rendering,"Mesh.static.packPositions",nullptr,reinterpret_cast<uintptr_t>(device.Get()));
+    std::vector<PackedZPrepassPosition> packed;packed.reserve(vertices.size());
+    for(const auto& vertex:vertices)packed.emplace_back(vertex.position);
+    packProfile.finish();
     auto next=std::make_unique<NativeZPrepassMesh::State>();next->device=device;
-    next->vertexCount=uint32_t(vertices.size());next->indexValues.assign(indices.begin(),indices.end());
-    next->vertices=immutable(device.Get(),vertices.data(),UINT(vertices.size_bytes()),D3D11_BIND_VERTEX_BUFFER);
+    next->vertexCount=uint32_t(vertices.size());
+    StallProfiler::Scope indexCopyProfile(StallProfiler::Section::Rendering,"Mesh.static.indexCopy",nullptr,reinterpret_cast<uintptr_t>(device.Get()));
+    next->indexValues.assign(indices.begin(),indices.end());indexCopyProfile.finish();
+    next->vertices=immutable(device.Get(),packed.data(),UINT(packed.size()*sizeof(PackedZPrepassPosition)),D3D11_BIND_VERTEX_BUFFER);
     next->indices=immutable(device.Get(),indices.data(),UINT(indices.size_bytes()),D3D11_BIND_INDEX_BUFFER);
-    std::array<D3D11_INPUT_ELEMENT_DESC,9> elements{};
-    elements[0]={"TEXCOORD",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0};
-    elements[1]={"TEXCOORD",1,DXGI_FORMAT_R32G32B32A32_FLOAT,0,12,D3D11_INPUT_PER_VERTEX_DATA,0};
-    elements[2]={"TEXCOORD",2,DXGI_FORMAT_R32G32B32A32_FLOAT,0,28,D3D11_INPUT_PER_VERTEX_DATA,0};
-    for(UINT i=0;i<6;++i)
-        elements[3+i]={"TEXCOORD",3+i,DXGI_FORMAT_R32G32B32_FLOAT,0,44+12*i,D3D11_INPUT_PER_VERTEX_DATA,0};
-    check(device->CreateInputLayout(elements.data(),UINT(elements.size()),kVSZPrepass,sizeof(kVSZPrepass),&next->layout),"declaration creation");
-    check(device->CreatePixelShader(kPSShadowMeshDepth,sizeof(kPSShadowMeshDepth),nullptr,&next->pixel),"depth adapter creation");
-    D3D11_BLEND_DESC blend{};auto& color=blend.RenderTarget[0];color.RenderTargetWriteMask=0;
-    color.SrcBlend=color.SrcBlendAlpha=D3D11_BLEND_ONE;color.DestBlend=color.DestBlendAlpha=D3D11_BLEND_ZERO;
-    color.BlendOp=color.BlendOpAlpha=D3D11_BLEND_OP_ADD;
-    check(device->CreateBlendState(&blend,&next->colorOff),"color-disabled state creation");
+    if(!zprepassZeroStream_||zprepassZeroStream_->device.Get()!=device.Get()) {
+        const std::array<uint32_t,zeroInputBytes/sizeof(uint32_t)> values{};
+        auto zero=std::make_shared<ZPrepassZeroStream>(device,
+            immutable(device.Get(),values.data(),zeroInputBytes,D3D11_BIND_VERTEX_BUFFER,"D3D11.CreateBuffer.static.zeroInputs"));
+        zero->validate(device.Get());zprepassZeroStream_=std::move(zero);
+    }
+    next->zeros=zprepassZeroStream_;
+    if(!slot.layout || !slot.pixel) {
+        StallProfiler::Scope adapterProfile(StallProfiler::Section::Rendering,"Mesh.static.adapters",nullptr,reinterpret_cast<uintptr_t>(device.Get()));
+        std::array<D3D11_INPUT_ELEMENT_DESC,9> elements{};
+        elements[0]={"TEXCOORD",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0};
+        elements[1]={"TEXCOORD",1,DXGI_FORMAT_R32G32B32A32_FLOAT,1,0,D3D11_INPUT_PER_VERTEX_DATA,0};
+        elements[2]={"TEXCOORD",2,DXGI_FORMAT_R32G32B32A32_FLOAT,1,16,D3D11_INPUT_PER_VERTEX_DATA,0};
+        for(UINT i=0;i<6;++i)
+            elements[3+i]={"TEXCOORD",3+i,DXGI_FORMAT_R32G32B32_FLOAT,1,32+12*i,D3D11_INPUT_PER_VERTEX_DATA,0};
+        ComPtr<ID3D11InputLayout> layout;ComPtr<ID3D11PixelShader> pixel;
+        check(device->CreateInputLayout(elements.data(),UINT(elements.size()),kVSZPrepass,sizeof(kVSZPrepass),&layout),"declaration creation");
+        check(device->CreatePixelShader(kPSShadowMeshDepth,sizeof(kPSShadowMeshDepth),nullptr,&pixel),"depth adapter creation");
+        // Publish together only after both creations succeed. No native
+        // bindings change, and live meshes retain their own immutable refs.
+        slot.layout=std::move(layout);slot.pixel=std::move(pixel);
+    }
+    next->layout=slot.layout;next->pixel=slot.pixel;
+    next->colorOff=sceneBlendState(0,0,0);
     // Cache active and inactive enable/write/compare independently, as Im2D does.
     for(UINT i=0;i<32;++i) {
-        D3D11_DEPTH_STENCIL_DESC d{};d.DepthEnable=(i&16)!=0;
-        d.DepthWriteMask=(i&8)?D3D11_DEPTH_WRITE_MASK_ALL:D3D11_DEPTH_WRITE_MASK_ZERO;
-        d.DepthFunc=D3D11_COMPARISON_FUNC((i&7)+1);
-        d.FrontFace={D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_COMPARISON_ALWAYS};d.BackFace=d.FrontFace;
-        check(device->CreateDepthStencilState(&d,&next->depths[i]),"depth state creation");
+        next->depths[i]=sceneDepthState((i&16)!=0,(i&8)!=0,i&7);
     }
     for(UINT i=0;i<6;++i) {
-        D3D11_RASTERIZER_DESC r{};r.FillMode=D3D11_FILL_SOLID;r.DepthClipEnable=TRUE;
-        r.CullMode=i%3==0?D3D11_CULL_NONE:D3D11_CULL_BACK;r.FrontCounterClockwise=i%3==1;
-        r.ScissorEnable=i>=3;
         // Both bias terms are computed in the PS, NOT integer D32 raster bias.
-        check(device->CreateRasterizerState(&r,&next->rasterizers[i]),"rasterizer creation");
+        next->rasterizers[i]=sceneRasterState(i%3==0?0u:i%3==1?2u:6u,i>=3);
     }
     next->validate(device.Get());requireOwner();
     auto result = std::shared_ptr<NativeZPrepassMesh>(new NativeZPrepassMesh(std::move(next)));
     // Snapshot exact bytes so later caller mutation cannot corrupt the cache.
     // Eviction drops only the cache's strong ref; live caller handles stay valid.
-    slot.cache.insert(vertexBytes, indexBytes, cached.key, result);
+    StallProfiler::Scope cacheCopyProfile(StallProfiler::Section::Rendering,"Mesh.static.cacheCopy",nullptr,reinterpret_cast<uintptr_t>(device.Get()));
+    if(ownedVertices)slot.cache.insertOwnedVertices(*ownedVertices,indexBytes,cached.key,result);
+    else slot.cache.insert(vertexBytes, indexBytes, cached.key, result);
+    cacheCopyProfile.finish();
     return result;
 }
 void NativeBackend::bindZPrepassMeshVertices(const std::shared_ptr<NativeZPrepassMesh>& mesh) {
     validateSubmissionContext();need(bool(mesh),"Missing native Z-prepass mesh vertex owner");mesh->state->validate(device.Get());
-    flushIm2D();auto* buffer=mesh->state->vertices.Get();const UINT stride=sizeof(ZPrepassVertex),offset=0;
-    context->IASetVertexBuffers(0,1,&buffer,&stride,&offset);
-    ComPtr<ID3D11Buffer> actual;UINT s{},o{};context->IAGetVertexBuffers(0,1,&actual,&s,&o);
-    need(actual.Get()==buffer&&s==stride&&o==offset,"D3D11 did not retain Z-prepass mesh vertices");requireOwner();
+    flushIm2D();
+    const std::array<ID3D11Buffer*,2> buffers{mesh->state->vertices.Get(),mesh->state->zeros->buffer.Get()};
+    const std::array<UINT,2> strides{sizeof(PackedZPrepassPosition),0},offsets{};
+    context->IASetVertexBuffers(0,2,buffers.data(),strides.data(),offsets.data());
+    const VertexBindings actual(context.Get());
+    need(actual.positions.Get()==buffers[0]&&actual.zeros.Get()==buffers[1]&&actual.strides==strides&&actual.offsets==offsets,
+         "D3D11 did not retain Z-prepass mesh position and zero inputs");requireOwner();
 }
 void NativeBackend::bindZPrepassMeshDeclaration(const std::shared_ptr<NativeZPrepassMesh>& mesh) {
     validateSubmissionContext();need(bool(mesh),"Missing native Z-prepass mesh declaration owner");mesh->state->validate(device.Get());
@@ -239,7 +377,15 @@ void NativeBackend::bindZPrepassMeshIndices(const std::shared_ptr<NativeZPrepass
 }
 std::vector<ZPrepassVertex> NativeBackend::readbackZPrepassMeshVertices(const std::shared_ptr<NativeZPrepassMesh>& mesh) {
     validateSubmissionContext();need(bool(mesh),"Missing native Z-prepass mesh readback owner");mesh->state->validate(device.Get());
-    return readBuffer<ZPrepassVertex>(device.Get(),context.Get(),mesh->state->vertices.Get());
+    const auto positions=readBuffer<PackedZPrepassPosition>(device.Get(),context.Get(),mesh->state->vertices.Get());
+    const auto zeros=readBuffer<uint8_t>(device.Get(),context.Get(),mesh->state->zeros->buffer.Get());
+    need(positions.size()==mesh->state->vertexCount&&zeros.size()==zeroInputBytes,"Native Z-prepass GPU readback extent differs");
+    std::vector<ZPrepassVertex> result(positions.size());
+    for(size_t i=0;i<result.size();++i) {
+        std::memcpy(result[i].position.data(),positions[i].position.data(),sizeof(PackedZPrepassPosition));
+        std::memcpy(reinterpret_cast<uint8_t*>(&result[i])+sizeof(PackedZPrepassPosition),zeros.data(),zeros.size());
+    }
+    return result;
 }
 void NativeBackend::clearZPrepassAuxiliaryStream() {
     validateSubmissionContext();flushIm2D();
@@ -269,7 +415,7 @@ void NativeBackend::drawZPrepassMesh(const std::shared_ptr<RenderTarget>& target
     need(!d.stencilEnable&&!d.alphaTest&&!d.alphaToMask&&!d.clipPlaneEnable&&d.viewportEnable==1,
          "Native Z-prepass mesh stencil/alpha/user clipping/viewport state is unqualified");
     need(d.scissorEnable<=1&&d.halfPixelOffset==1&&d.multisampleAntialias==1&&d.multisampleMask==0xFFFFFFFF,
-         "Native Z-prepass mesh requires halfpixel1, MSAA request1/full mask and single-sample backing");
+         "Native Z-prepass mesh requires halfpixel1 and MSAA request1/full mask");
     const float constant=std::bit_cast<float>(d.depthBiasBits),slope=std::bit_cast<float>(d.slopeBiasBits);
     need(std::isfinite(constant)&&std::isfinite(slope)&&std::isfinite(slope*16.0f),
          "Native Z-prepass mesh bias is nonfinite or overflows the original slope-times16 operation");
@@ -287,8 +433,9 @@ void NativeBackend::drawZPrepassMesh(const std::shared_ptr<RenderTarget>& target
     const auto* attachment=attachmentDescriptor(*target);const D3D11_TEXTURE2D_DESC colorDesc=attachment?*attachment:D3D11_TEXTURE2D_DESC{};
     need(attachment&&colorDesc.Format==colorFormat&&
          colorDesc.Width==target->pixelWidth()&&colorDesc.Height==target->pixelHeight()&&colorDesc.MipLevels==1&&colorDesc.ArraySize==1&&
-         colorDesc.SampleDesc.Count==1&&!colorDesc.SampleDesc.Quality&&depth->width==target->width&&depth->height==target->height,
-         "Native Z-prepass mesh attachments have a different device, format or extent");
+         colorDesc.SampleDesc.Count==1&&!colorDesc.SampleDesc.Quality&&
+         depth->width==target->width&&depth->height==target->height,
+         "Native Z-prepass mesh attachments have a different device, format, extent or sample profile");
     const bool reverse=d.viewport[4]==0x3F800000&&d.viewport[5]==0;
     need(!d.viewport[0]&&!d.viewport[1]&&d.viewport[2]==target->width&&d.viewport[3]==target->height&&
          (reverse||(d.viewport[4]==0&&d.viewport[5]==0x3F800000)),
@@ -301,12 +448,27 @@ void NativeBackend::drawZPrepassMesh(const std::shared_ptr<RenderTarget>& target
     requireSelectedTargets({target,nullptr,nullptr,nullptr},depth);requireNoOutputUavs();
     requireZPrepassShader(vertex);requireZPrepassCommit(commit);m.requireBindings(context.Get());requireNoAuxiliaryStages(context.Get());
     const DepthConstants values{uint32_t(reverse),d.depthBiasBits,d.slopeBiasBits,0};
-    // Reuse identical immutable buffers; never update in flight. Miss creates
-    // a NEW immutable buffer with the same descriptor, published only after
-    // success; eviction keeps old GPU/live refs alive via caller ComPtr.
+    // Keep the per-mesh fast path; backend misses share exact immutable bits
+    // across meshes. Neither cache updates in flight, and mesh/GPU refs keep
+    // retired entries alive independently of backend cache eviction.
     ComPtr<ID3D11Buffer> constants;
     if(auto* hit=m.depthConstants.find(values))constants=hit;
-    else{constants=immutable(device.Get(),&values,sizeof(values),D3D11_BIND_CONSTANT_BUFFER);m.depthConstants.publish(values,constants.Get());}
+    else{constants=sceneDepthConstantBuffer(values.reverse,values.constantBits,values.slopeBits);m.depthConstants.publish(values,constants.Get());}
+    // Classify by actual registered Scene owners, not dimensions. frame()
+    // rejects unqualified/reconstructed scenes via temporalSceneJitter(); a
+    // caller retaining Scene after promotion must fail before drawing.
+    ComPtr<ID3D11DeviceContext1> temporalRanged;
+    ZPrepassMeshUploadCache* temporalSlot=nullptr;
+    std::optional<std::array<float,2>> temporalRasterJitter;
+    if(temporalSceneOwnsTargets(target,depth)) {
+        const auto jitter=temporalSceneJitter();temporalRasterJitter=jitter;
+        temporalRanged=constantBindingContext();
+        need(bool(temporalRanged),"Temporal Z-prepass requires its original D3D11.1 context");
+        need(bool(zprepassMeshCache_),"Temporal Z-prepass lost its backend cache owner");
+        temporalSlot=zprepassMeshCache_.get();
+        prepareTemporalZPrepass(*temporalSlot,device.Get(),context.Get(),
+            {jitter[0],jitter[1],float(target->pixelWidth()),float(target->pixelHeight())});
+    }
     // All rejection and allocation precede the flush or Z-prepass context mutation.
     flushIm2D();
     requireSelectedTargets({target,nullptr,nullptr,nullptr},depth);
@@ -321,9 +483,13 @@ void NativeBackend::drawZPrepassMesh(const std::shared_ptr<RenderTarget>& target
         context->OMSetDepthStencilState(m.depths[(d.depthEnable?16u:0u)|(d.depthWrite?8u:0u)|d.depthCompare].Get(),0);
         auto* cb=constants.Get();context->PSSetConstantBuffers(1,1,&cb);context->PSSetShader(m.pixel.Get(),nullptr,0);
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        std::optional<ScopedTemporalZPrepass> temporalRestore;
+        if(temporalSlot)
+            temporalRestore.emplace(context.Get(),temporalRanged,temporalSlot->temporalVertex.Get(),temporalSlot->temporalControls.Get());
         // R16 triangle strips consume FFFF as cut indices, including parity reset.
         forEachOriginalR16StripChunk(d.startIndex,d.indexCount,[&](uint32_t n,uint32_t first){context->DrawIndexed(n,first,d.baseVertex);});
         ++zprepassMeshDraws;
+        noteTemporalSceneDraw(target,depth,0,d.depthEnable&&d.depthWrite,false,temporalRasterJitter);
     }
     requireZPrepassShader(vertex);requireZPrepassCommit(commit);m.requireBindings(context.Get());
     requireSelectedTargets({target,nullptr,nullptr,nullptr},depth);requireOwner();

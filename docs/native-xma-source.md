@@ -91,3 +91,42 @@ Link `NativeXmaSourceTests` against `SimpsonsAudio` and `bcrypt`, compile `/std:
 Coverage includes full mono/stereo/six-component output; XMA2 plus one bounded XMA1 mono case; partial frame/plane boundaries; all eleven documented mono block transitions under explicit fixture skip/count; deliberately asymmetric layer skips; initial progress distinct from skip; real send backpressure; all-layer pending/resumption without duplicate sends; raw-ring wrap; receipt and retained-ticket backpressure; stale/foreign requests; explicit fresh surplus accounting; factory/owner/ticket lifetime separation; close cancellation; a real partial-layer storage failure; concurrent exactly-once commit; and successful commit with caller-side `operator new` disabled. Synthetic arrival/progress/skip metadata fixtures are labelled host contracts, not observed live engine profiles.
 
 Standalone reproduction is [build/xma-source/probe.py](K:/SimpsonsNativeCopy/build/xma-source/probe.py). It compiles only the codec/source/test into a temporary directory, uses the verified owned DLLs and existing packet fixtures, then deletes the compiler products. [compile.log](K:/SimpsonsNativeCopy/build/xma-source/compile.log) is clean; [run.log](K:/SimpsonsNativeCopy/build/xma-source/run.log) records the final pass; [command.json](K:/SimpsonsNativeCopy/build/xma-source/command.json) and [result.json](K:/SimpsonsNativeCopy/build/xma-source/result.json) retain flags, commands and source/DLL hashes. No parent build, generated files, runtime hooks, original assets or reference projects were modified. Packet fixtures/any future derived media remain excluded from checkpoints.
+
+## Decoder pool
+
+Sources take decoders and decoded-sample rings from the factory's shared
+`NativeXmaCodecPool` and return them when closed (a fresh image returns its
+decoders once its decode is shared). Opening an FFmpeg XMA decoder costs about
+1.4 ms and a fresh 1 MiB ring about 0.5 ms more. A looping stream builds a
+fresh source at every loop, on the audio thread inside the original callback
+lock that the game's main thread also takes; a six-channel ambience in Land of
+Chocolate stalled 120 FPS frames by 5.5 ms every 1.9 s. Returned decoders are
+`reset()` first, the codec's explicit start-of-stream state that
+`NativeXmaCodecTests` already decodes to the pinned oracle; the pool test returns
+a decoder mid-stream and decodes the oracle again. Reused rings keep stale
+samples that a source never reads (it reads only frames it decoded). The pool
+keeps up to 32 idle decoders per format; `EngineAudioOwners::start` opens 24
+mono 24 kHz (the in-game resident sound effects), six stereo and eight mono
+48 kHz XMA2 decoders on a background thread.
+
+## Incremental decoding
+
+`Limits::prepareFrames` (default 0: decode everything in `prepare()`) lets
+`prepare()` stop once each layer buffers that many frames past its skip;
+`stage()` then decodes further packets of its source, in order, when a quota
+needs them, and `decodeAhead()` lets another thread finish the decode. Samples
+are identical; only the time the codec runs changes. `retire()` gives the codec
+any packets still unsent before a delivered source is removed, so a
+continuation keeps its codec state. Resident sounds longer than 16384 frames
+use an 8192-frame prefix: their first play used to decode 0.6-3.6 ms inside the
+original callback lock that the main thread also takes. `FreshXmaCache` hands
+such misses to one below-normal-priority worker, which finishes the decode
+without the cache mutex and publishes `completedFreshImage()` (the image an
+eager decode would have shared; the ring never wraps for these sources), so
+replays reuse the decoded floats as before. `NativeXmaSourceTests` compares
+incremental quotas bit for bit with the pinned oracle, checks that no packet is
+decoded before it is needed, that the worker publishes without any `stage()`
+call, that the published image replays exactly, and that `retire()` completes
+the codec stream. The streamed-decoder
+census (`tools/probe_stream_catalog_decode.py --all`) was re-run after the change:
+all 9256 unique chains decoded to identical raw hashes.

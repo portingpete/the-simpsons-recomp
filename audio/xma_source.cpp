@@ -1,6 +1,7 @@
 #include "xma_source.h"
 #include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <limits>
 #include <mutex>
 #include <utility>
@@ -34,8 +35,14 @@ struct XmaSource::State {
     struct Source {
         SourceView view;
         std::vector<LayerInput> input;
+        std::vector<size_t> fed; // Packets per layer already sent to the codec.
+        bool complete() const noexcept {
+            for (size_t i = 0; i < input.size(); ++i) if (fed[i] < input[i].packets.size()) return false;
+            return true;
+        }
     };
     mutable std::mutex mutex;
+    std::shared_ptr<NativeXmaCodecPool> pool; // Decoders and rings return here on close.
     Limits limits;
     uint64_t owner = 0, generation = 0, epoch = 0, lastSequence = 0, nextTicket = 1;
     uint64_t copiedBytes = 0, committedFrames = 0;
@@ -46,8 +53,10 @@ struct XmaSource::State {
     std::vector<std::unique_ptr<Source>> sources;
     std::vector<std::weak_ptr<const Quota>> tickets;
     Ticket pending;
+    std::shared_ptr<const FreshImage> freshImage;
+    Receipt sharedFreshDecode;
 
-    State(NativeXmaFactory& factory, uint64_t instance, std::span<const XmaFormat> formats, Limits bounds)
+    State(NativeXmaFactory* factory, uint64_t instance, std::span<const XmaFormat> formats, Limits bounds)
         : limits(bounds), generation(instance) {
         require(instance && instance != maximum, "Invalid XMA instance generation");
         require(limits.maxSources && limits.maxSources <= 64 && limits.maxTickets && limits.maxTickets <= 8 &&
@@ -63,11 +72,14 @@ struct XmaSource::State {
             channels += format.channels;
         }
         layers.reserve(formats.size());
+        if (factory) pool = factory->pool();
         for (const auto& format : formats) {
             Layer layer;
-            layer.codec = factory.create(format);
             layer.view.channels = format.channels;
-            layer.raw.resize(size_t(limits.maxBufferedFramesPerLayer) * format.channels);
+            if (pool) {
+                layer.codec = pool->take(format);
+                layer.raw = pool->takeRing(size_t(limits.maxBufferedFramesPerLayer) * format.channels);
+            }
             layers.push_back(std::move(layer));
         }
         sources.resize(limits.maxSources);
@@ -108,34 +120,55 @@ struct XmaSource::State {
         operation = FailureStage::Storage;
         require(count <= limits.maxBufferedFramesPerLayer - layer.view.bufferedFrames,
                 "XMA decoded raw storage limit exceeded; source is terminal");
-        for (uint32_t frame = 0; frame < count; ++frame) {
-            const auto at = (layer.head + layer.view.bufferedFrames + frame) % limits.maxBufferedFramesPerLayer;
-            for (uint32_t channel = 0; channel < layer.view.channels; ++channel)
-                layer.raw[size_t(at) * layer.view.channels + channel] = buffer[size_t(frame) * layer.view.channels + channel];
-        }
+        // The codec already returns interleaved finite samples. Append the
+        // same bytes in at most two contiguous spans, including ring wrap,
+        // without a division and channel loop for every decoded frame.
+        const auto at = (layer.head + layer.view.bufferedFrames) % limits.maxBufferedFramesPerLayer;
+        const auto first = std::min(count, limits.maxBufferedFramesPerLayer - at);
+        const auto frameBytes = size_t(layer.view.channels) * sizeof(float);
+        std::memcpy(layer.raw.data() + size_t(at) * layer.view.channels, buffer.data(), size_t(first) * frameBytes);
+        if (first < count)
+            std::memcpy(layer.raw.data(), buffer.data() + size_t(first) * layer.view.channels,
+                        size_t(count - first) * frameBytes);
         layer.view.bufferedFrames += count;
         return count;
     }
+    void send(Layer& layer, const Packet& packet, FailureStage& operation) {
+        for (;;) {
+            operation = FailureStage::Decode;
+            const auto result = layer.codec->send(packet);
+            operation = FailureStage::Counter;
+            if (result == PacketResult::Accepted) {
+                increment(layer.view.acceptedPackets, 1);
+                return; // The packet is never resubmitted after acceptance.
+            }
+            increment(layer.view.sendBackpressure, 1);
+            const auto count = read(layer, operation);
+            operation = FailureStage::Decode;
+            require(count != 0, "XMA send/read made no progress after NeedDrain");
+        }
+    }
     void feed(Source& source, uint32_t index, FailureStage& operation) {
         auto& layer = layers[index];
-        for (const auto& packet : source.input[index].packets) {
-            for (;;) {
-                operation = FailureStage::Decode;
-                const auto result = layer.codec->send(packet);
-                operation = FailureStage::Counter;
-                if (result == PacketResult::Accepted) {
-                    increment(layer.view.acceptedPackets, 1);
-                    break; // The packet is never resubmitted after acceptance.
-                }
-                increment(layer.view.sendBackpressure, 1);
-                const auto count = read(layer, operation);
-                operation = FailureStage::Decode;
-                require(count != 0, "XMA send/read made no progress after NeedDrain");
-            }
-        }
+        auto& fed = source.fed[index];
+        const auto& packets = source.input[index].packets;
+        for (; fed < packets.size(); ++fed) send(layer, packets[fed], operation);
         // Greedy sends above exercise actual codec backpressure. A zero read is
         // a pending bitstream, never EOF/reset; surplus remains in this ring.
         while (read(layer, operation)) {}
+    }
+    // Incremental decoding (Limits::prepareFrames): send this source's next packets
+    // until the layer buffers `target` frames or its packets run out. Each packet is
+    // drained as it is sent; the codec yields the same samples in the same order.
+    void feedUntil(Source& source, uint32_t index, uint64_t target, FailureStage& operation) {
+        auto& layer = layers[index];
+        auto& fed = source.fed[index];
+        const auto& packets = source.input[index].packets;
+        while (fed < packets.size() && layer.view.bufferedFrames < target) {
+            send(layer, packets[fed], operation);
+            ++fed;
+            while (read(layer, operation)) {}
+        }
     }
     void validate(const Ticket& ticket) const {
         ready();
@@ -159,13 +192,141 @@ struct XmaSource::State {
 
 XmaSource::XmaSource(NativeXmaFactory& factory, uint64_t generation,
                      std::span<const XmaFormat> formats, Limits limits)
-    : state(std::make_unique<State>(factory, generation, formats, limits)) {}
+    : state(std::make_unique<State>(&factory, generation, formats, limits)) {}
 XmaSource::~XmaSource() { close(); }
+
+XmaSource::XmaSource(uint64_t generation,std::shared_ptr<const FreshImage> image,std::span<const XmaFormat> formats,
+                     const Segment& segment,Limits limits)
+    : state(std::make_unique<State>(nullptr,generation,formats,limits)) {
+    auto& s=*state;
+    require(segment.continuity==Continuity::FreshContext && segment.sequence && segment.sequence!=maximum &&
+            segment.declaredFrames==image->declaredFrames && segment.initialConsumedFrames==image->initialConsumedFrames &&
+            segment.layers.size()==image->input.size() && formats.size()==image->formats.size() &&
+            limits.maxSources==image->limits.maxSources && limits.maxTickets==image->limits.maxTickets &&
+            limits.maxQuotaFrames==image->limits.maxQuotaFrames &&
+            limits.maxBufferedFramesPerLayer==image->limits.maxBufferedFramesPerLayer &&
+            limits.maxDeclaredFrames==image->limits.maxDeclaredFrames && limits.maxCompressedBytes==image->limits.maxCompressedBytes,
+            "Shared fresh XMA admission changed its decoded input");
+    for(size_t i=0;i<image->input.size();++i) {
+        require(segment.layers[i].skipFrames==image->input[i].skipFrames &&
+                segment.layers[i].packets==image->input[i].packets &&
+                formats[i].channels==image->formats[i].channels && formats[i].sampleRate==image->formats[i].sampleRate &&
+                formats[i].variant==image->formats[i].variant &&
+                image->views[i].bufferedFrames<=limits.maxBufferedFramesPerLayer,
+                "Shared fresh XMA packets/skip/storage differ from actual decoded input");
+        s.layers[i].view=image->views[i];
+    }
+    auto source=std::make_unique<State::Source>();
+    uint64_t bytes=0;for(const auto& layer:image->input)bytes+=layer.packets.size()*NativeXmaCodec::packetBytes;
+    require(bytes<=limits.maxCompressedBytes && segment.declaredFrames<=limits.maxDeclaredFrames &&
+            segment.initialConsumedFrames<segment.declaredFrames,"Shared fresh XMA source exceeds configured admission bounds");
+    source->view={s.receipt(segment.sequence),segment.slot,segment.declaredFrames,
+                  segment.initialConsumedFrames,SourceStatus::Prepared,bytes};
+    source->input=image->input;
+    source->fed.resize(source->input.size());
+    for(size_t i=0;i<source->input.size();++i)source->fed[i]=source->input[i].packets.size(); // Decoded in the image.
+    s.sources[0]=std::move(source);s.copiedBytes=bytes;s.lastSequence=segment.sequence;
+    s.epoch=1;s.configured=true;s.sharedFreshDecode=image->origin;s.freshImage=std::move(image);
+}
+
+bool XmaSource::decodeAhead(uint32_t packets) {
+    auto& s=*state;std::lock_guard lock(s.mutex);
+    if(s.closed || s.failure.stage!=FailureStage::None || s.freshImage)return false;
+    State::Source* next=nullptr;
+    for(auto& source:s.sources)
+        if(source && !source->complete() && (!next || source->view.receipt.sequence<next->view.receipt.sequence))next=source.get();
+    if(!next)return false;
+    FailureStage operation=FailureStage::Decode;uint32_t index=0;
+    try {
+        for(;index<s.layers.size();++index) {
+            auto& layer=s.layers[index];auto& fed=next->fed[index];
+            const auto& input=next->input[index].packets;
+            for(uint32_t sent=0;sent<packets && fed<input.size();++sent,++fed) {
+                s.send(layer,input[fed],operation);
+                while(s.read(layer,operation)){}
+            }
+        }
+    } catch(...) {s.fail(operation,next->view.receipt,index);throw;}
+    return !next->complete();
+}
+bool XmaSource::decodedAllInput() const {
+    const auto& s=*state;std::lock_guard lock(s.mutex);
+    for(const auto& source:s.sources)if(source && !source->complete())return false;
+    return true;
+}
+std::shared_ptr<const XmaSource::FreshImage> XmaSource::completedFreshImage(const std::vector<LayerInput>& input,Receipt origin,
+                                                                          uint32_t declaredFrames,uint32_t initialConsumedFrames) const {
+    const auto& s=*state;std::lock_guard lock(s.mutex);
+    if(s.closed || s.failure.stage!=FailureStage::None || s.epoch!=1 || s.freshImage || input.size()!=s.layers.size())return {};
+    for(size_t i=0;i<s.layers.size();++i) {
+        const auto& layer=s.layers[i];
+        // The ring began at frame 0 and never wrapped, so it still holds every frame.
+        if(!layer.codec || layer.view.acceptedPackets!=input[i].packets.size() ||
+           layer.view.decodedFrames>s.limits.maxBufferedFramesPerLayer || layer.raw.empty())return {};
+    }
+    auto image=std::make_shared<FreshImage>();
+    image->input=input;image->origin=origin;image->limits=s.limits;image->limits.prepareFrames=0;
+    image->declaredFrames=declaredFrames;image->initialConsumedFrames=initialConsumedFrames;
+    uint64_t bytes=sizeof(FreshImage)+s.layers.size()*(sizeof(XmaFormat)+sizeof(LayerView)+sizeof(std::vector<float>)+sizeof(LayerInput));
+    for(const auto& layer:s.layers) {
+        image->formats.push_back(layer.codec->format());
+        LayerView view=layer.view;view.rawHeadFrame=0;view.bufferedFrames=uint32_t(layer.view.decodedFrames);
+        image->views.push_back(view);image->raw.push_back(layer.raw);
+        bytes+=layer.raw.capacity()*sizeof(float);
+    }
+    for(const auto& layer:input)bytes+=layer.packets.size()*sizeof(Packet);
+    image->memoryBytes=bytes;
+    return image;
+}
+uint64_t XmaSource::freshImageBytes() const {
+    const auto& s=*state;std::lock_guard lock(s.mutex);s.ready();
+    require(s.epoch==1 && !s.committedFrames && !s.pending && !s.freshImage,
+            "Fresh XMA image requires an unconsumed actual decoder result");
+    const State::Source* source=nullptr;
+    for(const auto& candidate:s.sources)if(candidate) {require(!source,"Fresh XMA image has multiple receipts");source=candidate.get();}
+    require(source && source->view.status==SourceStatus::Prepared,"Fresh XMA image lacks a prepared source");
+    uint64_t bytes=sizeof(FreshImage)+s.layers.size()*(sizeof(XmaFormat)+sizeof(LayerView)+sizeof(std::vector<float>)+sizeof(LayerInput));
+    for(const auto& layer:s.layers) {
+        require(layer.codec && !layer.head && !layer.view.rawHeadFrame,"Fresh XMA image has mutable continuation/output progress");
+        bytes+=layer.raw.capacity()*sizeof(float);
+    }
+    for(const auto& layer:source->input)bytes+=layer.packets.size()*sizeof(Packet);
+    return bytes;
+}
+
+std::shared_ptr<const XmaSource::FreshImage> XmaSource::shareFreshImage() {
+    const auto bytes=freshImageBytes();
+    auto& s=*state;std::lock_guard lock(s.mutex);s.ready();
+    // Cache publication is private to an unexposed prepared owner. Allocate
+    // all image metadata/packet copies before moving any real decoded backing.
+    require(s.epoch==1 && !s.committedFrames && !s.pending && !s.freshImage,
+            "Fresh XMA image output changed before publication");
+    const State::Source* source=nullptr;
+    for(const auto& candidate:s.sources)if(candidate) {require(!source,"Fresh XMA image has multiple receipts");source=candidate.get();}
+    require(source && source->view.status==SourceStatus::Prepared,"Fresh XMA image lost its prepared source");
+    auto image=std::make_shared<FreshImage>();
+    image->raw.resize(s.layers.size());image->formats.reserve(s.layers.size());image->views.reserve(s.layers.size());
+    image->input=source->input;image->origin=source->view.receipt;image->limits=s.limits;
+    image->declaredFrames=source->view.declaredFrames;image->initialConsumedFrames=source->view.consumedFrames;
+    image->memoryBytes=bytes;
+    for(const auto& layer:s.layers) {
+        require(layer.codec && !layer.head && !layer.view.rawHeadFrame,"Fresh XMA image cursor changed before publication");
+        image->formats.push_back(layer.codec->format());image->views.push_back(layer.view);
+    }
+    for(size_t i=0;i<s.layers.size();++i)image->raw[i]=std::move(s.layers[i].raw);
+    s.sharedFreshDecode=image->origin;s.freshImage=image;
+    for(auto& layer:s.layers) {
+        if(s.pool)s.pool->give(std::move(layer.codec)); // Fully decoded; the image no longer needs it.
+        layer.codec.reset();
+    }
+    return image;
+}
 
 XmaSource::Preparation XmaSource::prepare(const Segment& segment) {
     auto& s = *state;
     std::lock_guard lock(s.mutex);
     s.ready();
+    require(!s.freshImage,"An immutable fresh XMA owner cannot accept compressed continuation");
     require(segment.sequence && segment.sequence != maximum && segment.sequence > s.lastSequence,
             "XMA source sequence must increase without wrapping");
     require(segment.continuity == Continuity::FreshContext || segment.continuity == Continuity::ContinueContext,
@@ -196,6 +357,7 @@ XmaSource::Preparation XmaSource::prepare(const Segment& segment) {
     source->view = {s.receipt(segment.sequence), segment.slot, segment.declaredFrames,
                     segment.initialConsumedFrames, SourceStatus::Prepared, bytes};
     source->input = segment.layers;
+    source->fed.assign(segment.layers.size(), 0);
     auto* admitted = source.get();
     *empty = std::move(source);
     s.copiedBytes += bytes;
@@ -217,7 +379,16 @@ XmaSource::Preparation XmaSource::prepare(const Segment& segment) {
             ++s.epoch;
             s.configured = true;
         }
-        for (index = 0; index < s.layers.size(); ++index) s.feed(*admitted, index, operation);
+        // Codec order follows source order: an earlier source decoding incrementally
+        // finishes all of its packets before this segment's packets are sent.
+        for (auto& earlier : s.sources)
+            if (earlier && earlier.get() != admitted && !earlier->complete())
+                for (index = 0; index < s.layers.size(); ++index) s.feed(*earlier, index, operation);
+        for (index = 0; index < s.layers.size(); ++index) {
+            if (s.limits.prepareFrames)
+                s.feedUntil(*admitted, index, uint64_t(admitted->input[index].skipFrames) + s.limits.prepareFrames, operation);
+            else s.feed(*admitted, index, operation);
+        }
     } catch (...) {
         s.fail(operation, admitted->view.receipt, index);
         throw;
@@ -243,6 +414,11 @@ XmaSource::Staging XmaSource::stage(Receipt receipt, uint32_t frames) {
         const auto take = uint64_t(source.input[index].skipFrames) + frames;
         require(take <= s.limits.maxBufferedFramesPerLayer, "XMA skip plus quota exceeds configured storage");
         require(take <= maximum - s.layers[index].view.rawHeadFrame, "XMA raw cursor exhausted");
+        if (take > s.layers[index].view.bufferedFrames && !s.freshImage && !source.complete()) {
+            FailureStage operation = FailureStage::Decode;
+            try { s.feedUntil(source, uint32_t(index), take, operation); }
+            catch (...) { s.fail(operation, receipt, uint32_t(index)); throw; }
+        }
         if (take > s.layers[index].view.bufferedFrames) needsInput = true;
     }
     if (needsInput) return {StageStatus::NeedInput, {}};
@@ -267,7 +443,8 @@ XmaSource::Staging XmaSource::stage(Receipt receipt, uint32_t frames) {
         for (uint32_t channel = 0; channel < layer.view.channels; ++channel, ++component)
             for (uint32_t frame = 0; frame < frames; ++frame) {
                 const auto at = (layer.head + skip + frame) % s.limits.maxBufferedFramesPerLayer;
-                ticket->samples_[size_t(component) * frames + frame] = layer.raw[size_t(at) * layer.view.channels + channel];
+                const auto& raw=s.freshImage?s.freshImage->raw[index]:layer.raw;
+                ticket->samples_[size_t(component) * frames + frame] = raw[size_t(at) * layer.view.channels + channel];
             }
     }
     *slot = ticket;
@@ -307,8 +484,16 @@ XmaSource::SourceView XmaSource::query(Receipt receipt) const {
 void XmaSource::retire(Receipt receipt) {
     auto& s = *state;
     std::lock_guard lock(s.mutex);
-    const auto& source = s.find(receipt);
+    auto& source = s.find(receipt);
     require(source.view.status != SourceStatus::Prepared, "Cannot retire unconsumed XMA source");
+    if (source.view.status == SourceStatus::Delivered && !source.complete() && !s.freshImage && !s.closed &&
+        s.failure.stage == FailureStage::None) {
+        // A continuation segment needs the codec to have seen every earlier packet.
+        FailureStage operation = FailureStage::Decode;
+        uint32_t index = 0;
+        try { for (; index < s.layers.size(); ++index) s.feed(source, index, operation); }
+        catch (...) { s.fail(operation, receipt, index); throw; }
+    }
     s.copiedBytes -= source.view.copiedBytes;
     for (auto& value : s.sources)
         if (value.get() == &source) { value.reset(); break; }
@@ -332,6 +517,7 @@ XmaSource::Snapshot XmaSource::snapshot() const {
         return a.receipt.sequence < b.receipt.sequence;
     });
     for (const auto& layer : s.layers) result.layers.push_back(layer.view);
+    result.sharedFreshDecode=s.sharedFreshDecode;
     return result;
 }
 void XmaSource::close() {
@@ -347,11 +533,16 @@ void XmaSource::close() {
     }
     s.copiedBytes = 0;
     for (auto& layer : s.layers) {
+        if (s.pool) {
+            s.pool->give(std::move(layer.codec));
+            s.pool->giveRing(std::move(layer.raw));
+        }
         layer.codec.reset();
         std::vector<float>().swap(layer.raw);
         layer.view.bufferedFrames = 0;
         layer.head = 0;
     }
+    s.freshImage.reset();
 }
 std::span<const float> XmaSource::Quota::plane(uint32_t component) const {
     require(component < channels_, "XMA quota component outside extent");

@@ -1,246 +1,388 @@
 # Native video settings
 
-Open **Pause → Options → Video** (also available from frontend Options).
-Use Up/Down to select a row and Left/Right to change it. With the mouse, hover a
-row and click its left or right half to decrease or increase it; the wheel also
-changes the selected setting. Accept and Cancel are clickable. The screen uses the
-original game's Apt display list, font, pulsing buttons and controller navigation.
+Open **Pause → Options → Video**, or Video from the frontend Options menu.
+The menu opens on its page row: Left/Right there switches between seven pages
+(**Display**, **Quality**, **Effects**, **Color**, **Outlines**,
+**Performance**, **Game**); Up/Down selects a row and Left/Right changes it.
+Mouse hovering, clicking either half of a row, and the wheel also change
+settings. Accept saves all pages; Cancel restores every setting from when the
+menu opened.
 
-The menu contains the original Brightness slider and fifteen native controls.
-The first row changes between **Display** and **Effects** pages with Left/Right,
-the mouse halves, or the wheel. Each page has nine selectable rows and retains
-the original Accept/Cancel footer. Page changes keep all previews and settings;
-Accept and Cancel apply to the complete menu session.
+The menu keeps the original Brightness slider and adds forty rows. Rows marked
+*Restart* (or *Next launch*) are saved by Accept and take effect when the game
+starts again; every other row previews immediately.
 
-| Setting | Choices |
-| --- | --- |
-| Render resolution (restart) | 1280 × 720, 1600 × 900, 1920 × 1080, 2560 × 1080 (Ultrawide), 2560 × 1440, 3440 × 1440 (Ultrawide), 3840 × 1600 (Ultrawide), 3840 × 2160, 5120 × 1440 (Ultrawide) |
-| Window size | 1280 × 720, 1600 × 900, 1920 × 1080, 2560 × 1440, 3840 × 2160; ultrawide: 2560 × 1080, 3440 × 1440, 3840 × 1600, 5120 × 1440 |
-| Display mode | Windowed, borderless fullscreen |
-| VSync | Off, On |
-| Frame limit | 30, 60, 90, 120, 144, 165, 240 FPS, Unlimited |
-| Texture filtering (restart) | Original, 4×, 8×, 16× anisotropic |
-| Antialiasing (restart) | Original, FXAA, FXAA + Original, SSAA 4× |
-| FOV (16:9) | Original, 60–110 degrees in steps of 5 |
-| Render scale (restart) | 50%, 67%, 75%, 100%, 125%, 150%, 200% |
-| Bloom | On, Off |
-| Depth of field | On, Off |
-| Motion blur | On, Off |
-| Atmospheric fog | On, Off |
-| Color grading | On, Off |
-| Cinematic bars | On, Off |
+| Page | Setting | Choices | Applies |
+| --- | --- | --- | --- |
+| Display | Display mode | Windowed, Borderless, Fullscreen (exclusive) | Live |
+| Display | Window size / Display resolution | Windowed: nine 16:9 and ultrawide sizes. Fullscreen: the monitor's 32-bit modes from 1280 × 720 up, or Desktop | Live |
+| Display | Refresh rate | Fullscreen: every rate the selected mode offers; otherwise the desktop rate (shown) | Live |
+| Display | VSync | Off, On | Live |
+| Display | Frame limit | 30, 60, 90, 120, 144, 165, 240 FPS, Unlimited | Live |
+| Display | Render resolution | **Match display** (default), or 1280 × 720 … 3840 × 2160 and four ultrawide extents | Live |
+| Display | Render scale | 50%, 67%, 75%, 100%, 125%, 150%, 200% | Live |
+| Quality | Antialiasing | Original; FXAA Low, FXAA, FXAA High, FXAA + Original; SMAA; **TAA** | Live |
+| Quality | Texture filtering | Original, Nearest, Bilinear, Trilinear | Live |
+| Quality | Anisotropic filtering | Off, 2×, 4×, 8×, 16× | Live |
+| Quality | Shadow quality | Low, Original, High, Ultra | Live |
+| Quality | Ambient occlusion | Off, Low, High | Live |
+| Quality | Upscaling | Bilinear, Edge-adaptive | Live |
+| Quality | Sharpening | 0%, 25%, 50%, 75%, 100% | Live |
+| Quality | Character detail | Off, Low, Medium, High | Restart |
+| Effects | FOV (16:9) | Original, 60–110 degrees in steps of 5 | Live |
+| Effects | Bloom, Depth of field, Motion blur, Atmospheric fog | On, Off | Live |
+| Effects | Lens flare | On, Off | Live |
+| Effects | Screen shake | On, Off | Live |
+| Effects | Cinematic bars | On, Off | Live |
+| Color | Color grading | On, Off | Live |
+| Color | Color look | Original, Vivid, Punchy, Soft, Custom | Live |
+| Color | Vibrance, Saturation, Contrast, Exposure | −50% … +50% in steps of 10 (Custom look) | Live |
+| Outlines | Ink outlines | Original (hard), Soft, Off | Live |
+| Outlines | Soft outline strength | 25%, 50%, 75%, 100% | Live |
+| Outlines | Outline color | Black, Charcoal, Brown, Navy, Forest, Plum, Crimson, Sepia | Live |
+| Outlines | Character eyes | Original, Clean | Live |
+| Performance | Background limit | 15, 30, 60 FPS, Unlimited | Live |
+| Performance | Menu frame limit | Same as gameplay, 30, 60 FPS | Live |
+| Performance | Frame queue | 1, 2, 3 frames | Live |
+| Performance | FPS counter | Off, On | Live |
+| Performance | Skip intro videos | Off, On | Next launch |
+| Performance | Renderer | D3D11, Vulkan ([native Vulkan renderer](native-vulkan-renderer.md)) | Restart |
+| Game | New game episode | Any of the 16 story episodes | Restart |
 
-Window size, display mode, VSync, frame limit, FOV and the six effect toggles
-apply live. Render resolution, render scale, texture filtering and antialiasing
-apply when the game is relaunched; these rows say `(restart)` in the native menu.
-Accept saves the preferences; Cancel restores their values from when the menu
-opened. The original engine continues to handle brightness and menu transitions.
+Film grain, chromatic aberration and vignette are not original effects of this
+game, so they have no switches.
 
-The FOV value is a horizontal **16:9 reference**, with 60 degrees matching the
-original camera factory's field of view. It scales the authored camera's perspective
-tangents by `tan(FOV / 2) / tan(60 / 2)`, retaining the original zoom and cinematic changes;
-the actual camera angle can therefore differ from the reference during those
-changes. Original restores the unmodified authored view. Ultrawide expands the
-horizontal view at the selected scene aspect while retaining the adjusted
-vertical view. The original view-window setter rebuilds projection reciprocals
-and the culling frustum. The selected FOV is published before the scene copies
-its visibility planes, so objects beyond the default FOV remain visible inside
-the selected view. See [original visibility verification](native-fov-visibility.md).
-Menu/HUD, shadow, reflection and split-screen camera
-profiles retain their original projections. Repeated camera begins do not
-accumulate the adjustment, and Cancel restores the prior FOV live. Opening and
-closing menus preserves the authored camera projection through the original
-temporary square-camera override and restoration.
+## Display modes
 
-Render scale changes the number of scene pixels independently of the output
-window. For example, 2560 × 1440 at 75% renders at 1920 × 1080. Scene color,
-depth, post-processing and the HUD use the scaled targets; the output window
-stays at its chosen size. SSAA 4× additionally doubles each scene dimension
-and resolves four samples. Choices that would exceed 33,177,600 scene pixels
-or D3D11's 16,384-pixel axis limit are skipped when changing resolution, AA or
-scale. For example, 4K with SSAA supports 100% scale, but not 125%.
-Defaults remain 100% scale and Original FOV.
-Below 100%, the outline and smoothing filters retain their original texel
-sampling span so downscaling keeps the game's ink edges.
+Windowed and Borderless keep the desktop mode. Fullscreen switches the game's
+monitor to the selected display resolution and refresh rate
+(`ChangeDisplaySettingsEx` with `CDS_FULLSCREEN`, so Windows restores the
+desktop mode if the game exits). Alt-Tab or losing focus restores the desktop
+mode and minimizes the game; returning re-applies the selected mode. The mode
+list comes from the monitor (32-bit, progressive, at least 1280 × 720);
+Desktop uses the current desktop mode. Automated and background test windows
+(`SIMPSONS_BACKGROUND_WINDOW=1`) treat Fullscreen as Borderless so tests never
+change the user's display mode.
 
-Bloom, depth of field, motion blur, atmospheric fog, color grading and cinematic
-bars default to On, retaining the original
-effects. Off suppresses only the corresponding native draw; the original
-effect preparation, validation, target copies and state restoration continue.
-Motion-blur history refreshes even while disabled so re-enabling it cannot
-blend with an old frame. Atmospheric fog controls the original depth-based fog
-screen pass; color grading controls its saturation/color treatment pass;
-cinematic bars control the letterbox pass. Cel shading and ink outlines keep
-their existing behavior. These controls only affect effects requested by the
-current scene; an unrequested effect has no visible change.
+Render resolution **Match display** follows the presented size: the window
+client, the desktop, or the exclusive mode. It picks the largest supported
+16:9 … 32:9 internal extent that fits (1280 × 720 to 5120 × 2160); Render scale
+then applies on top. When the internal image is smaller than the window,
+Upscaling selects DXGI's bilinear stretch or an edge-adaptive filter that keeps
+outlines sharp.
 
-The Render resolution row explicitly labels wide choices `Ultrawide`. Right
-from 1920 × 1080 selects 2560 × 1080; Right from 2560 × 1440 selects
-3440 × 1440. Both directions visit all nine presets. This display order keeps
-the saved preference IDs unchanged. Menu logs report the native action, row,
-selected extent ID and complete displayed label for manual retests.
+## Temporal antialiasing
 
-Applying settings skips window style/size changes when the current output and
-display mode already match. Staged render/AA/filtering changes and live pacing
-changes therefore keep mouse capture; changing Window size while fullscreen
-also leaves the desktop-sized window alone.
+TAA jitters the world projection by an eight-sample Halton(2,3) sequence
+(applied where the original camera begin stores its projection, `0x823F0210`;
+HUD, shadow and reflection cameras are not jittered), then resolves
+the scene color after the post depth copy and before the original post
+effects. History is reprojected with the previous view-projection matrix,
+clamped to the current neighbourhood, and reset on camera cuts. The packed
+material flags in scene-color alpha are kept, so the original cel-shading and
+outline pass still reads them. Like the other modes it can be switched live;
+the first TAA frame starts a fresh history.
 
-Render resolution controls actual D3D11 scene color, depth, front buffers,
-history/resolve copies, and proportional post-processing targets. The renderer
-rasterizes geometry into the selected extent, rather than enlarging a completed
-720p image. Original guest camera/raster metadata and menu coordinates stay
-1280 × 720 and are mapped to physical GPU viewport/scissor coverage. Fixed-size
-shadow, reflection, distortion and corona query resources keep their original
-dimensions. Texture filtering changes linear material samplers in immediate and
-cached rigid, skin and sky geometry; point lookup maps and shadow samplers keep
-their original sampling. These settings are frozen before GPU resource and
-cached draw-command creation, hence the relaunch requirement.
+## Textures, shadows and occlusion
 
-Ultrawide render resolutions use the selected scene aspect ratio. Choose an
-ultrawide **Render resolution** to render the wider scene; Window size controls
-the output client independently. The full-size main perspective camera keeps
-its vertical field of view and expands its horizontal view through the original
-camera setter and frustum updates. Split-screen and other camera profiles retain
-their existing behavior. Apt menus/HUD and movie content keep their 16:9
-proportions; loading artwork outside the Apt draw path retains its existing policy.
-For example, a 1920 × 1080 internal image displayed on a 3440 × 1440 desktop
-has side bars. To fill that desktop with the wider scene, select 3440 × 1440
-as **Render resolution**, Accept, and relaunch. Window size applies immediately
-and controls only the output; fullscreen always uses the monitor's desktop size.
+Texture filtering replaces the linear material samplers: Nearest keeps texels
+square, Bilinear disables mip blending, Trilinear blends mips; Original keeps
+the game's own filter. Anisotropic filtering applies on top of any linear mode.
+Point-sampled lookup maps, palettes and comparison samplers are never changed.
 
-Original antialiasing preserves the game's existing smoothing. FXAA keeps the
-original compositing effects, cel shading and outlines, removes their neighboring
-pixel smoothing offsets, then applies a native FXAA filter to the final image.
-FXAA + Original combines both smoothing methods. SSAA 4× renders the scene at
-twice the selected resolution in each dimension, retains the original effects,
-and averages each 2 × 2 block into one output pixel. For example, 1280 × 720
-with SSAA 4× renders scene geometry at 2560 × 1440 and produces a 1280 × 720
-internal image. SSAA requires more GPU work and memory than the other modes.
+Shadow quality scales the storage of the 1024 × 1024 shadow-map surfaces (the
+character and world shadow depths) to 512, 1024, 2048 or 4096 texels per side;
+their logical size and the original shadow matrices stay unchanged.
 
-Native presentation fits the selected internal image to the window or desktop
-while preserving its aspect ratio, adding bars when the output aspect differs.
-Selecting a higher internal extent than the window provides supersampling.
-Fullscreen uses the current monitor's
-desktop dimensions. VSync uses native DXGI presentation.
-The frame limit updates both the original frame-wait owner and native pacing;
-it is a limit, not a promise that every scene achieves that frame rate.
-60 FPS retains the original one-refresh scheduler; other capped choices use
-the native presentation limiter. Changing the limit clears its previous pacing
-history. Gameplay clocks retain real elapsed time at every supported rate.
+Ambient occlusion is a depth-only screen-space pass over the finished world
+image (8 samples for Low, 16 with a wider radius for High), blurred at half
+resolution and multiplied into color before the post effects. HUD and menus are
+not affected.
 
-Preferences are stored next to the profile-store directory, with `.video.cfg`
-appended to its name. For example, `userdata/local-profiles.video.cfg` belongs
-to `userdata/local-profiles`. Keeping this small file outside the profile
-directory preserves the engine's strict profile-file validation. Missing or
-invalid preferences use 720p internally and windowed, original filtering and
-antialiasing, VSync off, a 120 FPS limit, Original FOV, 100% render scale and
-enabled original effects. Version 6 appends atmospheric fog, color grading and
-cinematic bars flags, and adds the two standard window sizes at new IDs without
-changing older window extent IDs. Versions 1–5 retain their existing fields and
-enable those three new effects. Version 5 adds FOV, scale and the first three effect flags
-after the original eight fields. Versions 1–4 retain their existing fields and
-use the original defaults for the new controls. Version 4 adds the ultrawide extents
-without changing existing resolution indices or the preference-field order.
-Version 3 preferences retain all rendering, display and antialiasing values.
-Version 2 preferences retain all their
-rendering and display values and select Original antialiasing.
-Existing version 1 preferences migrate the selected resolution to both internal
-rendering and window size, preserving the user's resolution choice.
+## Color look
+
+Color look adjusts the finished world image before the HUD: Vivid, Punchy and
+Soft are presets; Custom uses the four sliders. Original leaves the image
+unchanged. Color grading is the separate original saturation treatment.
+
+## Outlines and eyes
+
+The game draws its ink outlines inside the original `simpsons_edgeAA`
+composite. Original keeps it exact (the extra parameters are zero). Soft fades
+the lines to the chosen strength, Off removes them, and Outline color tints
+them (black is the original).
+
+Character eyes **Clean** affects the base character shader family, whose
+vertex color carries the artists' "no rim shadow" flag (eye whites). The
+original rim test only accepts a fully set flag; Clean accepts it from 0.5, so
+triangles where the flag is partly set no longer show speckled rim shadow on
+eye whites. The native port already interpolates this flag without
+perspective, which removes most of the console's speckles even in Original.
+Changing it re-records sealed skin draws.
+
+## Character detail
+
+Character detail rounds skinned character meshes with curved PN triangles:
+Low, Medium and High split every triangle edge into 2, 3 or 4 segments (4×, 9×
+or 16× the triangles). Corners keep the original vertices; new vertices lie on
+cubic patches built from normals averaged over identical positions, so
+neighbouring triangles, UV seams and material boundaries share one edge curve
+and the surface stays closed. Bone weights, UVs, colours and facial morph
+deltas are interpolated, so animation and expressions are unchanged.
+
+Each draw range is smoothed once, on a low-priority worker thread, the first
+time it is drawn; until the result is ready (usually a few frames) the original
+mesh draws. Uploading a finished range costs the render thread about 1–2 ms,
+at most one per frame. Recorded (replayed) draws keep what they record, so
+they smooth their range when recorded, on the render thread. Results stay with
+the cached mesh. On the first-mission
+start view High measured 147.3 and 146.6 FPS against 146.6 and 143.1 FPS with
+detail Off (D3D11, 720p, uncapped). Shadow maps and the depth-only passes use
+the original meshes; eyeballs become rounder too, which can make them show a
+little more from the side.
+
+## Presentation extras and menus
+
+The FPS counter draws the presented frame rate in the corner of the final
+image, on a copy made at presentation, so scene captures do not include it. Menu frame limit
+caps presentation while a menu or the pause screen is open. Skip intro videos
+skips the startup logo movies on the next launch.
+
+## New game episode
+
+New game episode chooses the episode that **New Game** starts in. At startup
+the game's `simpsons_gameflow.lua` is copied to `<exe>/native-gameflow/`, with
+its `SetDefault()` moved to the chosen episode, and the game loads that copy
+instead (`[NATIVE GAMEFLOW]` in the log). The retail script is not modified;
+if its layout is not the expected retail one, New Game keeps its original
+episode. Existing saves are not affected.
+
+## Live rendering changes
+
+Render resolution, Render scale, Antialiasing, Texture and Anisotropic
+filtering and Shadow quality apply at the next presentation after the row
+changes. That frame waits for the GPU to
+go idle, then (`renderer/live_rendering.cpp`):
+
+- allocates new storage for every Scene- and Output-sized engine target whose
+  extent changes, before any owner is modified, so a failed allocation keeps
+  the active settings;
+- carries the current contents across: filtered color, nearest depth, and
+  stencil one bit per pass (no shader stencil export needed);
+- swaps the new storage into the existing owners, which keep their identity and
+  logical size, and moves the engine's bound attachments, sampled views,
+  viewports and scissors to it;
+- re-records sealed recorded draws (rigid, skin, sky, mono) so they reference
+  the new views, physical rectangles and filtered samplers;
+- moves the temporal origin pins to the new storage (raster grids become
+  unknown; clears survive), and lets the next presentation resize the swap
+  chain after its queued copy has completed.
+
+If a recording session is open the change waits for the next presentation.
+A change rejected before publication (unsupported settings or budget) keeps
+the active settings and the menu shows them again; a failure after publication
+stops the game instead of rendering partly updated state. The log line
+`[NATIVE VIDEO] live rendering ...` reports the old and new extents, the number
+of re-backed targets and re-recorded lists, and how long the change took. The
+frame limiter discards that one long frame instead of carrying it as pacing
+debt. `tools/test_live_rendering_settings.py` drives these changes through the
+real paused-game menu and checks each one with a renderer readback.
+
+After MSAA was removed (2026-10-14, D3D11, first mission, background window)
+that run applied ten changes in one process: 1280 × 720 → 1600 × 900,
+Original → 4× filtering, every AA step from Original through SMAA,
+100% → 75% scale, a 1280 × 720 preview and its Cancel. Re-backing 22 color and
+5 depth targets and re-recording 126 lists took 11.9 ms for the resolution
+change and 4.2–6.0 ms for scale changes; filtering took 5.7 ms; AA steps took
+1.1–3.7 ms. The Video menu showed `Antialiasing: SMAA` as the last choice.
+Accept saved the choices, Cancel restored the accepted storage, and the game
+closed normally
+([verification](K:/SimpsonsNativeCopy/build/live-rendering-settings-20261014/live-20261014-223901-804566/verification.json)).
+The same run on the Vulkan renderer passed with 5.0–14.0 ms changes
+([verification](K:/SimpsonsNativeCopy/build/live-rendering-settings-20261014/live-20261014-224108-281155/verification.json)).
+
+## Image size and antialiasing
+
+Render resolution and Render scale determine the internal output image;
+Window size determines the client separately. For example, 2560 × 1440 at 75%
+produces a 1920 × 1080 internal output. Presentation preserves its aspect ratio
+and adds bars when it differs from the window. Borderless fullscreen uses the
+monitor's desktop dimensions.
+
+Original retains the game's smoothing. FXAA offers three edge-search qualities,
+and FXAA + Original combines both smoothing methods. SMAA applies spatial edge
+detection and neighborhood blending. For higher quality, combine SMAA with a
+render scale above 100%, which supersamples the whole pipeline.
+
+MSAA 2×/4×/8× has been removed. The game draws its cel shading, palette colors,
+rim light, shadows and ink outlines in a full-screen pass (`simpsons_edgeAA`)
+that reads single-sample copies of the scene. MSAA could not smooth those
+outlines, averaged the material flags packed into scene color at model edges
+(wrong palette colors on exactly those pixels), and multiplied the cost of every
+later post-effect for samples that were already identical. All render targets
+are single-sample; the Vulkan renderer rejects multisampled textures.
+
+SSAA choices have also been removed. Saved retired SSAA IDs 3 and 6 and excluded
+temporal IDs 11–15 migrate to Original antialiasing, and removed MSAA IDs 8–10
+migrate to SMAA, while retaining independent display, effects, and pacing
+preferences. Legacy versions retain their original
+schema checks; unknown AA IDs or malformed fields still fall back to defaults.
+Render scale remains an independent image-size control. DLAA and DLSS are
+excluded from this build; the normal game needs no NGX SDK or runtime.
+
+The settings enforce a maximum of 33,177,600 output pixels, D3D11's texture axis
+limit, and a 1 GiB budget for scene color plus depth storage (12 bytes per
+pixel). Resolution, scale, and AA cycles skip combinations exceeding these limits.
+This budget excludes other textures and driver allocations.
+
+Sharpening is applied after antialiasing. Its 0% default preserves the image;
+higher values use a contrast-clamped filter and affect the presented scene and
+HUD.
+
+## Camera and effects
+
+FOV is a horizontal reference at 16:9. The original reference is 60 degrees;
+the chosen value scales the authored perspective tangents while retaining zoom
+and cinematic changes. Ultrawide expands the horizontal view while retaining
+the adjusted vertical view. The original camera setter updates the culling
+frustum. Original restores the authored view, and repeated camera begins do not
+accumulate the adjustment. HUD, menus, shadow, reflection, and split-screen
+camera profiles retain their original projections. Apt UI and movies retain
+their 16:9 proportions.
+
+The effect switches default to On. Each switch controls the corresponding
+original effect when a scene requests it. Lens flare is the original
+sun-visibility-modulated glare overlay (pixel shader `0x82152318`); Screen
+shake removes the original camera shake offset (`0x8295A3DC`) without changing
+gameplay. Neither appeared in the automated opening views, so their
+suppression has been checked in code and logs only. Motion-blur history still refreshes
+when the effect is disabled, so re-enabling it does not blend an old frame.
+Fog controls the depth-based atmosphere pass; Color grading controls the
+original saturation treatment; Cinematic bars controls letterboxing.
+
+## Pacing and preferences
+
+The frame limiter accounts for VSync blocking and replaces the original refresh
+wait for every explicit limit. With VSync on, a limit at or above the display's
+refresh rate (or a whole multiple of its period, such as 60 FPS on a 120 Hz
+display) follows the display's own vblanks instead of a separate clock, so every
+frame reaches its own refresh; a 120 FPS limit on a 119.84 Hz display runs at
+119.84. Gameplay updates are timed for the refresh or release they will be shown
+at. Changing the limit or VSync resets its timing history. A selected limit caps
+presentation; actual scene performance can be lower. See `docs/frame-pacing.md`.
+
+Background limit reduces presentation work when the game is inactive or
+minimized and never raises a lower foreground limit. Unlimited removes the
+additional background cap. Frame queue sets DXGI's maximum queued presentation
+frames (on Vulkan, the frames in flight before Present waits): one is the
+default, with two and three available. It does not specify a measured input
+latency.
+
+The 2026-10-12 performance build passed separate 90-second Medal and house
+checks at the settings below, including audio, controller acknowledgments,
+world geometry, all 970 source inputs, unchanged primary preferences and
+unforced owned closure. It reuses exact screen state and movie scratch
+descriptors, batches immediate/particle state restoration, samples paired
+billboard traces, and retires a recording against its own last GPU event.
+All 21 automated tests passed, as did the separate hardware screen fixture.
+Fresh private training of nine changed translation units was merged into the
+accepted profile; the complete normal USE build had no profile-mismatch or
+discarded-count diagnostics.
+
+A fresh archived-baseline Medal run used the same route, private settings and
+helper protocol. The observed application intervals were:
+
+| Run and phase | Count | Mean | p99 | Maximum | Above 50 ms |
+| --- | --- | --- | --- | --- | --- |
+| Archived baseline Medal route | 767 | 36.551 ms | 67.423 ms | 91.545 ms | 75 |
+| Current Medal route | 633 | 44.500 ms | 74.984 ms | 80.663 ms | 216 |
+| Archived baseline Medal settled | 1166 | 43.814 ms | 61.329 ms | 76.904 ms | 647 |
+| Current Medal settled | 1139 | 44.774 ms | 61.221 ms | 72.649 ms | 480 |
+| Current house settled | 985 | 17.527 ms | 20.363 ms | 23.455 ms | 0 |
+| Current house movement | 246 | 17.605 ms | 20.266 ms | 26.149 ms | 0 |
+
+This comparison **does not establish a frame-rate improvement**. Frame times
+changed substantially within both Medal runs, and the route did not hold
+world state fixed. A post-run read-only host check found DarkRecomp using
+about 35% of the GPU while Simpsons was closed; total GPU utilization was
+about 44%. That observation establishes a competing workload at the time of
+the check, rather than its complete history or a causal explanation of the
+timing difference. The full current Medal run retains 767 intervals above
+50 ms and two above 100 ms; the house run retains eight and three,
+respectively. First real Medal rendering took 108.994 ms and first house
+rendering took 166.037 ms. Cold loading and the whole-game 60 FPS target remain
+unresolved. No other application was stopped.
+
+The [clean comparison](K:/SimpsonsNativeCopy/build/performance-20261012/clean-comparison-final-a.json),
+[host observation](K:/SimpsonsNativeCopy/build/performance-20261012/host-gpu-observation.json)
+and [build qualification](K:/SimpsonsNativeCopy/build/performance-20261012/final-normal-build-b/qualification.json)
+retain the current evidence. Every positive interval and outlier is included;
+the only excluded interval is each CSV's initial zero sentinel. A separate
+diagnostic run observed fewer sampler and blend/depth creation requests, as
+documented in `docs/runtime-stall-profiler.md`; instrumented timings are not
+clean benchmark evidence.
+
+The 2026-10-10 archived baseline build was checked in two separate 90-second runs with a
+60 FPS limit, VSync off, 4300 × 1800 internal rendering, a 3440 × 1440 window,
+FXAA High, 125% render scale and 16× filtering. Primary preferences stayed
+unchanged; these overrides applied only to the private test copies.
+
+| Application interval | Count | Mean | p99 | Maximum | Above 50 ms |
+| --- | --- | --- | --- | --- | --- |
+| Medal complete run | 3244 | 27.600 ms | 37.621 ms | 150.841 ms | 5 |
+| Medal route | 936 | 29.774 ms | 36.848 ms | 55.426 ms | 2 |
+| Medal settled stationary | 1973 | 26.072 ms | 28.488 ms | 45.059 ms | 0 |
+| House complete run | 5129 | 17.474 ms | 35.939 ms | 162.607 ms | 7 |
+| House settled stationary | 1032 | 16.670 ms | 16.787 ms | 19.269 ms | 0 |
+| House movement | 257 | 16.739 ms | 18.920 ms | 20.636 ms | 0 |
+
+Medal route and settled averages correspond to 33.59 and 38.36 application FPS;
+this still **does not meet the 60 FPS target**. The earlier same-settings
+observation recorded 12.54 and 16.38 FPS, respectively. The first Medal frame
+was 100.2047 ms. House settled and movement averages were 59.99 and 59.74 FPS,
+but the first-room entry frame still took **162.6069 ms**. Cold-loading stalls
+remain unresolved. All startup frames and outliers remain in the complete
+results, including two Medal and three house intervals over 100 ms.
+
+The current single-sample immediate and particle paths avoid whole-target
+copies while preserving quantized color, depth and draw order. Proven-empty
+immediate submissions skip invisible uploads; bounded reusable upload buffers
+and exact cached render-state descriptors reduce repeated setup. The retained
+copy paths provide comparison controls.
+That baseline's twelve focused WARP/hardware tests passed with zero skips in 8.42 seconds.
+Fresh training of the two changed rendering units was merged into the existing
+profile, followed by a complete normal USE rebuild with no profile-mismatch
+or discarded-count warnings. Build and gameplay verification are complete.
+
+The final [Medal verification](K:/Anything/simpsons-pacing-inspection-20261010/medal-copy-region-validation/two-tu-pgo-training-a/final-normal-helper/stall-reuse-clean-60-medal-final-use1/verification.json),
+[house verification](K:/Anything/simpsons-pacing-inspection-20261010/medal-copy-region-validation/artifacts-e/final-house-helper/stall-reuse-clean-60-final-house1/verification.json)
+and [independent raw-interval audit](K:/Anything/simpsons-pacing-inspection-20261010/medal-copy-region-validation/final-verification.json)
+retain the gates, phase boundaries and all outliers. Each run's adjacent
+`frames.csv` contains its raw intervals. The final
+[GPU test log](K:/Anything/simpsons-pacing-inspection-20261010/medal-copy-region-validation/two-tu-pgo-training-a/final-normal-build/final-twelve-serial-CTests/LastTest.log)
+records the twelve passing tests. Audio, route input, world geometry, all 970
+source inputs, primary preferences and normal owned closure passed; both game
+processes are gone.
+
+These are application intervals observed through Remote Desktop. The runs did
+not hold world state fixed and do not establish a matched causal gain,
+physical-display scanout, natural campaign progression or performance across
+every level. Earlier trials, including the prior 175.3868 ms first-house hitch,
+remain recorded in `MODLOG.md`.
+
+Preferences are stored beside the profile-store directory with `.video.cfg`
+appended, such as `userdata/local-profiles.video.cfg`. Version 10 appends 24
+fields to version 9 (display mode, refresh, anisotropy and every row above);
+loading version 9 or older keeps those settings and maps the old 4×/8×/16×
+filtering choice to Anisotropic filtering. Removed-mode migration changes only
+antialiasing. Defaults are a 1280 × 720 window, Match display rendering,
+Original AA and filtering, 100% scale, Original FOV, enabled original effects,
+Original shadows, no AO, VSync off, a 120 FPS foreground limit, 30 FPS
+background limit, no sharpening, one queued frame, and original outlines,
+eyes, character detail and New Game episode.
 
 Explicit `--frame-rate`, `--uncapped-frame-rate`, and `--vsync` launch flags
-override the saved initial settings. The normal launcher and automatic-start
-helper use saved preferences.
-`--frame-rate` accepts 30, 60, 90, 120, 144, 165 and 240.
-
-Recording and isolated-startup helpers copy the profile's sibling `.video.cfg`
-into their private run. Recordings also preserve the starting preferences beside
-the initial save/profile snapshot. Replays restore that snapshot when available,
-then recorded preferences or the configured profile's preferences for older
-runs. Their existing explicit frame-rate flags still apply. Relocated replay
-executables receive adjacent `native-assets`, and new crash archives bundle
-those packages with the original executable and DLLs. Older archives without
-the packages use a private binary copy with validated current menu assets;
-the archive stays unchanged. All 42 helper checks passed using temporary data
-and mocked launches, without running gameplay.
-
-`tools/build_native_video_menu.py` produces separate derived packages for both
-copies of `options.swf` under the executable's `native-assets` directory.
-Retail assets remain unchanged. The derived Options package adds Video pages
-and the native Controls extensions; Audio and Credits retain their original
-data and behavior.
-
-GPU verification checks actual D3D11 color/depth descriptors, physical scene
-viewports, proportional post targets, packed draw/readback extents at all five
-resolutions, fixed query extents, and actual native anisotropic sampler state.
-Captures report their actual internal dimensions and the depth telemetry samples
-the matching depth-buffer extent.
-
-Antialiasing GPU fixtures verify all four modes on actual WARP textures:
-Original preserves source bytes, FXAA smooths diagonal edges while leaving flat
-regions unchanged, and SSAA resolves the exact average of four independent
-scene samples. Full native context snapshots verify that presentation filtering
-restores engine bindings, viewport/scissor state and predication.
-
-Focused verification covers preference validation and persistence, forward
-and reverse control cycles including all four antialiasing modes, all nine
-render extents and seven window extents, version 1/2/3
-preference migration, actual window/fullscreen changes, original frame
-pacing, presentation contracts, launcher arguments, and preservation of all
-other packaged resources. Live gameplay captures verify menu navigation,
-setting previews, Accept/Cancel and returning to gameplay.
-
-Window-style changes preserve visibility and enabled state. Regression checks
-also verify native client mouse hit testing after every resolution change and
-fullscreen transition. Explicit window sizes account for the caption and borders
-without Windows shortening the requested client height to its default monitor
-tracking limit.
-
-The September 30 internal-resolution verification passed GPU fixtures at all
-five resolutions and full-game captures at 900p/1080p in the native build and
-1440p/2160p in the release build, each with an independent 1280 × 720 client.
-The 1080p native-menu run verified all seven rows, a live 1600 × 900 window,
-fullscreen, staged internal changes, cancellation, preference saving, and
-returning to scene geometry with fresh depth telemetry. Both game builds and
-their input-recorder executables include the rendering changes and derived menus.
-
-The antialiasing update passed 14 focused native checks and five release checks.
-Live captures verified every mode with fresh geometry/depth, enabled visible
-windows and completed presentation copies. The native eight-row menu run
-verified each AA choice, cancellation, saving and return to gameplay. The SSAA
-release run rendered scene color/depth at 2560 × 1440 and captured the resolved
-1280 × 720 internal output. Capture metadata records `scene_width`,
-`scene_height` and `antialiasing` separately from output `width`/`height`.
-
-The ultrawide update passed 21 focused checks in each final native/release
-configuration, including all four actual wide color/depth extents, the original
-camera setter/frustum, centered Apt/movie rendering and exact internal pixel
-copies across display aspect changes. The depth-of-field regressions cover
-zero focus distance, zero range and both zero through the original CPU and
-independent shader microcode fixtures. The user will verify ultrawide gameplay
-and the charged-burp release; those manual results are not established by these
-automated checks.
-
-The settings-return update passes isolated window/controller regressions in
-both builds. Menu input-gate diagnostics log result changes from the original
-Apt gate without changing its behavior, for the user's next pause-menu retest.
-
-The ultrawide-menu follow-up rebuild passes preference/navigation, native
-launcher and menu-asset checks in both builds. A bounded independent evaluator
-of the appended Apt bytes verifies all row actions, native-action export/reset
-and full ultrawide label assignment. It mocks method receivers and does not
-replace manual verification of the original AVM menu in-game. New row/action
-logs support the user's reported wrap-at-4K retest.
-
-The October 4 graphics-settings update passes all 528 tests in the final native
-build, including original camera/frustum and ABI checks, preference migrations,
-all menu actions, scaled rendering, frame pacing and effect disable/re-enable.
-WARP and hardware fixtures compare 50/67/75% outline, smoothing and cel
-compositing pixels against matching physical-size reference targets.
-
-A private first-mission run verifies all thirteen menu rows, live 110-degree
-FOV, previews, Cancel, Accept and saved preferences. Relaunch renders the selected
-75% scale at 960 × 540 with a 1280 × 720 output window; viewed captures retain
-ink outlines and show Original restoring the stock 60-degree view. Both owned
-runs close normally. These captures verify behavior, not a frame-rate gain or
-all-mission coverage. All 255 primary profile/content/preference hashes remain
-unchanged. Receipts are in `build/graphics-settings-20261004`.
+override saved startup choices. Recording and replay helpers preserve the
+profile's sibling video preferences in their private runs. The derived native
+menu packages are generated from the user's retail assets; retail files remain
+unchanged.

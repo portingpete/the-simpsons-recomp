@@ -5,6 +5,8 @@
 #include <list>
 #include <memory>
 #include <span>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "common/byte_range_equal.h"
@@ -155,20 +157,39 @@ public:
         // push_front may throw (list node allocation); only account residency
         // after it has succeeded so a failure cannot corrupt the totals.
         lru_.push_front(std::move(entry));
-        if (residentBytes_ > SIZE_MAX - entryBytes) {
-            // Overflow is unreachable at production bounds (64 MiB), but never
-            // let accounting wrap: drop back to the just-inserted entry.
-            residentBytes_ = entryBytes;
-            while (lru_.size() > 1) lru_.pop_back();
-            return;
-        }
-        residentBytes_ += entryBytes;
-        while (lru_.size() > maxEntries_ || residentBytes_ > maxBytes_) {
-            const auto& back = lru_.back();
-            const size_t backBytes = back.vertices.size() + back.indices.size();
-            residentBytes_ -= backBytes;
-            lru_.pop_back();
-        }
+        accountInsertion(entryBytes);
+    }
+
+    // Transfer a private decoded vertex allocation only on a cacheable miss.
+    // Success empties vertices and invalidates every caller view of its storage;
+    // the typed vector remains owned by the cache. A skipped insertion or any
+    // exception leaves vertices intact. Indices are always snapshotted before
+    // moving vertices or evicting entries, including when they alias vertices.
+    template<class Vertex>
+    bool insertOwnedVertices(std::vector<Vertex>& vertices, std::span<const uint8_t> indices,
+                             uint64_t key, std::shared_ptr<Mesh> mesh) {
+        static_assert(std::is_trivially_copyable_v<Vertex>);
+        static_assert(std::is_nothrow_move_assignable_v<std::vector<Vertex>>);
+        if(!mesh || !maxEntries_ || vertices.capacity()>SIZE_MAX/sizeof(Vertex))return false;
+        const size_t vertexCapacity=vertices.capacity()*sizeof(Vertex);
+        if(vertexCapacity>SIZE_MAX-indices.size())return false;
+        const size_t entryBytes=vertexCapacity+indices.size();
+        if(entryBytes>maxBytes_)return false;
+        // Complete every allocation before touching the caller's vector. The
+        // standard-allocator move below is noexcept and preserves its data pointer.
+        auto owner=std::make_shared<std::vector<Vertex>>();
+        Entry entry;
+        entry.key=key;
+        entry.vertices.owner=owner;
+        entry.vertices.ownedData=reinterpret_cast<const uint8_t*>(vertices.data());
+        entry.vertices.ownedSize=vertices.size()*sizeof(Vertex);
+        entry.vertices.charge=vertexCapacity;
+        entry.indices.assign(indices.begin(),indices.end());
+        entry.mesh=std::move(mesh);
+        lru_.push_front(std::move(entry));
+        *owner=std::move(vertices);
+        accountInsertion(entryBytes);
+        return true;
     }
 
     void clear() noexcept {
@@ -182,12 +203,40 @@ public:
     size_t maxBytes() const noexcept { return maxBytes_; }
 
 private:
+    friend struct MeshUploadCacheProbe;
+    struct VertexBytes {
+        std::vector<uint8_t> copied;
+        std::shared_ptr<const void> owner;
+        const uint8_t* ownedData{};
+        size_t ownedSize{},charge{};
+        const uint8_t* data() const noexcept {return owner?ownedData:copied.data();}
+        size_t size() const noexcept {return owner?ownedSize:copied.size();}
+        size_t residentBytes() const noexcept {return owner?charge:copied.size();}
+        template<class It>void assign(It begin,It end){copied.assign(begin,end);}
+    };
     struct Entry {
         uint64_t key{};
-        std::vector<uint8_t> vertices;
+        VertexBytes vertices;
         std::vector<uint8_t> indices;
         std::shared_ptr<Mesh> mesh;
     };
+    void accountInsertion(size_t entryBytes) noexcept {
+        if (residentBytes_ > SIZE_MAX - entryBytes) {
+            // Overflow is unreachable at production bounds (64 MiB), but never
+            // let accounting wrap: drop back to the just-inserted entry.
+            residentBytes_ = entryBytes;
+            while (lru_.size() > 1) lru_.pop_back();
+            return;
+        }
+        residentBytes_ += entryBytes;
+        while (lru_.size() > maxEntries_ || residentBytes_ > maxBytes_) {
+            const auto& back = lru_.back();
+            const size_t backBytes = back.vertices.residentBytes() + back.indices.size();
+            residentBytes_ -= backBytes;
+            lru_.pop_back();
+        }
+    }
+
     std::list<Entry> lru_;
     size_t maxEntries_;
     size_t maxBytes_;

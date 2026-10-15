@@ -7,7 +7,10 @@ activation, outside the taskbar, at the bottom of the z-order (never topmost, ne
 focused, never over the user's windows), and the tool disables input to it so desktop
 typing cannot steer Homer. SIMPSONS_IGNORE_PHYSICAL_CONTROLLERS=1 makes physical XInput
 pads read as disconnected (XInput is not focus-bound, so a controller used elsewhere on
-the machine would otherwise move Homer or rumble mid-run); walks still use commands. Frames whose presentation was occluded are counted in
+the machine would otherwise move Homer or rumble mid-run); walks still use commands.
+--foreground instead opens an ordinary focused window (to measure foreground
+independent flip or variable refresh); it is only for runs nobody is using the desktop
+during. Frames whose presentation was occluded are counted in
 the summary (accepted_pct and window_accepted_pct); an occluded run can differ from a visible one, so compare runs with similar acceptance.
 Optional preset or file walks are sent through the game's ordinary controller
 command channel. The summary reports the mean FPS of the accepted presentation
@@ -137,8 +140,8 @@ def summarize(frames: Path, start: float, end: float | None) -> dict:
             try:
                 rows.append((float(row["elapsed_ms"]) / 1000, float(row["frame_ms"])))
                 accepted.append(row["display_accepted"] == "1")
-            except (KeyError, ValueError):
-                pass  # The final buffered row can be incomplete.
+            except (KeyError, TypeError, ValueError):
+                pass  # The final buffered row can be incomplete (missing fields read as None).
     if not rows:
         return {"frames": 0}
     stop = min(end, rows[-1][0]) if end else rows[-1][0]
@@ -180,7 +183,11 @@ def main() -> int:
     parser.add_argument("--seconds", type=float, default=150, help="Run length before the game is closed")
     parser.add_argument("--start", type=float, default=30, help="Measurement window start (seconds of frame timing)")
     parser.add_argument("--end", type=float, default=0, help="Measurement window end; 0 means the end of the run")
-    parser.add_argument("--frame-rate", choices=["uncapped", "60", "120"], default="uncapped")
+    parser.add_argument("--frame-rate", choices=["uncapped", "cfg", "30", "60", "90", "120", "144", "165", "240"], default="uncapped",
+                        help="cfg passes no frame-rate flag, so the profile video settings decide")
+    parser.add_argument("--vsync", action="store_true", help="Pass --vsync (sync interval one)")
+    parser.add_argument("--pacing-trace", action="store_true",
+                        help="Record SIMPSONS_PACING_TRACE (clock sample, dt, limiter release, DXGI flips) and summarize it")
     parser.add_argument("--render-resolution", type=int, default=-1,
                         help="Render resolution index (3 = 2560x1440, 6 = 3440x1440); -1 keeps the profile default")
     parser.add_argument("--graceful", action="store_true", help="Close the window and wait for a normal exit instead of terminating")
@@ -189,6 +196,17 @@ def main() -> int:
     parser.add_argument("--walk", help="Preset (" + ", ".join(WALKS) + ") or a file of controller commands")
     parser.add_argument("--walk-at", type=float, default=20, help="Seconds after launch to send the walk")
     parser.add_argument("--capture-at", default="", help="Comma list of seconds after launch to capture a frame")
+    parser.add_argument("--stage", help="Start this original stage (for example medal_of_homer) instead of the first mission")
+    parser.add_argument("--video-cfg", help="Literal profile video settings line written for this run (overrides --render-resolution)")
+    parser.add_argument("--env", action="append", default=[], metavar="NAME=VALUE",
+                        help="Extra environment variable for the game process (repeatable), e.g. SIMPSONS_STALL_PROFILE=1")
+    parser.add_argument("--gpu-sample", action="store_true",
+                        help="Sample NVIDIA GPU utilization, clocks and performance state every 100 ms into gpu.csv")
+    parser.add_argument("--foreground", action="store_true",
+                        help="Let the game window take focus and input (measures foreground independent flip and "
+                             "variable refresh). Only for unattended runs: it takes the desktop while it runs")
+    parser.add_argument("--presentmon", action="store_true",
+                        help="Record per-present GPU/display timing from the PresentMon service into presentmon.csv")
     args = parser.parse_args()
     if not 10 <= args.seconds <= 3600:
         parser.error("--seconds must be between 10 and 3600")
@@ -205,16 +223,24 @@ def main() -> int:
     folder.mkdir(parents=True)
     shutil.copytree(ROOT / config["profile_store"], folder / "profile")
     shutil.copytree(ROOT / config["content_store"], folder / "content")
-    if args.render_resolution >= 0:
+    if args.video_cfg:
+        (folder / "profile.video.cfg").write_text(args.video_cfg.strip() + "\n")
+    elif args.render_resolution >= 0:
         # version resolution fullscreen vsync rate render filtering antialiasing
         (folder / "profile.video.cfg").write_text(f"4 0 0 0 0 {args.render_resolution} 0 0\n")
-    command = [str(executable), "--image", str(ROOT / "analysis/simpsons.pe"), "--render-test-first-mission",
+    start_mode = ["--stage", args.stage] if args.stage else ["--render-test-first-mission"]
+    command = [str(executable), "--image", str(ROOT / "analysis/simpsons.pe"), *start_mode,
                "--profile-store", str(folder / "profile"), "--content-store", str(folder / "content"),
                "--local-profile", "0:" + config["profile_id"],
                "--frame-timing", str(folder / "frames.csv")]
     if not args.detailed:
         command += ["--frame-timing-frames-only"]
-    command += ["--uncapped-frame-rate"] if args.frame_rate == "uncapped" else ["--frame-rate", args.frame_rate]
+    if args.frame_rate == "uncapped":
+        command += ["--uncapped-frame-rate"]
+    elif args.frame_rate != "cfg":
+        command += ["--frame-rate", args.frame_rate]
+    if args.vsync:
+        command += ["--vsync"]
     if walk:
         (folder / "controller.commands").write_bytes(b"")
         command += ["--controller-input", str(folder / "controller.commands")]
@@ -223,9 +249,30 @@ def main() -> int:
         (folder / "captures").mkdir()
     (folder / "launch.json").write_text(json.dumps({"command": command}, indent=2) + "\n", encoding="utf-8")
 
-    environment = dict(os.environ, SIMPSONS_BACKGROUND_WINDOW="1", SIMPSONS_IGNORE_PHYSICAL_CONTROLLERS="1")
+    environment = dict(os.environ, SIMPSONS_BACKGROUND_WINDOW="0" if args.foreground else "1",
+                       SIMPSONS_IGNORE_PHYSICAL_CONTROLLERS="1")
+    if args.pacing_trace:
+        environment["SIMPSONS_PACING_TRACE"] = str(folder / "pacing.csv")
+    for item in args.env:
+        name, separator, value = item.partition("=")
+        if not separator or not name:
+            parser.error("--env needs NAME=VALUE")
+        environment[name] = value
+    gpu_sampler = None
+    if args.gpu_sample and shutil.which("nvidia-smi"):
+        gpu_log = (folder / "gpu.csv").open("wb")
+        # Performance-state and memory-clock switches can stall the GPU for milliseconds;
+        # rows carry wall-clock timestamps (summary gpu_sample_launch_time aligns them).
+        gpu_sampler = subprocess.Popen(["nvidia-smi", "--query-gpu=timestamp,utilization.gpu,clocks.gr,power.draw,"
+                                        "clocks.mem,pstate", "--format=csv,noheader,nounits", "-lms", "100"],
+                                       stdout=gpu_log, stderr=subprocess.DEVNULL)
+    launch_time = datetime.datetime.now()
     with (folder / "game.log").open("wb") as log:
         process = subprocess.Popen(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, env=environment)
+    presentmon = None
+    if args.presentmon:
+        presentmon = subprocess.Popen([sys.executable, "-B", str(ROOT / "tools/presentmon_frames.py"), str(process.pid),
+                                       str(folder / "presentmon.csv")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     started = time.monotonic()
     placed = False
     samples = [(0.0, process_cpu(process._handle), system_times())]
@@ -238,7 +285,8 @@ def main() -> int:
             if not placed and (hwnd := game_window(process.pid)):
                 # Already created non-activating at the bottom of the z-order by the game;
                 # disabled so it receives no keyboard/mouse input.
-                user.EnableWindow(hwnd, False)
+                if not args.foreground:
+                    user.EnableWindow(hwnd, False)
                 placed = True
             if walk and now >= args.walk_at:
                 with (folder / "controller.commands").open("a", encoding="utf-8") as out:
@@ -283,6 +331,15 @@ def main() -> int:
                 process.kill()
                 process.wait(10)
             exit_code = process.returncode
+        if gpu_sampler:
+            gpu_sampler.terminate()
+            gpu_sampler.wait(10)
+            gpu_log.close()
+        if presentmon:
+            try:
+                presentmon.wait(20)  # It stops once the game's presents end.
+            except subprocess.TimeoutExpired:
+                presentmon.terminate()
 
     timeline = []
     for (t0, c0, s0), (t1, c1, s1) in zip(samples, samples[1:]):
@@ -290,6 +347,10 @@ def main() -> int:
         timeline.append({"t": round(t1, 1), "game_cores": round((c1 - c0) / (t1 - t0), 2),
                          "system_busy_pct": round(100 * (1 - (s1[0] - s0[0]) / total), 1) if total else None})
     summary = summarize(folder / "frames.csv", args.start, args.end or None)
+    if args.pacing_trace and (folder / "pacing.csv").is_file():
+        sys.path.insert(0, str(ROOT / "tools"))
+        from pacing_trace_report import report as pacing_report
+        summary["pacing"] = pacing_report(folder / "pacing.csv", args.start, args.end or None)
     # The busiest guest thread's CPU time per presented frame is far less sensitive to
     # desktop load than wall-clock FPS: it only counts time the thread actually ran.
     first = next((s for s in thread_samples if s[0] >= args.start), None)
@@ -304,7 +365,28 @@ def main() -> int:
     busy = [row["system_busy_pct"] for row in timeline if row["system_busy_pct"] is not None]
     video = re.findall(r"\[NATIVE VIDEO\] window=(\d+)x(\d+).*?render=(\d+)x(\d+) aa=(\d+)",
                        (folder / "game.log").read_text(encoding="utf-8", errors="replace"))
+    if gpu_sampler:
+        utilization, switches, previous = [], [], None
+        for line in (folder / "gpu.csv").read_text(encoding="utf-8", errors="replace").splitlines():
+            fields = [field.strip() for field in line.split(",")]
+            try:
+                at = (datetime.datetime.strptime(fields[0], "%Y/%m/%d %H:%M:%S.%f") - launch_time).total_seconds()
+                if at >= args.start:
+                    utilization.append(float(fields[1]))
+                    state = (fields[4], fields[5])
+                    if previous and state != previous:
+                        switches.append([round(at, 2), *previous, *state])
+                    previous = state
+            except (IndexError, ValueError):
+                pass
+        if utilization:
+            summary["gpu_util_window_mean_pct"] = round(statistics.mean(utilization), 1)
+            summary["gpu_util_window_p90_pct"] = round(sorted(utilization)[int(0.9 * (len(utilization) - 1))], 1)
+        # Seconds after launch: [time, memory clock, pstate before, memory clock, pstate after].
+        summary["gpu_memory_clock_or_pstate_switches"] = switches[:200]
+        summary["gpu_sample_launch_time"] = launch_time.isoformat()
     summary.update(name=args.name, folder=str(folder), executable=str(executable),
+                   stage=args.stage, extra_environment=args.env,
                    game_exited_early=exited_early, peak_system_busy_pct=max(busy) if busy else None,
                    exit_code=exit_code, graceful_shutdown=graceful_shutdown,
                    forced_termination=forced_termination,

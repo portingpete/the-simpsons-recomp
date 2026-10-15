@@ -122,6 +122,16 @@ struct NativePresentationProbe {
         const auto expected=backend.readbackTarget(source),depthBefore=backend.readbackDepthTarget(depth);
         if(minimizedAtAttach)window.minimize();
         backend.attachWindow(window.handle,width,height);
+        ComPtr<IDXGIDevice1> latencyDevice;checked(backend.device.As(&latencyDevice),"Latency device query failed");
+        UINT latency{};checked(latencyDevice->GetMaximumFrameLatency(&latency),"Latency query failed");
+        require(latency==1 && backend.frameLatency()==1,"Initial native queue did not use one frame");
+        for(uint32_t frames:{2u,3u,1u}) {
+            backend.configureFrameLatency(frames);
+            checked(latencyDevice->GetMaximumFrameLatency(&latency),"Configured latency query failed");
+            require(latency==frames && backend.frameLatency()==frames,"Live queue preference did not reach DXGI");
+            require(Snapshot(backend.context.Get())==bindings,"Queue setting changed engine bindings");
+        }
+        for(uint32_t frames:{0u,4u,~0u})rejectUnchanged(backend,[&]{backend.configureFrameLatency(frames);});
         auto wrongExtent=backend.createTarget(width-1,height,TargetFormat::RGB10A2);
         for(unsigned cycle=0;cycle<3;++cycle) {
             window.minimize();

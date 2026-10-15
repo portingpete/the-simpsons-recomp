@@ -138,12 +138,17 @@ void exercise(const char* image){
     // Original producer CPU vertices, ready-byte publication and list reset.
     const auto immediateRow=PPC_LOAD_U32(0x82DFEB20),priorCursor=PPC_LOAD_U32(immediateRow);
     PPC_STORE_U32(immediateRow,PPC_LOAD_U32(immediateRow+4));c.r5.u32=0;
+    // Drain preceding draws so this count isolates immediate setup transfers.
+    d.readbackColor(color);const auto setupUploads=d.nativeBufferUploadCount();
     const auto setupAbi=abi(c);cpu.invoke(0x82751B68,0x500D0);
+    need(d.nativeBufferUploadCount()==setupUploads,"Original mode-zero immediate setup uploaded unused allocation bytes");
     need(abi(c)==setupAbi&&PPC_LOAD_U32(0x82D0CAB0)==immediateRow+8&&!PPC_LOAD_U32(0x82D0CAB4)&&
          PPC_LOAD_U32(0x82D0CAB8)==32&&PPC_LOAD_U32(0x82CD1A70)==PPC_LOAD_U32(0x82CF1F8C),"Original immediate buffer/setup cache differs");
     cpu.invoke(0x82751DA0,0x500D0);PPC_STORE_U32(immediateRow,priorCursor);
     PPC_STORE_U32(immediateRow,PPC_LOAD_U32(immediateRow+4));c.r5.u32=2;
+    d.readbackColor(color);const auto dualSetupUploads=d.nativeBufferUploadCount();
     const auto dualSetupAbi=abi(c);cpu.invoke(0x82751B68,0x500D0);
+    need(d.nativeBufferUploadCount()==dualSetupUploads,"Original mode-two immediate setup uploaded unused allocation bytes");
     need(abi(c)==dualSetupAbi&&PPC_LOAD_U32(0x500D4)==2&&
          PPC_LOAD_U32(0x82CD1A70)==PPC_LOAD_U32(0x82CF1F98),"Original dual immediate setup/mode cache differs");
     cpu.invoke(0x82751DA0,0x500D0);

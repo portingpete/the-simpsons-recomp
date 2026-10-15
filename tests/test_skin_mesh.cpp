@@ -2,6 +2,9 @@
 #define NOMINMAX
 #endif
 #include "renderer/skin_mesh.h"
+#include "header/test_graphics_device.h"
+#include "renderer/d3d_call_stats.h"
+#include "renderer/device_availability.h"
 #include "renderer/native_material_compiler.h"
 #include "renderer/effect_reflection.h"
 #include "runtime/skin_material_constants.h"
@@ -17,13 +20,41 @@
 #include <thread>
 #include <vector>
 using namespace Simpsons::Graphics;
+extern "C" uint64_t gD3DDeviceCounts[64];
 void require(bool b,const char* why){if(!b)throw Error(why);}
 template<class F>void rejects(F action){bool failed=false;try{action();}catch(const Error&){failed=true;}require(failed,"Invalid skin operation succeeded");}
 #include "header/test_engine_binding_reset.h"
 #include "header/test_mesh_gpu_retirement.h"
 #include "header/test_r16_strip_boundary.h"
 namespace Simpsons::Graphics {
-struct NativeRecordingProbe {static ID3D11DeviceContext* context(NativeBackend& b){return b.context.Get();}};
+struct NativeRecordingProbe {
+    static ID3D11DeviceContext* context(NativeBackend& b){return b.context.Get();}
+    static ID3D11Device* device(NativeBackend& b){return b.device.Get();}
+    static ComPtr<ID3D11Buffer> depthConstants(NativeBackend& b,const SkinMeshDraw& d) {
+        return b.sceneDepthConstantBuffer(d.viewport[4]==0x3F800000&&d.viewport[5]==0,d.depthBiasBits,d.slopeBiasBits);
+    }
+    static void resetSceneCache(NativeBackend& b){b.resetSceneStateCacheForDevice();}
+    static void replaceDevice(NativeBackend& b,bool hardware) {
+        ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;D3D_FEATURE_LEVEL level{};
+        const auto result=createTestDevice(hardware,D3D11_CREATE_DEVICE_BGRA_SUPPORT,&device,&level,&context);
+        require(SUCCEEDED(result),"Skin depth-constant device replacement failed");
+        b.availability=std::make_shared<DeviceAvailability>(device.Get());b.device=device;b.context=context;b.featureLevel=level;
+    }
+};
+}
+void depthConstantBytes(NativeBackend& backend,ID3D11Buffer* buffer,const SkinMeshDraw& draw) {
+    ComPtr<ID3D11Device> device;buffer->GetDevice(&device);
+    require(device.Get()==NativeRecordingProbe::device(backend),"Skin depth constant belongs to another device");
+    D3D11_BUFFER_DESC desc{};buffer->GetDesc(&desc);
+    require(desc.ByteWidth==16&&desc.Usage==D3D11_USAGE_IMMUTABLE&&desc.BindFlags==D3D11_BIND_CONSTANT_BUFFER&&
+        !desc.CPUAccessFlags&&!desc.MiscFlags&&!desc.StructureByteStride,"Skin recorded depth constant is not an exact immutable16 buffer");
+    desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Buffer> staging;require(SUCCEEDED(device->CreateBuffer(&desc,nullptr,&staging)),"Skin depth constant staging failed");
+    auto* context=NativeRecordingProbe::context(backend);context->CopyResource(staging.Get(),buffer);
+    D3D11_MAPPED_SUBRESOURCE mapped{};require(SUCCEEDED(context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped)),"Skin depth constant readback failed");
+    const std::array<uint32_t,4> expected{uint32_t(draw.viewport[4]==0x3F800000&&draw.viewport[5]==0),draw.depthBiasBits,draw.slopeBiasBits,0};
+    const bool exact=mapped.pData&&mapped.RowPitch>=16&&!std::memcmp(mapped.pData,expected.data(),16);context->Unmap(staging.Get(),0);
+    require(exact,"Skin recorded depth constant GPU bytes changed");
 }
 uint32_t word(std::span<const uint8_t> b,size_t at){uint32_t v;std::memcpy(&v,b.data()+at,4);return v;}
 void uploadCacheReuse(bool hardware) {
@@ -290,11 +321,64 @@ void run(const std::vector<uint8_t>& image,bool hardware,bool textured=false) {
     invalid=draw;invalid.blendWord=0x00010706;rejectDraw(mesh,invalid);
     invalid=draw;invalid.blendEnable=1;invalid.blendWord=0x00010706;rejectDraw(mesh,invalid);
     invalid=draw;invalid.blendEnable=1;invalid.blendWord=0x07060706;invalid.expandedBlend=2;rejectDraw(mesh,invalid);
-    backend.recordSkinMesh(payload,color,depth,mesh,*vs,*ps,vc,pc,live,draw);backend.finishRecordingPayload(payload);
+    installD3DCallStats(NativeRecordingProbe::context(backend),NativeRecordingProbe::device(backend));
+    NativeRecordingProbe::resetSceneCache(backend);
+    auto buffersBefore=gD3DDeviceCounts[3];
+    backend.recordSkinMesh(payload,color,depth,mesh,*vs,*ps,vc,pc,live,draw);
+    require(gD3DDeviceCounts[3]==buffersBefore+3,"First recorded skin draw did not create two private banks and one immutable depth buffer");
+    backend.finishRecordingPayload(payload);
+    buffersBefore=gD3DDeviceCounts[3];auto originalDepthConstants=NativeRecordingProbe::depthConstants(backend,draw);
+    auto* originalDepthIdentity=originalDepthConstants.Get();
+    require(gD3DDeviceCounts[3]==buffersBefore,"Recorded skin depth buffer was absent from the shared cache");
+    depthConstantBytes(backend,originalDepthConstants.Get(),draw);
+    {
+        auto repeated=backend.allocateRecordingPayload(recording,0x3000);backend.beginRecordingPayload(repeated,4,mask,mask);
+        buffersBefore=gD3DDeviceCounts[3];backend.recordSkinMesh(repeated,color,depth,mesh,*vs,*ps,vc,pc,live,draw);
+        require(gD3DDeviceCounts[3]==buffersBefore+2,"Repeated recorded skin draw recreated immutable depth or shared its writable banks");
+        backend.finishRecordingPayload(repeated);backend.releaseRecordingPayload(repeated);
+        std::array<SkinMeshDraw,3> changed{draw,draw,draw};
+        changed[0].depthBiasBits=0x80000000;changed[1].slopeBiasBits=0x80000000;
+        changed[2].viewport[4]=0;changed[2].viewport[5]=0x3F800000;
+        for(const auto& different:changed) {
+            auto separate=backend.allocateRecordingPayload(recording,0x3000);backend.beginRecordingPayload(separate,4,mask,mask);
+            buffersBefore=gD3DDeviceCounts[3];backend.recordSkinMesh(separate,color,depth,mesh,*vs,*ps,vc,pc,live,different);
+            require(gD3DDeviceCounts[3]==buffersBefore+3,"Distinct recorded skin depth bits incorrectly hit another key");
+            backend.finishRecordingPayload(separate);
+            buffersBefore=gD3DDeviceCounts[3];const auto constants=NativeRecordingProbe::depthConstants(backend,different);
+            require(gD3DDeviceCounts[3]==buffersBefore&&constants.Get()!=originalDepthConstants.Get(),"Recorded skin signed zero or reverse key was lost");
+            depthConstantBytes(backend,constants.Get(),different);backend.releaseRecordingPayload(separate);
+        }
+        NativeBackend foreign(!hardware);buffersBefore=gD3DDeviceCounts[3];
+        const auto foreignConstants=NativeRecordingProbe::depthConstants(foreign,draw);
+        require(gD3DDeviceCounts[3]==buffersBefore+1&&foreignConstants.Get()!=originalDepthConstants.Get(),"Skin depth constants crossed backend ownership");
+        depthConstantBytes(foreign,foreignConstants.Get(),draw);
+        auto* oldDevice=NativeRecordingProbe::device(foreign);NativeRecordingProbe::replaceDevice(foreign,hardware);
+        require(oldDevice!=NativeRecordingProbe::device(foreign),"Skin depth constant device replacement did not occur");
+        buffersBefore=gD3DDeviceCounts[3];const auto replaced=NativeRecordingProbe::depthConstants(foreign,draw);
+        require(gD3DDeviceCounts[3]==buffersBefore+1&&replaced.Get()!=foreignConstants.Get(),"Skin depth constants crossed replacement devices");
+        depthConstantBytes(foreign,replaced.Get(),draw);ComPtr<ID3D11Device> retained;foreignConstants->GetDevice(&retained);
+        require(retained.Get()==oldDevice,"Skin device replacement mutated a retained immutable depth owner");
+    }
     require(EngineBindingResetProbe::Snapshot(context)==recordingBefore&&backend.readbackTarget(color)==immediate,"Skin recording changed immediate state/output");
     clear();const EngineBindingResetProbe::Snapshot executionBefore(context);backend.executeRecordingPayload(payload);backend.waitIdle();
     require(EngineBindingResetProbe::Snapshot(context)==executionBefore,"Recorded skin execution changed immediate state");
     require(verifyPixels(2,.75f)==immediate,"Immediate and recorded skin pixels differ");
+    {
+        for(float bias:{1.f,2.f,3.f,4.f,5.f,6.f,7.f,8.f,9.f}) {
+            auto different=draw;different.depthBiasBits=std::bit_cast<uint32_t>(bias);
+            (void)NativeRecordingProbe::depthConstants(backend,different);
+        }
+        const auto afterEviction=NativeRecordingProbe::depthConstants(backend,draw);
+        require(afterEviction.Get()!=originalDepthIdentity,"Skin depth cache eviction fixture did not retire the original entry");
+        NativeRecordingProbe::resetSceneCache(backend);
+        // Drop the observer reference too: only retained draw/list ownership
+        // may keep this old immutable buffer alive after cache retirement.
+        require(originalDepthConstants.Detach()->Release()>0,"Skin payload failed to retain its immutable depth buffer");
+        clear();backend.executeRecordingPayload(payload);backend.waitIdle();
+        require(EngineBindingResetProbe::Snapshot(context)==executionBefore&&verifyPixels(2,.75f)==immediate&&
+            backend.readbackDepthTarget(shadow)==shadowBefore,"Skin recorded depth owner failed after cache eviction/reset");
+        depthConstantBytes(backend,originalDepthIdentity,draw);
+    }
     {
         const auto originalDepth=backend.readbackDepthTarget(depth);
         // Inherit projection and the shadow gate so this list exercises both
@@ -559,9 +643,136 @@ void alphaBlend(const std::vector<uint8_t>& image,bool hardware,unsigned profile
     backend.releaseRecordingPayload(payload);backend.releaseRecordingContext(recording);backend.releaseSkinReplayConstants(live);
     std::printf("PASS %s skin-alpha blend %s: fractional opacity, RGB/alpha equation, depth/stencil, base0-only resources, direct/recorded parity and retained state\n",profile==2?"textured":profile==1?"dual":"base",hardware?"hardware":"WARP");
 }
+// Video menu "Character eyes: Clean": the eye-rim fixture's mixed 0/1 flag
+// triangle loses its rim wherever the affine flag reaches .5; uniform flags
+// keep their original result. The toggle is live and re-records sealed draws.
+void cleanEyesControl(const std::vector<uint8_t>& image,bool hardware) {
+    NativeBackend backend(!hardware);NativeMaterialCompiler compiler(backend);MaterialRegistry registry;
+    const CompiledMaterial *vs=nullptr,*ps=nullptr;
+    constexpr uint32_t vertexAddress=0x82007C1C,pixelAddress=0x8200A02C,extent=64;
+    for(const auto& r:originalMaterialIdentities())if(r.originalAddress==vertexAddress||r.originalAddress==pixelAddress) {
+        const auto id=registry.create(r.originalAddress,std::span<const uint8_t>(image).subspan(r.originalAddress-0x82000000,r.recordBytes));
+        const auto& shader=registry.prepareForBind(id,compiler);
+        if(r.stage==MaterialStage::Vertex)vs=&shader;else ps=&shader;
+    }
+    require(vs&&ps,"Missing original opaque skin shaders for clean eyes");
+    auto color=backend.createTarget(extent,extent,TargetFormat::RGB10A2);auto depth=backend.createDepthTarget(extent,extent);
+    SkinMeshDraw draw{};draw.primitiveType=6;draw.indexCount=3;draw.viewport={0,0,extent,extent,0x3F800000,0};
+    draw.depthEnable=draw.depthWrite=1;draw.depthCompare=7;draw.colorMask=15;draw.halfPixelOffset=1;
+    draw.primitiveReset=draw.viewportEnable=draw.multisampleAntialias=1;draw.primitiveResetIndex=0xFFFF;draw.multisampleMask=0xFFFFFFFF;
+    draw.depthPolicy=ShadowMeshDepthPolicy::Reference20e4Rne;draw.blendWord=0x00010001;draw.expandedBlend=1;
+    SkinVertexConstants vc{};SkinPixelConstants pc{};
+    vc[0][0]=vc[1][1]=1;vc[2][2]=.5f;vc[3][2]=1;
+    for(size_t i=0;i<4;++i)vc[12+i][i]=1;
+    for(size_t i=0;i<3;++i)vc[55+i][i]=1;
+    pc[4]={17,-9,200,1};pc[40]={0,.34f,-.2f,1};pc[47]={1,0,0,1};pc[49][2]=7;
+    constexpr std::array<float,3> w{3,5,7};
+    constexpr std::array<std::array<float,2>,3> ndc{{{-.8f,.8f},{-.8f,-.8f},{.8f,.8f}}};
+    const std::array<uint16_t,3> indices{0,1,2};
+    std::array<SkinVertex,3> vertices{};
+    for(size_t i=0;i<vertices.size();++i) {
+        auto& v=vertices[i];v.position={ndc[i][0]*w[i],ndc[i][1]*w[i],w[i]};
+        v.normal={0,0,-1};v.indices={1,0,0,0};v.weights={1,0,0,0};
+        v.uv={.0111f,.5217f};v.color={float(i!=0),0,0,1};
+    }
+    auto* context=NativeRecordingProbe::context(backend);
+    backend.bindTargets({color,nullptr,nullptr,nullptr},depth);backend.bindSkinShaders(*vs,*ps);
+    auto commit=backend.commitSkin(*vs,*ps,vc,pc);
+    auto recording=backend.createRecordingContext();auto live=backend.createSkinReplayConstants(vc,pc);NativeRecordingMask mask{};
+    const auto mesh=backend.uploadSkinMesh(vertices,indices,vertexAddress);
+    backend.bindSkinMeshVertices(mesh);backend.bindSkinMeshDeclaration(mesh);backend.bindSkinMeshIndices(mesh);
+    // Recorded while Original; Clean must reach it through the live re-record.
+    auto payload=backend.allocateRecordingPayload(recording,0x3000);backend.beginRecordingPayload(payload,4,mask,mask);
+    backend.recordSkinMesh(payload,color,depth,mesh,*vs,*ps,vc,pc,live,draw);backend.finishRecordingPayload(payload);
+    size_t lit=0,rim=0;
+    for(bool clean:{false,true}) {
+        require(backend.configureCleanEyes(clean)&&backend.cleanEyes()==clean,"Clean eyes did not apply");
+        std::vector<uint8_t> direct;
+        for(bool deferred:{false,true}) {
+            backend.clearTarget(color,{1,0,1,1});backend.clearDepthTarget(depth,0,0x67);
+            const EngineBindingResetProbe::Snapshot before(context);
+            if(deferred)backend.executeRecordingPayload(payload);else backend.drawSkinMesh(color,depth,mesh,*vs,*ps,commit,draw);
+            backend.waitIdle();
+            require(EngineBindingResetProbe::Snapshot(context)==before,"Clean eyes draw changed retained bindings");
+            const auto pixels=backend.readbackTarget(color);
+            for(unsigned y=0;y<extent;++y)for(unsigned x=0;x<extent;++x) {
+                const auto packed=word(pixels,4*(size_t(y)*extent+x));
+                if(packed>>30)continue;
+                const float nx=2*(float(x)+.5f)/extent-1,ny=1-2*(float(y)+.5f)/extent;
+                const float b=(.8f-ny)/1.6f,c=(nx+.8f)/1.6f,a=1-b-c;
+                // Flag = 1-a (vertex0 is the unflagged corner).
+                if(std::min({a,b,c})<=.05f||std::abs(a-.5f)<=.05f)continue;
+                const uint32_t blue=(packed>>20)&1023;
+                const uint32_t expected=clean&&a<.5f?256u:384u;
+                if(blue!=expected) {
+                    char why[200];std::snprintf(why,sizeof(why),"Clean eyes %s %s pixel%u,%u: blue%u expected%u",clean?"on":"off",
+                        deferred?"recorded":"direct",x,y,blue,expected);throw Error(why);
+                }
+                if(clean&&!deferred)++(expected==256u?lit:rim);
+            }
+            if(!deferred)direct=pixels;else require(pixels==direct,"Clean eyes direct/recorded pixels differ");
+        }
+    }
+    require(lit>400&&rim>100,"Clean eyes fixture lacks both sides of the flag midline");
+    require(backend.configureCleanEyes(false)&&!backend.cleanEyes(),"Clean eyes did not switch back");
+    backend.releaseRecordingPayload(payload);backend.releaseSkinReplayConstants(live);backend.releaseRecordingContext(recording);
+    std::printf("PASS clean eyes %s: mixed-flag rim splits at .5 (%zu lit, %zu rim), Original unchanged, live re-record parity\n",
+        hardware?"hardware":"WARP",lit,rim);
+}
+// Character detail draws the same range as a smoothed list. A flat quad with
+// perpendicular normals stays flat, so every level must match the original
+// pixels exactly, directly and recorded, and restore the original streams.
+void characterDetailParity(const std::vector<uint8_t>& image,bool hardware) {
+    std::vector<uint8_t> reference,referenceDepth;
+    for(uint32_t level:{0u,1u,3u}) {
+        NativeBackend backend(!hardware);backend.configureCharacterDetail(level);
+        NativeMaterialCompiler compiler(backend);MaterialRegistry registry;
+        const CompiledMaterial *vs=nullptr,*ps=nullptr;
+        for(const auto& r:originalMaterialIdentities())if(r.originalAddress==0x82008E20u||r.originalAddress==0x8200A4A4u) {
+            const auto id=registry.create(r.originalAddress,std::span<const uint8_t>(image).subspan(r.originalAddress-0x82000000,r.recordBytes));
+            const auto& shader=registry.prepareForBind(id,compiler);if(r.stage==MaterialStage::Vertex)vs=&shader;else ps=&shader;
+        }
+        require(vs&&ps,"Missing original skin-alpha shaders for character detail");
+        auto color=backend.createTarget(16,16,TargetFormat::RGB10A2);auto depth=backend.createDepthTarget(16,16);
+        const std::array<uint8_t,4> texel{64,128,192,255};auto base=backend.createTexture(1,1,TextureFormat::RGBA8,texel);
+        std::array<SkinVertex,4> vertices{};
+        vertices[0].position={-1,1,.25f};vertices[1].position={-1,-1,.25f};vertices[2].position={1,1,.25f};vertices[3].position={1,-1,.25f};
+        for(auto& v:vertices){v.normal={0,0,1};v.indices={1,0,0,0};v.weights={1,0,0,0};v.color={1,1,1,.8f};v.uv={.5f,.5f};v.uv1={17,-23};}
+        const std::array<uint16_t,4> indices{0,1,2,3};auto mesh=backend.uploadSkinMesh(vertices,indices,0x82008E20u);
+        SkinVertexConstants vc{};SkinPixelConstants pc{};
+        for(size_t i=0;i<4;++i){vc[i][i]=1;vc[12+i][i]=1;}for(size_t i=0;i<3;++i)vc[55+i][i]=1;
+        pc[4]={0,0,3,1};pc[49][0]=-1;pc[40][3]=.5f;
+        SkinMeshDraw d{};d.primitiveType=6;d.indexCount=4;d.viewport={0,0,16,16,0x3F800000,0};
+        d.depthEnable=d.depthWrite=1;d.depthCompare=7;d.colorMask=15;d.halfPixelOffset=1;
+        d.primitiveReset=d.viewportEnable=d.multisampleAntialias=1;d.primitiveResetIndex=0xFFFF;d.multisampleMask=0xFFFFFFFF;
+        d.depthPolicy=ShadowMeshDepthPolicy::Reference20e4Rne;d.blendEnable=1;d.blendWord=0x07060706;d.expandedBlend=1;d.baseTexture=base;
+        auto& sampler=d.samplers[0];sampler.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D11_TEXTURE_ADDRESS_WRAP;
+        sampler.MaxAnisotropy=1;sampler.ComparisonFunc=D3D11_COMPARISON_NEVER;sampler.MaxLOD=13;
+        backend.bindTargets({color,nullptr,nullptr,nullptr},depth);backend.bindSkinShaders(*vs,*ps);
+        backend.bindSkinMeshVertices(mesh);backend.bindSkinMeshDeclaration(mesh);backend.bindSkinMeshIndices(mesh);backend.bindEngineTexture(0,base);
+        auto commit=backend.commitSkin(*vs,*ps,vc,pc);
+        auto recording=backend.createRecordingContext();auto payload=backend.allocateRecordingPayload(recording,0x3000);
+        NativeRecordingMask mask{};backend.beginRecordingPayload(payload,4,mask,mask);auto live=backend.createSkinReplayConstants(vc,pc);
+        backend.recordSkinMesh(payload,color,depth,mesh,*vs,*ps,vc,pc,live,d);backend.finishRecordingPayload(payload);
+        for(unsigned path=0;path<2;++path) {
+            backend.clearTarget(color,{0,1,0,1});backend.clearDepthTarget(depth,0,0x67);
+            const EngineBindingResetProbe::Snapshot before(NativeRecordingProbe::context(backend));
+            const auto detailed=backend.skinDetailDrawCount();
+            if(path)backend.executeRecordingPayload(payload);else backend.drawSkinMesh(color,depth,mesh,*vs,*ps,commit,d);
+            require(EngineBindingResetProbe::Snapshot(NativeRecordingProbe::context(backend))==before,"Character detail changed retained state");
+            require(backend.skinDetailDrawCount()==detailed+(path==0&&level?1:0),"Character detail draw accounting differs");
+            const auto pixels=backend.readbackTarget(color),depths=backend.readbackDepthTarget(depth);
+            if(reference.empty()){reference=pixels;referenceDepth=depths;}
+            else require(pixels==reference&&depths==referenceDepth,"Character detail changed a flat surface's pixels or depth");
+        }
+        backend.releaseRecordingPayload(payload);backend.releaseRecordingContext(recording);backend.releaseSkinReplayConstants(live);
+    }
+    std::printf("PASS character detail parity %s: Off/Low/High flat quad direct and recorded pixels, depth and retained streams\n",hardware?"hardware":"WARP");
+}
 int main(int argc,char** argv)try {
     SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);
     require(argc==2||(argc==3&&std::string(argv[2])=="--hardware"),"Supply original image and optional --hardware");
     std::ifstream input(argv[1],std::ios::binary);std::vector<uint8_t> image((std::istreambuf_iterator<char>(input)),{});
-    require(image.size()==15466496,"Original image size differs");opaqueEyeRimControl(image,argc==3);run(image,argc==3);run(image,argc==3,true);for(unsigned profile=0;profile<3;++profile)alphaBlend(image,argc==3,profile);uploadCacheReuse(argc==3);requireMeshGpuRetirements([](bool value,const char* message){require(value,message);});return 0;
+    require(image.size()==15466496,"Original image size differs");opaqueEyeRimControl(image,argc==3);run(image,argc==3);run(image,argc==3,true);for(unsigned profile=0;profile<3;++profile)alphaBlend(image,argc==3,profile);uploadCacheReuse(argc==3);characterDetailParity(image,argc==3);cleanEyesControl(image,argc==3);requireMeshGpuRetirements([](bool value,const char* message){require(value,message);});return 0;
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL skin mesh: %s\n",e.what());return 1;}

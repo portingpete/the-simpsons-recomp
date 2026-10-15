@@ -41,6 +41,10 @@ struct EngineViewportSurfaces::State {
     struct ColorRun {PPCContext* cpu{};uint32_t sp{},camera{},phase{},flags{};} colorRun;
     uint64_t depthCopies{},colorCopies{};
     uint32_t lastDepthCopyCamera{};
+    Graphics::TargetScale postTargetScale() const {
+        return Graphics::temporalAntialiasing(backend.antialiasing())?
+            Graphics::TargetScale::Output:Graphics::TargetScale::Scene;
+    }
     const ColorRecord& colorOwner(uint8_t* base,uint32_t address) const {
         depthOwner(base);
         for(const auto& color:colors)if(color.address==address&&color.target) {
@@ -109,7 +113,10 @@ void EngineViewportSurfaces::create(PPCContext& c,uint8_t* base){
     need(previous==slot-3,"auxiliary creation order differs");
     // Placement is original EDRAM metadata only. These native allocations have
     // uninitialized pixels and cannot bind/sample/resolve through this adapter.
-    auto target=s.backend.createTarget(w,h,Graphics::TargetFormat::RGB10A2,slot<=5?Graphics::TargetScale::Scene:Graphics::TargetScale::Fixed);
+    // Only the audited row-zero post chain uses full Output-relative attachments.
+    // Other rows retain their existing unported split-screen allocation policy.
+    const auto scale=slot<=5?(row==0?s.postTargetScale():Graphics::TargetScale::Scene):Graphics::TargetScale::Fixed;
+    auto target=s.backend.createTarget(w,h,Graphics::TargetFormat::RGB10A2,scale);
     const uint32_t id=s.runtime.engineDriver->allocateTargetIdentity();
     need(s.records.emplace(id,State::Record{owner,slot,w,h,std::move(target)}).second,"identity collision");
     c.r3.u64=id; // Original82751388 publishes the slot after this returns.
@@ -142,7 +149,7 @@ void EngineViewportSurfaces::publishDepth(PPCContext& c,uint8_t* base) {
     need(candidate.allocation && candidate.end>candidate.allocation && candidate.end-candidate.allocation==0xEA6000 &&
          candidate.pixels>=candidate.allocation && uint64_t(candidate.pixels)+1280*720*4<=candidate.end,
          "original depth texture placement exceeds its constructor allocation");
-    candidate.target=s.backend.createDepthTarget(1280,720,Graphics::TargetScale::Scene);
+    candidate.target=s.backend.createDepthTarget(1280,720,s.postTargetScale());
     State::QueryRecord query;
     need(PPC_LOAD_U32(table+0x34)==0x82DFE8DC,"query texture lost its original viewport row");
     for(size_t i=0;i<query.header.size();++i)query.header[i]=PPC_LOAD_U32(0x82DFE8DC+uint32_t(4*i));
@@ -188,7 +195,10 @@ void EngineViewportSurfaces::publishDepth(PPCContext& c,uint8_t* base) {
         color.pixels=color.header[8]&0xFFFFF000;
         need(uint64_t(candidate.allocation)+placements[index]==color.pixels&&
              uint64_t(color.pixels)+color.footprint<=candidate.end,"original viewport color placement differs");
-        color.target=s.backend.createTarget(color.width,color.height,Graphics::TargetFormat::RGB10A2,color.slot==6?Graphics::TargetScale::Fixed:Graphics::TargetScale::Scene);
+        // Preserve these persistent snapshot/history owners across frames. Their
+        // constructor-selected scale follows post Output, not reduced world Scene.
+        color.target=s.backend.createTarget(color.width,color.height,Graphics::TargetFormat::RGB10A2,
+            color.slot==6?Graphics::TargetScale::Fixed:s.postTargetScale());
     }
     s.depth=std::move(candidate);
     try{s.depthOwner(base);}catch(...){s.depth={};throw;}
@@ -218,12 +228,18 @@ void EngineViewportSurfaces::copyDepth(PPCContext& c,uint8_t* base) {
     need(camera.camera==PPC_LOAD_U32(0x82E3DD60) && PPC_LOAD_U32(0x82D0CB1C)==1 &&
          camera.depthIdentity==PPC_LOAD_U32(0x82D0CF58) && camera.colorIdentity==PPC_LOAD_U32(0x82D0CF5C) &&
          camera.viewport[2]==1280 && camera.viewport[3]==720,"post depth copy lost its active full-size camera");
-    s.backend.copyDepth(driver.depth(camera.depthIdentity),s.depth.target);++s.depthCopies;
+    // Native TAA resolves the finished world image before original post effects.
+    driver.resolveNativeTemporal();
+    driver.applyNativeAmbientOcclusion();
+    driver.prepareTemporalPostOutput();
+    // Reacquire after promotion; no retained Scene pointer can bypass Output depth.
+    const auto source=driver.depth(camera.depthIdentity);
+    s.backend.copyDepth(source,s.depth.target);++s.depthCopies;
     s.runtime.nativeDepthCopyCount.store(s.depthCopies,std::memory_order_release);
     s.lastDepthCopyCamera=camera.camera;c.lr=0x82751754;
     // Retain the real copy count/receipt every frame; sample its success print.
     if(s.depthCopies<=4 || ((s.depthCopies-1)%512)==0)
-        std::fprintf(stderr,"[NATIVE VIEWPORT DEPTH COPY] camera=%08X source=%08X destination=82DFE840 count=%llu; exact native depth/stencil copy, no clear/draw/state change\n",
+        std::fprintf(stderr,"[NATIVE VIEWPORT DEPTH COPY] camera=%08X source=%08X destination=82DFE840 count=%llu; exact native depth/stencil copy after qualified temporal post preparation\n",
         camera.camera,camera.depthIdentity,static_cast<unsigned long long>(s.depthCopies));
 }
 std::shared_ptr<Graphics::DepthTarget> EngineViewportSurfaces::depthTexture(uint32_t header) const {

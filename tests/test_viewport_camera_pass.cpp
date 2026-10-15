@@ -76,7 +76,10 @@ void exercise(const char* image){
     pixels(d,color[0],depth[0],1280,0xC00003FF,0x11);
     for(uint32_t slot=0;slot<3;++slot){PPC_STORE_U32(0x50000,rgba[slot]);PPC_STORE_U32(0x82D0CB14,0x22+slot);need(cpu.invoke(0x823EE940,camera[slot],0x50000,7)==1,"Original private clear returned wrong Boolean");}
     for(uint32_t cycle=0;cycle<2;++cycle){for(uint32_t slot=0;slot<3;++slot){const auto c=camera[slot];const auto clears=d.cameraClearCount();
+        const auto beforePassOrigins=d.temporalSceneOrigins();
         need(cpu.invoke(0x823F1A18,c)==c&&abi(ctx)==saved,"Original private camera begin or ABI differs");
+        need(d.temporalSceneOrigins().components==beforePassOrigins.components,
+            "Original private camera begin invented new main attachment origins");
         const auto binding=d.cameraBinding();need(binding.camera==c&&binding.colorIdentity==color[slot]&&binding.depthIdentity==depth[slot]&&
             binding.viewport==std::array<uint32_t,6>{0,0,slot?640u:1280u,720,0x3F800000,0},"Private viewport selected default/foreign attachments or wrong logical viewport");
         if(!cycle && !slot)cameraPairListContracts(rt,d,base,binding);
@@ -100,6 +103,8 @@ void exercise(const char* image){
         rejects([&]{d.preflightRasterDestroy(base,PPC_LOAD_U32(c+0x60));});rejects([&]{d.preflightRasterDestroy(base,PPC_LOAD_U32(c+0x64));});
         need(cpu.invoke(0x823F1A08,c)==c&&abi(ctx)==saved&&!PPC_LOAD_U32(engine)&&!PPC_LOAD_U32(0x82E3DD60)&&!PPC_LOAD_U32(0x82D0CB1C),"Original private camera end did not release CPU ownership");
         need(d.cameraClearCount()==clears,"Original begin/end unexpectedly cleared targets");
+        need(d.temporalSceneOrigins().components==beforePassOrigins.components,
+            "Original private camera end invalidated retained main attachment origins");
         rejects([&]{d.preflightRasterDestroy(base,PPC_LOAD_U32(c+0x60));});
         pixels(d,defaultColor,defaultDepth,1280,packed[0],0x22);
         for(uint32_t other=0;other<3;++other)pixels(d,color[other],depth[other],other?640:1280,packed[other],uint8_t(0x22+other));

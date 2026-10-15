@@ -1,0 +1,73 @@
+{
+  "repository": "https://github.com/iryoku/smaa",
+  "commit": "71c806a838bdd7d517df19192a20f0c61b3ca29d",
+  "license": "MIT with upstream binary-notice clarification; exact license retained in LICENSE.txt",
+  "files": {
+    "SMAA.hlsl": {
+      "upstream_path": "SMAA.hlsl",
+      "url": "https://raw.githubusercontent.com/iryoku/smaa/71c806a838bdd7d517df19192a20f0c61b3ca29d/SMAA.hlsl",
+      "bytes": 55806,
+      "sha256": "4db53d92ef0b45661f8450303589ffabce93c352cae4282a6f32dd2b80efbeb9",
+      "modified": false
+    },
+    "AreaTex.h": {
+      "upstream_path": "Textures/AreaTex.h",
+      "url": "https://raw.githubusercontent.com/iryoku/smaa/71c806a838bdd7d517df19192a20f0c61b3ca29d/Textures/AreaTex.h",
+      "bytes": 1166747,
+      "sha256": "1933bf43ce86ba71f7ed5f0fa94b148610c634dc3395b9bc67a817d51ee73af2",
+      "modified": false
+    },
+    "SearchTex.h": {
+      "upstream_path": "Textures/SearchTex.h",
+      "url": "https://raw.githubusercontent.com/iryoku/smaa/71c806a838bdd7d517df19192a20f0c61b3ca29d/Textures/SearchTex.h",
+      "bytes": 8610,
+      "sha256": "1fac315ab5f87b60083c9b8387af17f056204d3d1bf21500f2acc5b3e8c1a37a",
+      "modified": false
+    },
+    "LICENSE.txt": {
+      "upstream_path": "LICENSE.txt",
+      "url": "https://raw.githubusercontent.com/iryoku/smaa/71c806a838bdd7d517df19192a20f0c61b3ca29d/LICENSE.txt",
+      "bytes": 1470,
+      "sha256": "2b848b67ba50ac40b53e11cf1ccdaee2a190ca83b4652cba695a5f1ce81f52ae",
+      "modified": false
+    }
+  },
+  "lookup_storage": {
+    "area": {
+      "width": 160,
+      "height": 560,
+      "format": "DXGI_FORMAT_R8G8_UNORM",
+      "row_pitch": 320,
+      "bytes": 179200,
+      "sha256": "35065cef2a02cabcad711d6bf430239ae64e27d71c4e4fa06f29cce2c992f0d2"
+    },
+    "search": {
+      "width": 64,
+      "height": 16,
+      "format": "DXGI_FORMAT_R8_UNORM",
+      "row_pitch": 64,
+      "bytes": 1024,
+      "sha256": "3694eae5e9d44b8ebb4415a13f8c7b94dc08a2fc86658434d771c4610fe5744d"
+    }
+  },
+  "integration": {
+    "mode": "SMAA 1x",
+    "preset": "SMAA_PRESET_HIGH",
+    "edge_detection": "canonical color",
+    "passes": [
+      "edge detection",
+      "blending weight calculation",
+      "neighborhood blending"
+    ],
+    "subsample_indices": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "texture_orientation": "canonical rows unchanged; D3D top-left UV; west R/north G edges",
+    "color_space": "non-sRGB RGB10A2 source/output; canonical SMAA therefore blends in existing encoded color space",
+    "wrapper": "renderer/smaa.hlsl",
+    "validation_status": "source-authored; native compilation, WARP/hardware and live validation pending"
+  }
+}

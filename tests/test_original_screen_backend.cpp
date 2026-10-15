@@ -1,10 +1,12 @@
 #include "renderer/native_backend.h"
 #include "renderer/engine_state.h"
+#include "renderer/d3d_call_stats.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <cstdio>
 #include <limits>
+extern "C" uint64_t gD3DDeviceCounts[64];
 using namespace Simpsons::Graphics;
 namespace {
 size_t checks{};
@@ -28,13 +30,129 @@ void image(NativeBackend& b,const std::shared_ptr<RenderTarget>& target,const st
     const auto bytes=b.readbackTarget(target);need(bytes.size()==expected.size()*4,"Queued screen output extent differs");
     for(size_t i=0;i<expected.size();++i)need(pixel(bytes,i)==expected[i],"Queued screen scratch changed packed output or untouched coverage");
 }
+bool sameBlend(const D3D11_BLEND_DESC& a,const D3D11_BLEND_DESC& b){
+    if(a.AlphaToCoverageEnable!=b.AlphaToCoverageEnable||a.IndependentBlendEnable!=b.IndependentBlendEnable)return false;
+    for(size_t i=0;i<8;++i){const auto& x=a.RenderTarget[i];const auto& y=b.RenderTarget[i];
+        if(x.BlendEnable!=y.BlendEnable||x.SrcBlend!=y.SrcBlend||x.DestBlend!=y.DestBlend||x.BlendOp!=y.BlendOp||
+           x.SrcBlendAlpha!=y.SrcBlendAlpha||x.DestBlendAlpha!=y.DestBlendAlpha||x.BlendOpAlpha!=y.BlendOpAlpha||
+           x.RenderTargetWriteMask!=y.RenderTargetWriteMask)return false;}
+    return true;
+}
+bool sameDepth(const D3D11_DEPTH_STENCIL_DESC& a,const D3D11_DEPTH_STENCIL_DESC& b){
+    auto face=[](const D3D11_DEPTH_STENCILOP_DESC& x,const D3D11_DEPTH_STENCILOP_DESC& y){
+        return x.StencilFailOp==y.StencilFailOp&&x.StencilDepthFailOp==y.StencilDepthFailOp&&
+            x.StencilPassOp==y.StencilPassOp&&x.StencilFunc==y.StencilFunc;};
+    return a.DepthEnable==b.DepthEnable&&a.DepthWriteMask==b.DepthWriteMask&&a.DepthFunc==b.DepthFunc&&
+        a.StencilEnable==b.StencilEnable&&a.StencilReadMask==b.StencilReadMask&&a.StencilWriteMask==b.StencilWriteMask&&
+        face(a.FrontFace,b.FrontFace)&&face(a.BackFace,b.BackFace);
+}
 }
 namespace Simpsons::Graphics {
 struct NativeScreenProbe {
     static ID3D11Device* device(NativeBackend& b){return b.device.Get();}
     static ID3D11DeviceContext* context(NativeBackend& b){return b.context.Get();}
+    static void cachedStates(bool hardware){
+        NativeBackend b(!hardware);auto a=b.createTarget(32,16,TargetFormat::RGB10A2),other=b.createTarget(32,16,TargetFormat::RGB10A2);
+        auto z=b.createDepthTarget(32,16);b.clearDepthTarget(z,.5f,0xA5);
+        auto frontA=b.createTarget(32,16,TargetFormat::RGB10A2),frontOther=b.createTarget(32,16,TargetFormat::RGB10A2);
+        auto query=b.createTarget(64,8,TargetFormat::RGB10A2);b.clearTarget(query,{1,1,1,1});
+        const std::array<uint8_t,4> white={255,255,255,255};auto texture=b.createTexture(1,1,TextureFormat::RGBA8,white);
+        auto draw=quad();draw.alphaTest=false;draw.texture=texture;
+        const std::array<D3D11_SAMPLER_DESC,2> samplers={draw.sampler,[] {
+            auto s=quad().sampler;s.Filter=D3D11_FILTER_MIN_MAG_MIP_POINT;
+            s.AddressU=s.AddressV=s.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;return s;}()};
+        std::array<ComPtr<ID3D11SamplerState>,2> samplerReferences;
+        std::array<ComPtr<ID3D11BlendState>,128> blendReferences;
+        std::array<ComPtr<ID3D11DepthStencilState>,32> depthReferences;
+        auto blendReference=[&](bool original,uint32_t selector,uint32_t mask){
+            D3D11_BLEND_DESC d{};auto& c=d.RenderTarget[0];c.BlendEnable=!original;
+            c.SrcBlend=selector==3?D3D11_BLEND_ONE:D3D11_BLEND_SRC_ALPHA;
+            c.DestBlend=selector==1?D3D11_BLEND_INV_SRC_ALPHA:(selector==3?D3D11_BLEND_ZERO:D3D11_BLEND_ONE);
+            c.BlendOp=selector==2?D3D11_BLEND_OP_REV_SUBTRACT:D3D11_BLEND_OP_ADD;
+            c.SrcBlendAlpha=D3D11_BLEND_ONE;c.DestBlendAlpha=D3D11_BLEND_ZERO;c.BlendOpAlpha=D3D11_BLEND_OP_ADD;
+            c.RenderTargetWriteMask=UINT8(mask);const size_t index=(original?64u:0u)+selector*16u+mask;
+            need(SUCCEEDED(b.device->CreateBlendState(&d,&blendReferences[index])),"Independent screen blend reference creation failed");
+        };
+        for(uint32_t selector=0;selector<4;++selector){for(uint32_t mask=0;mask<16;++mask)blendReference(false,selector,mask);
+            blendReference(true,selector,15);}
+        blendReference(true,3,8);
+        for(uint32_t index=0;index<32;++index){D3D11_DEPTH_STENCIL_DESC d{};d.DepthEnable=bool(index&16);
+            d.DepthWriteMask=index&8?D3D11_DEPTH_WRITE_MASK_ALL:D3D11_DEPTH_WRITE_MASK_ZERO;d.DepthFunc=D3D11_COMPARISON_FUNC((index&7)+1);
+            d.FrontFace={D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_COMPARISON_ALWAYS};d.BackFace=d.FrontFace;
+            need(SUCCEEDED(b.device->CreateDepthStencilState(&d,&depthReferences[index])),"Independent screen depth reference creation failed");}
+        for(size_t i=0;i<samplers.size();++i)need(SUCCEEDED(b.device->CreateSamplerState(&samplers[i],&samplerReferences[i])),"Independent screen sampler reference creation failed");
+        D3D11_SAMPLER_DESC querySampler{};querySampler.Filter=D3D11_FILTER_MIN_MAG_MIP_POINT;
+        querySampler.AddressU=querySampler.AddressV=D3D11_TEXTURE_ADDRESS_MIRROR;querySampler.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;
+        querySampler.MaxAnisotropy=1;querySampler.ComparisonFunc=D3D11_COMPARISON_NEVER;ComPtr<ID3D11SamplerState> queryReference;
+        need(SUCCEEDED(b.device->CreateSamplerState(&querySampler,&queryReference)),"Independent query sampler reference creation failed");
+        // This isolated test explicitly enables the existing diagnostic and
+        // reads device vtable slots20/21/23. Pointer identity alone is not an
+        // allocation oracle: D3D11 interns equal immutable state descriptors.
+        installD3DCallStats(b.context.Get(),b.device.Get());need(d3dCallStatsInstalled(),"Screen creation diagnostic was not installed");
+        auto creates=[] {return std::array<uint64_t,3>{gD3DDeviceCounts[20],gD3DDeviceCounts[21],gD3DDeviceCounts[23]};};
+        auto issue=[&](bool original,uint32_t selector,uint32_t mask,uint32_t depthIndex,const std::shared_ptr<RenderTarget>& target){
+            draw.blendSelector=selector;draw.colorWriteMask=UINT8(mask);const size_t sample=(selector+depthIndex)&1;draw.sampler=samplers[sample];
+            b.bindTargets({target,nullptr,nullptr,nullptr},z);
+            if(original)b.drawOriginalScreen(target,z,draw,bool(depthIndex&8),depthIndex&7,bool(depthIndex&16));else b.drawScreen(target,draw);
+            ComPtr<ID3D11BlendState> blend;ComPtr<ID3D11DepthStencilState> depth;ComPtr<ID3D11SamplerState> sampler;
+            b.context->OMGetBlendState(&blend,nullptr,nullptr);b.context->OMGetDepthStencilState(&depth,nullptr);b.context->PSGetSamplers(0,1,&sampler);
+            need(blend&&depth,"Screen draw lost retained blend/depth state");
+            const auto& wantedBlend=blendReferences[(original?64u:0u)+selector*16u+mask];D3D11_BLEND_DESC gotBlend{},expectedBlend{};
+            blend->GetDesc(&gotBlend);wantedBlend->GetDesc(&expectedBlend);
+            need(blend==wantedBlend&&sameBlend(gotBlend,expectedBlend),"Cached screen blend identity/full native descriptor differs");
+            const auto& wantedDepth=depthReferences[original?depthIndex:7];D3D11_DEPTH_STENCIL_DESC gotDepth{},expectedDepth{};
+            depth->GetDesc(&gotDepth);wantedDepth->GetDesc(&expectedDepth);
+            need(depth==wantedDepth&&sameDepth(gotDepth,expectedDepth),"Cached screen post-depth identity/full native descriptor differs");
+            if(original&&draw.texture){need(bool(sampler),"Original screen lost its retained sampler");
+                D3D11_SAMPLER_DESC gotSampler{},expectedSampler{};sampler->GetDesc(&gotSampler);samplerReferences[sample]->GetDesc(&expectedSampler);
+                static_assert(sizeof(D3D11_SAMPLER_DESC)==52); // All fields are four-byte scalars; no padding.
+                need(sampler==samplerReferences[sample]&&!std::memcmp(&gotSampler,&expectedSampler,sizeof(gotSampler)),"Cached screen sampler identity/full native descriptor differs");}
+            if(!original)need(!sampler,"Ordinary screen draw retained its transient sampler");
+        };
+        auto exercise=[&]{
+            draw.color={.31f,.73f,.23f,.37f};draw.texture=texture;draw.coronaQuery.reset();
+            for(uint32_t selector=0;selector<4;++selector)for(uint32_t mask=0;mask<16;++mask)issue(false,selector,mask,0,a);
+            for(uint32_t depthIndex=0;depthIndex<32;++depthIndex)issue(true,depthIndex&3,15,depthIndex,depthIndex&1?other:a);
+            draw.texture.reset();draw.color={};issue(true,3,8,0,a);draw.texture=texture;draw.color={1,1,1,1};
+            draw.coronaQuery=query;draw.coronaUV={.5f/64,.5f/8};issue(true,0,15,16,a);
+            ComPtr<ID3D11SamplerState> bound;b.context->PSGetSamplers(1,1,&bound);need(bound==queryReference,"Cached corona sampler differs");draw.coronaQuery.reset();
+            for(const auto& sampler:samplers){const auto receipt=b.bindDirectSpriteInputs(texture,sampler);b.requireScreenInputReplacement(receipt);}
+        };
+        const auto cold=creates();exercise();const auto warm=creates();
+        need(warm[0]-cold[0]==69&&warm[1]-cold[1]==33&&warm[2]-cold[2]==3,"Screen cache warmup did not create its bounded qualified states");
+        exercise();need(creates()==warm,"Warm screen repeats still requested immutable state creation");
+        // Alternate actual queued draws, descriptors, destination history and
+        // target owners before any readback, Flush or completion wait.
+        b.clearTarget(a,{0,0,0,0});b.clearTarget(other,{0,0,0,0});std::vector<uint32_t> ea(32*16),eo(ea.size());
+        for(uint32_t index=0;index<12;++index){const bool second=bool(index&1);auto& expected=second?eo:ea;
+            draw.color={.07f+.03f*float(index),.41f,.23f,.37f};issue(true,index&3,15,index%32,second?other:a);
+            for(auto& code:expected)code=blended(code,draw.color,index&3);}
+        need(creates()==warm,"Queued cached screen draws created immutable states");
+        b.bindTargets({a,nullptr,nullptr,nullptr},z);auto copyA=b.copyFront(a,frontA);
+        b.bindTargets({other,nullptr,nullptr,nullptr},z);auto copyOther=b.copyFront(other,frontOther);
+        std::weak_ptr<Texture> weakTexture=texture;std::weak_ptr<RenderTarget> weakTarget=a;
+        b.clearBindings();draw.texture.reset();texture.reset();a.reset();other.reset();
+        need(weakTexture.expired(),"Screen state cache retained a caller texture owner");need(!weakTarget.expired(),"Queued screen copy lost its source owner");
+        b.waitCopy(copyOther);need(b.copyComplete(copyA),"Queued screen copies did not complete in order");image(b,frontA,ea);image(b,frontOther,eo);
+        const auto depthBytes=b.readbackDepthTarget(z);for(size_t i=0;i<depthBytes.size()/8;++i){uint32_t code{};std::memcpy(&code,depthBytes.data()+i*8,4);
+            need(code==0x3F000000&&depthBytes[i*8+4]==0xA5,"Cached screen draw changed defined depth/stencil bits");}
+        copyA.reset();copyOther.reset();b.waitIdle();need(weakTarget.expired(),"Screen state cache retained target after copy retirement");
+        // Seed stale scene-state entries from another device. Existing cache
+        // device validation must retire those entries before a new screen draw.
+        NativeBackend foreign(!hardware);foreign.sceneCacheDevice=b.sceneCacheDevice;
+        foreign.sceneDepthStates=b.sceneDepthStates;foreign.sceneSamplers=b.sceneSamplers;
+        auto ft=foreign.createTarget(32,16,TargetFormat::RGB10A2);auto fz=foreign.createDepthTarget(32,16);
+        auto fresh=quad();fresh.alphaTest=false;fresh.color={.17f,.41f,.83f,.72f};fresh.blendSelector=3;
+        fresh.texture=foreign.createTexture(1,1,TextureFormat::RGBA8,white);foreign.bindTargets({ft,nullptr,nullptr,nullptr},fz);
+        foreign.drawOriginalScreen(ft,fz,fresh,true,6);ComPtr<ID3D11BlendState> fb;ComPtr<ID3D11DepthStencilState> fd;ComPtr<ID3D11SamplerState> fs;
+        foreign.context->OMGetBlendState(&fb,nullptr,nullptr);foreign.context->OMGetDepthStencilState(&fd,nullptr);foreign.context->PSGetSamplers(0,1,&fs);
+        for(ID3D11DeviceChild* state:{static_cast<ID3D11DeviceChild*>(fb.Get()),static_cast<ID3D11DeviceChild*>(fd.Get()),static_cast<ID3D11DeviceChild*>(fs.Get())}){
+            ComPtr<ID3D11Device> owner;state->GetDevice(&owner);need(owner==foreign.device,"Screen reused a foreign-device immutable state");}
+        const auto foreignPixels=foreign.readbackTarget(ft);for(size_t i=0;i<32*16;++i)need(pixel(foreignPixels,i)==pack(fresh.color),"Device-isolated screen cached output differs");
+        foreign.waitIdle();std::printf("PASS screen cached states:69 blend/33 depth/3 sampler warmup requests, zero warm repeat requests, exact descriptors/queued pixels/device/lifetimes\n");
+    }
     static void queuedScratch(bool hardware){
-        NativeBackend b(!hardware);b.configureRendering(1280,720,1,Antialiasing::SSAA4x);
+        NativeBackend b(!hardware);b.configureRendering(1280,720,1,Antialiasing::Original,200);
         auto a=b.createTarget(32,16,TargetFormat::RGB10A2,TargetScale::Scene);
         auto other=b.createTarget(32,16,TargetFormat::RGB10A2,TargetScale::Scene);
         auto smallerTarget=b.createTarget(16,8,TargetFormat::RGB10A2,TargetScale::Scene);
@@ -196,6 +314,7 @@ int main(int argc,char** argv){try{
     b.bindTargets({nullptr,nullptr,nullptr,nullptr},depth);rejects([&]{submit();});
     need(b.screenDrawCount()==draws,"Rejected original draw changed submission count");need(!b.presentationCount(),"Fixture draws counted as presentation");
     NativeScreenProbe::queuedScratch(hardware);
+    NativeScreenProbe::cachedStates(hardware);
     auto state=EngineState::fromOriginalStartup();state.setScalar(ScalarState::HalfPixelOffset,1);state.setScalar(ScalarState::GuardBandX,0x3F800000);state.setScalar(ScalarState::GuardBandY,0x3F800000);
     state.setSampler(0,SamplerState::AddressW,2);state.setSampler(0,SamplerState::MipFilter,1);state.applyScreenQuadState(0,true);
     auto checked=state.requireOriginalScreenState(true);need(checked.expandedBlendRequested&&checked.sampler->addressW==2&&checked.sampler->mipFilter==1,"Original snapshot lost retained inactive sampler fields");

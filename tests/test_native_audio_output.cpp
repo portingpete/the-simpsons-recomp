@@ -428,9 +428,57 @@ void fpRestoration() {
     std::puts("PASS native operations restore caller MXCSR");
 }
 }
+// No device: the clock consumes each 256-frame block in real time, in order,
+// only while started, and still wakes an idle worker. Stop cancels the queue.
+void silentClock() {
+    Output::Options options;options.capacity=4;options.silent=true;
+    {
+        Output output(options);
+        check(output.silent(),"Silent option opened a device");
+        const auto endpoint=output.endpoint();
+        check(endpoint.channels==2 && endpoint.sampleRate==48000 && endpoint.channelMask==3 && endpoint.muted,
+              "Silent stand-in endpoint must be muted 48 kHz stereo");
+        configure(output);check(output.routing().matrix==route(output).matrix,"Silent routing readback differs");
+        const std::array early{submit(output,samples(1)),submit(output,samples(2))};
+        Sleep(50);
+        for(auto receipt:early)check(output.query(receipt).status==Output::BufferStatus::Pending,"Stopped silent clock consumed PCM");
+        output.start();complete(output,early);
+        for(auto receipt:early)output.retire(receipt);
+        // 64 blocks are 341 ms of audio: completion must follow the clock, not submission.
+        const auto begin=Clock::now();unsigned done=0;
+        std::vector<Output::Receipt> queue;
+        while(done<64) {
+            while(queue.size()<4 && done+queue.size()<64) {
+                const auto result=output.submit(samples(unsigned(done+queue.size())));
+                if(result.status!=Output::SubmitStatus::Accepted)break;
+                queue.push_back(result.receipt);
+            }
+            output.wait(100);
+            auto snapshot=output.poll();check(!snapshot.error && !snapshot.stopped,"Silent clock failed");
+            for(const auto& item:snapshot.completed) {
+                check(item.status==Output::BufferStatus::Consumed && !queue.empty() && item.receipt==queue.front(),
+                      "Silent clock completed out of submission order");
+                output.retire(item.receipt);queue.erase(queue.begin());++done;
+            }
+            check(Clock::now()-begin<std::chrono::seconds(5),"Silent clock completion deadline");
+        }
+        const auto elapsed=std::chrono::duration<double,std::milli>(Clock::now()-begin).count();
+        check(elapsed>=300 && elapsed<2000,"Silent clock did not consume at the 48 kHz block rate");
+        expectIdleWake(output);
+        const auto pending=submit(output,samples(9));
+        output.stop();
+        check(output.query(pending).status==Output::BufferStatus::Cancelled,"Silent stop must cancel queued PCM");
+    }
+    Output windows(options);windows.configureWindows51();
+    const auto matrix=windows.routing().matrix;
+    check(matrix.size()==12 && std::all_of(matrix.begin(),matrix.end(),[](float v){return std::isfinite(v)&&v>=0&&v<=1;}),
+          "Silent Windows 5.1 fold-down must be a finite stereo matrix");
+    std::puts("PASS silent real-time clock: muted stereo stand-in, ordered paced completions, idle wake, cancellation");
+}
 int main() {
     try {
         Mta apartment;
+        silentClock();
         preflight();windowsRouting();explicitDevicePolicy();copiedAndConsumed();stopAndReopen();callbackErrors();racingWorker();fpRestoration();
         std::printf("PASS NativeAudioOutput: %u checks; %u natural completions in deterministic batches, plus concurrent worker completions; ALL MUTED\n",checks,realConsumed);
         return 0;

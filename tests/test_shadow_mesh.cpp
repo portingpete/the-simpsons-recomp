@@ -1,11 +1,14 @@
 #include "renderer/shadow_mesh.h"
+#include "header/test_graphics_device.h"
 #include "renderer/native_material_compiler.h"
 #include "renderer/device_availability.h"
+#include "renderer/d3d_call_stats.h"
 #include <d3d11sdklayers.h>
 #include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -13,23 +16,24 @@
 #include <string>
 #include <thread>
 #include <vector>
+extern "C" uint64_t gD3DDeviceCounts[64];
 
 // Reuse the existing backend fixture access point; no production header edits.
 #include "header/test_mesh_gpu_retirement.h"
 #include "header/test_r16_strip_boundary.h"
 namespace Simpsons::Graphics {
 struct NativeIm2DProbe {
+    static void resetSceneCache(NativeBackend& b){b.resetSceneStateCacheForDevice();}
     static ID3D11Device* device(NativeBackend& b){return b.device.Get();}
     static ID3D11DeviceContext* context(NativeBackend& b){return b.context.Get();}
     static void replaceDevice(NativeBackend& b,bool hardware) {
         ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;D3D_FEATURE_LEVEL level{};
-        const D3D_FEATURE_LEVEL levels[]={D3D_FEATURE_LEVEL_11_1,D3D_FEATURE_LEVEL_11_0};
-        const auto hr=D3D11CreateDevice(nullptr,hardware?D3D_DRIVER_TYPE_HARDWARE:D3D_DRIVER_TYPE_WARP,nullptr,
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,levels,2,D3D11_SDK_VERSION,&device,&level,&context);
+        const auto hr=createTestDevice(hardware,D3D11_CREATE_DEVICE_BGRA_SUPPORT,&device,&level,&context);
         if(FAILED(hr)) throw Error("Deterministic shadow device replacement failed");
         b.availability=std::make_shared<DeviceAvailability>(device.Get());b.device=device;b.context=context;b.featureLevel=level;
     }
     static void debug(NativeBackend& b,bool hardware) {
+        if(testUsesVulkan())return; // D3D11 debug layer: a D3D11-only diagnostic.
         ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;D3D_FEATURE_LEVEL level{};
         const D3D_FEATURE_LEVEL levels[]={D3D_FEATURE_LEVEL_11_1,D3D_FEATURE_LEVEL_11_0};
         const auto hr=D3D11CreateDevice(nullptr,hardware?D3D_DRIVER_TYPE_HARDWARE:D3D_DRIVER_TYPE_WARP,nullptr,
@@ -129,8 +133,8 @@ struct Fixture {
     ShadowMeshDraw draw{};
     ID3D11DeviceContext* context{};
     static constexpr UINT extent=16;
-    explicit Fixture(const std::vector<uint8_t>& image,bool hardware):backend(!hardware),compiler(backend) {
-        NativeIm2DProbe::debug(backend,hardware);context=NativeIm2DProbe::context(backend);
+    explicit Fixture(const std::vector<uint8_t>& image,bool hardware,bool debugLayer=true):backend(!hardware),compiler(backend) {
+        if(debugLayer)NativeIm2DProbe::debug(backend,hardware);context=NativeIm2DProbe::context(backend);
         for(const auto& record:originalMaterialIdentities())if(record.originalAddress==0x820C2FA0) {
             const auto id=registry.create(record.originalAddress,std::span<const uint8_t>(image).subspan(record.originalAddress-0x82000000,record.recordBytes));
             vertex=&registry.prepareForBind(id,compiler);
@@ -192,6 +196,102 @@ struct Fixture {
     }
 };
 bool interior(UINT x,UINT y){return x>=1&&x<15&&y>=1&&y<15;}
+std::vector<uint8_t> actualBufferBytes(ID3D11Device* device,ID3D11DeviceContext* context,ID3D11Buffer* source) {
+    D3D11_BUFFER_DESC desc{};source->GetDesc(&desc);const UINT bytes=desc.ByteWidth;
+    desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Buffer> staging;hr(device->CreateBuffer(&desc,nullptr,&staging),"Shadow constants staging allocation");
+    context->CopyResource(staging.Get(),source);D3D11_MAPPED_SUBRESOURCE mapped{};
+    hr(context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped),"Shadow constants staging map");
+    struct Unmap {ID3D11DeviceContext* context;ID3D11Buffer* buffer;~Unmap(){context->Unmap(buffer,0);}} unmap{context,staging.Get()};
+    need(mapped.pData&&mapped.RowPitch>=bytes,"Shadow constants staging extent differs");
+    std::vector<uint8_t> result(bytes);std::memcpy(result.data(),mapped.pData,bytes);return result;
+}
+// Observe the actual depth-bank bind on the complete driver table. Replacing
+// the context vptr with a 115-method base clone would truncate Context1 getters.
+class DepthBindingCapture {
+    // SDK26100 ID3D11DeviceContextVtbl slot16: PSSetConstantBuffers.
+    using Set=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,UINT,UINT,ID3D11Buffer* const*);
+    inline static DepthBindingCapture* active{};
+    ComPtr<ID3D11DeviceContext> context;
+    void** table{};Set original{};DWORD protection{};bool installed{};
+    static void STDMETHODCALLTYPE observe(ID3D11DeviceContext* value,UINT start,UINT count,ID3D11Buffer* const* buffers) {
+        auto& capture=*active;capture.original(value,start,count,buffers);
+        if(value!=capture.context.Get()||start!=1||count!=1||!buffers||!buffers[0])return;
+        D3D11_BUFFER_DESC desc{};buffers[0]->GetDesc(&desc);
+        // The prior sentinel is DEFAULT16 and is restored after submission.
+        // Only the actual immutable16-byte depth bank is a counted binding.
+        if(desc.ByteWidth!=16||desc.Usage!=D3D11_USAGE_IMMUTABLE||desc.BindFlags!=D3D11_BIND_CONSTANT_BUFFER)return;
+        ComPtr<ID3D11Buffer> actual;value->PSGetConstantBuffers(1,1,&actual);
+        need(actual.Get()==buffers[0],"Shadow depth binding observer did not see the requested actual buffer");
+        capture.buffer=std::move(actual);++capture.bindings;
+    }
+    bool restore() noexcept {
+        if(!installed){active=nullptr;return true;}
+        // A legitimate driver replacement already removed this observer.
+        if(table[16]!=reinterpret_cast<void*>(&observe)){installed=false;active=nullptr;return true;}
+        DWORD old{};if(!VirtualProtect(table+16,sizeof(void*),PAGE_READWRITE,&old))return false;
+        table[16]=reinterpret_cast<void*>(original);DWORD ignored{};
+        // Fail-stop after our own pointer write if the protection cannot restore;
+        // a retry must never misclassify that write as a driver replacement.
+        if(!VirtualProtect(table+16,sizeof(void*),protection,&ignored))std::abort();
+        const bool restored=table[16]==reinterpret_cast<void*>(original);
+        if(restored){installed=false;active=nullptr;}return restored;
+    }
+public:
+    ComPtr<ID3D11Buffer> buffer;UINT bindings{};
+    explicit DepthBindingCapture(ID3D11DeviceContext* value):context(value) {
+        need(context&&context->GetType()==D3D11_DEVICE_CONTEXT_IMMEDIATE&&!active,"Shadow depth binding observer requires one owned immediate context");
+        table=*reinterpret_cast<void***>(context.Get());original=reinterpret_cast<Set>(table[16]);
+        need(original!=nullptr,"Shadow depth binding observer lost the actual setter");active=this;
+        try {
+            need(VirtualProtect(table+16,sizeof(void*),PAGE_READWRITE,&protection)!=0,"Shadow depth binding observer write admission failed");
+            table[16]=reinterpret_cast<void*>(&observe);installed=true;DWORD ignored{};
+            need(VirtualProtect(table+16,sizeof(void*),protection,&ignored)!=0,"Shadow depth binding observer protection restoration failed");
+        }catch(...){if(!restore())std::abort();throw;}
+    }
+    void finish(){need(restore(),"Shadow depth binding observer pointer/page did not restore before owner release");}
+    ~DepthBindingCapture(){if(!restore())std::abort();}
+    DepthBindingCapture(const DepthBindingCapture&)=delete;DepthBindingCapture& operator=(const DepthBindingCapture&)=delete;
+    void reset(){buffer.Reset();bindings=0;}
+};
+void depthBytes(NativeBackend& backend,ID3D11Buffer* buffer,const ShadowMeshDraw& draw) {
+    need(buffer!=nullptr,"Actual shadow draw did not bind depth constants");
+    ComPtr<ID3D11Device> owner;D3D11_BUFFER_DESC desc{};buffer->GetDevice(&owner);buffer->GetDesc(&desc);
+    need(owner.Get()==NativeIm2DProbe::device(backend)&&desc.ByteWidth==16&&desc.Usage==D3D11_USAGE_IMMUTABLE&&
+         desc.BindFlags==D3D11_BIND_CONSTANT_BUFFER&&!desc.CPUAccessFlags&&!desc.MiscFlags&&!desc.StructureByteStride,
+         "Actual shadow depth constants descriptor/device differs");
+    const auto bytes=actualBufferBytes(owner.Get(),NativeIm2DProbe::context(backend),buffer);
+    const std::array<uint32_t,4> expected{uint32_t(draw.viewport[4]==bits(1)&&draw.viewport[5]==0),draw.depthBiasBits,draw.slopeBiasBits,0};
+    need(bytes.size()==sizeof(expected)&&!std::memcmp(bytes.data(),expected.data(),sizeof(expected)),"Actual shadow depth GPU bytes differ");
+}
+void runDepthConstantReuse(const std::vector<uint8_t>& image,bool hardware) {
+    Fixture f(image,hardware,false);installD3DCallStats(f.context,NativeIm2DProbe::device(f.backend));
+    auto first=f.backend.uploadShadowMesh(quad(),strip),second=f.backend.uploadShadowMesh(quad(.25f),strip);
+    const auto unused=f.backend.uploadShadowMesh(quad(.75f),strip);need(first!=second,"Shadow reuse needs distinct mesh owners");
+    DepthBindingCapture capture(f.context);
+    const auto submit=[&](const std::shared_ptr<NativeShadowMesh>& mesh,const ShadowMeshDraw& draw,uint64_t creates,float z) {
+        f.bind(mesh);f.clear();capture.reset();const auto before=gD3DDeviceCounts[3];f.submit(mesh,draw);
+        need(gD3DDeviceCounts[3]==before+creates,"Shadow depth reuse made the wrong CreateBuffer count");
+        need(capture.bindings==1&&capture.buffer,"Shadow observer did not see one actual immutable depth binding");depthBytes(f.backend,capture.buffer.Get(),draw);
+        const float value=mappedDepth(z,draw.viewport[4]==bits(1)&&draw.viewport[5]==0,std::bit_cast<float>(draw.depthBiasBits),std::bit_cast<float>(draw.slopeBiasBits),0);
+        f.pixels([&](UINT x,UINT y){return interior(x,y)?value:0.0f;});return capture.buffer;
+    };
+    auto original=submit(first,f.draw,1,.5f);auto* originalPointer=original.Get();
+    need(submit(second,f.draw,0,.25f).Get()==original.Get(),"Distinct shadow meshes did not reuse exact depth constants");
+    auto negativeZero=f.draw;negativeZero.depthBiasBits=0x80000000;
+    const auto negative=submit(first,negativeZero,1,.5f);
+    need(negative.Get()!=original.Get()&&submit(second,negativeZero,0,.25f).Get()==negative.Get(),"Shadow depth cache collapsed signed zero or missed reuse");
+    auto bias=f.draw;bias.depthBiasBits=bits(1.0f/256);need(submit(first,bias,1,.5f).Get()!=original.Get(),"Shadow bias key reused zero");
+    auto slope=f.draw;slope.slopeBiasBits=bits(1.0f/128);need(submit(first,slope,1,.5f).Get()!=original.Get(),"Shadow slope key reused zero");
+    auto forward=f.draw;forward.viewport[4]=0;forward.viewport[5]=bits(1);need(submit(first,forward,1,.5f).Get()!=original.Get(),"Shadow direction key reused reverse");
+    // Drop diagnostic owners before reset: only the live meshes may pin this
+    // original local bank. A new mesh must allocate a new global entry.
+    original.Reset();capture.reset();NativeIm2DProbe::resetSceneCache(f.backend);
+    need(submit(first,f.draw,0,.5f).Get()==originalPointer,"Scene reset lost the live shadow local depth owner");
+    need(submit(unused,f.draw,1,.75f).Get()!=originalPointer,"Unused shadow mesh reused a cleared global depth owner");
+    capture.finish();
+    std::printf("AUDIT_GPU_SHADOW_DEPTH_REUSE meshes=2 immutable_bytes=16 first_create=1 second_create=0 exact_gpu_bytes=passed signed_zero=passed local_owner_after_scene_reset=passed state_pixels=passed\n");
+}
 void uploadCacheReuse(bool hardware) {
     NativeBackend backend(!hardware);
     const auto base = quad();
@@ -492,5 +592,5 @@ int main(int argc,char** argv)try {
          word(0x8243AABC)==0xD0032A50&&word(0x8243AAC0)==0xD0032A58,"Original constant bias setter changed");
     need(word(0x8243AB7C)==0xC1A1001C&&word(0x8243AB80)==0xD1A32A54&&
          word(0x8243AB84)==0xD1A32A5C,"Original unscaled slope setter changed");
-    run(image,argc==3);uploadCacheReuse(argc==3);requireMeshGpuRetirements([](bool value,const char* message){need(value,message);});return 0;
+    runDepthConstantReuse(image,argc==3);run(image,argc==3);uploadCacheReuse(argc==3);requireMeshGpuRetirements([](bool value,const char* message){need(value,message);});return 0;
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL shadow mesh after %zu checks: %s\n",checks,e.what());return 1;}

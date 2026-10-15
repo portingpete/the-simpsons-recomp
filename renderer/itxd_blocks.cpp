@@ -2,6 +2,7 @@
 #include "native_backend.h"
 #include <algorithm>
 #include <bit>
+#include <cstring>
 
 namespace Simpsons::Graphics {
 namespace {
@@ -184,7 +185,13 @@ std::vector<std::vector<uint8_t>> decodeITXDBCMipChain(const std::array<uint32_t
                 (((((ty&8)>>2)+(tx>>3))&3)<<6)+(mixed&63);
             if(size_t(at)+blockBytes>sizes[stored])throw Error("ITXD BC mip block exceeds its owned subresource");
             const size_t out=(size_t(y)*columns+x)*blockBytes;
-            for(uint32_t i=0;i<blockBytes;++i)output[out+i]=storage[starts[stored]+at+(i^1)];
+            for(uint32_t i=0;i<blockBytes;i+=8) {
+                uint64_t word{};
+                std::memcpy(&word,storage.data()+starts[stored]+at+i,sizeof(word));
+                word=((word&0x00FF00FF00FF00FFull)<<8)|
+                    ((word&0xFF00FF00FF00FF00ull)>>8);
+                std::memcpy(output.data()+out+i,&word,sizeof(word));
+            }
         }
     }
     return result;

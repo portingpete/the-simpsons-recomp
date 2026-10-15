@@ -30,6 +30,22 @@ uint32_t findFont(Runtime& rt,uint32_t group){
     }
     return 0;
 }
+void publishedGroup(Runtime& rt,uint32_t group){
+    // Completion is the existing original load boundary, outside the registry
+    // lock. Observe every member using cached provenance before any texture
+    // demand; no new worker reads guest memory or a renderer context here.
+    auto* base=rt.base;auto& service=rt.engineDriver->itxdTextures();std::unordered_set<uint32_t> links;
+    for(auto p=PPC_LOAD_U32(group+4);p;p=PPC_LOAD_U32(p+4)){
+        rt.pointer(p,8,false);need(links.insert(p).second,"Published fixture group contains a cycle");
+        const auto t=PPC_LOAD_U32(p);const auto audit=service.auditIdentity(t+0xCC);
+        // AuditView exposes the existing Relocated=0,Published=1,Releasing=2
+        // registry phases; original publication must cover the whole group.
+        need(audit&&audit->phase==1&&audit->generation&&audit->bytes&&
+             audit->name==stringAt(rt,t+0x10)&&service.ownsRaster(t+0x78),
+             "Load completion exposes an unpublished group member");
+    }
+    need(!links.empty(),"Published fixture group has no members");
+}
 uint32_t loadAgain(Runtime& rt,const Capture& captured){
     auto c=captured.entry;ContextScope owner(c);const auto saved=abi(c);
     PPCGuestFloatingPointScope floatingPoint(c.fpscr);PPCSafeIndirect(c,rt.base,0x826F24D8);
@@ -39,12 +55,20 @@ void run(Runtime& rt,const Capture& captured,const std::filesystem::path& fixtur
     auto* base=rt.base;auto& driver=*rt.engineDriver;auto& service=driver.itxdTextures();
     const auto t=captured.font,r=t+0x78,group=captured.group,plugin=PPC_LOAD_U32(0x82CF0600);
     const auto records=service.count();need(records&&service.ownsRaster(r),"Original font has no published owner");
+    publishedGroup(rt,group);const auto audit=service.auditIdentity(t+0xCC);
+    need(audit&&audit->phase==1&&audit->generation&&audit->bytes==fixture.bytes&&audit->name==fixture.name,
+         "Original published preparation identity/provenance differs");
     need(plugin==0x58&&PPC_LOAD_U32(t+plugin+0xC)==group&&!PPC_LOAD_U32(t+plugin+0x10)&&PPC_LOAD_U32(t+0x54)==2,
          "Fixture requires font's first original owning group");
     need(PPC_LOAD_U32(t)==r&&PPC_LOAD_U32(r)==r&&PPC_LOAD_U32(t+0xAC)==t+0xCC&&
          !PPC_LOAD_U32(t+0xBC)&&!PPC_LOAD_U32(t+0xC0),"Original pointer relocation/bookkeeping clear differs");
     const auto metadata=snapshot(rt,t,0x100),source=Simpsons::readFile(fixtureRoot/(std::string(fixture.name)+".metadata"));
     need(source.size()==0x100&&!std::memcmp(source.data()+0x10,metadata.data()+0x10,0x40),"Font name differs from original asset fixture");
+    for(size_t word=0;word<audit->descriptor.size();++word){
+        const auto at=0xE8+word*4;const uint32_t expected=uint32_t(source[at])<<24|uint32_t(source[at+1])<<16|
+            uint32_t(source[at+2])<<8|source[at+3];
+        need(audit->descriptor[word]==expected,"Owned preparation descriptor differs from independent original fixture");
+    }
     const auto pixels=PPC_LOAD_U32(t+0xEC)&0xFFFFF000u;
     const auto tiled=Simpsons::readFile(fixtureRoot/(std::string(fixture.name)+".tiled"));
     need(tiled.size()==fixture.bytes,"Original tiled fixture extent differs");same(rt,pixels,tiled,"Original N-byte copy differs from fixture");
@@ -183,6 +207,9 @@ void run(Runtime& rt,const Capture& captured,const std::filesystem::path& fixtur
     PPC_STORE_U32(u+0xA8,authoredWord);
     need(second&&second!=group&&findFont(rt,second)==t&&service.count()==records&&PPC_LOAD_U32(t+0x54)==3,
         "Original second group did not reuse exact copied record/refcount");
+    publishedGroup(rt,second);const auto sharedAudit=service.auditIdentity(t+0xCC);
+    need(sharedAudit&&sharedAudit->generation==audit->generation&&sharedAudit->descriptor==audit->descriptor,
+         "Shared group changed preparation generation/descriptor identity");
     need(service.texture(base,r)==texture,"Original cache hit replaced native texture");
     if(promptTexture)need(service.inputPromptTexture(base,r)==promptTexture,"Cached group changed native input prompt atlas");
     need(PPC_LOAD_U32(t+0xA8)==authoredWord,"Original cache hit overwrote first-owner metadata");
@@ -195,6 +222,7 @@ void run(Runtime& rt,const Capture& captured,const std::filesystem::path& fixtur
     stage="final group";const uint32_t key=PPC_LOAD_U32(t+plugin+4);
     cpu.invoke(0x826F8168,second);need(abi(cpu.registers())==saved,"Original final group release ABI differs");
     need(!service.ownsRaster(r)&&!cpu.invoke(0x826F8520,key),"Original final release retained index/native generation");
+    need(!service.auditIdentity(t+0xCC),"Final original release retained preparation provenance");
     rejects([&]{service.texture(base,r);},"Stale copied raster consumed after original frees");
     PPC_STORE_U32(stageCache,r);
     rejects([&]{driver.setTextureRaster(base,0,header,0x80000000ull,0x827519D4);},
@@ -207,6 +235,9 @@ void run(Runtime& rt,const Capture& captured,const std::filesystem::path& fixtur
     // native owner even while a client retains the prior GPU generation.
     stage="new generation";const auto third=loadAgain(rt,captured),newT=findFont(rt,third);
     need(newT&&service.ownsRaster(newT+0x78)&&service.texture(base,newT+0x78)!=texture,"Reload reused stale native generation");
+    publishedGroup(rt,third);const auto freshAudit=service.auditIdentity(newT+0xCC);
+    need(freshAudit&&freshAudit->generation>audit->generation&&freshAudit->descriptor==audit->descriptor&&
+         freshAudit->bytes==audit->bytes,"Reload reused stale preparation identity/source snapshot");
     need(driver.readbackTextureRaster(newT+0x78)==linear,"Reloaded original atlas bytes changed");
     if(promptTexture){
         const auto reloadedPrompt=service.inputPromptTexture(base,newT+0x78);
@@ -239,6 +270,9 @@ int main(int argc,char** argv){
                 need(at==0x826F2654,"ITXD fixture observation PC differs");
                 if(const auto font=findFont(rt,c.r27.u32)){
                     need(GetCurrentThreadId()==ownerThread,"Font fixture observed on a worker; controlled startup interception needs extension");
+                    std::array<uint8_t,sizeof(PPCContext)> before{};std::memcpy(before.data(),&c,sizeof(c));
+                    publishedGroup(rt,c.r27.u32);need(!std::memcmp(before.data(),&c,sizeof(c)),
+                        "Cached publication observation changed original boundary context");
                     captured={entries.at(GetCurrentThreadId()),c,c.r27.u32,font};throw FontLoaded{};
                 }
             };installed=true;

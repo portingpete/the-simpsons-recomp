@@ -13,6 +13,7 @@
 #include "engine_quad_declarations.h"
 #include "character_mesh.h"
 #include "static_mesh_source_cache.h"
+#include "stall_profiler.h"
 #include "static_shadow_mesh.h"
 #include "zprepass_vertices.h"
 #include "rigid_vertices.h"
@@ -48,6 +49,18 @@
 namespace {
 using namespace Simpsons;
 using Graphics::EffectRecord;
+void temporalIdentity(Runtime& runtime,Graphics::NativeBackend& backend,Graphics::ShadowMeshDraw& draw,
+    uint32_t object,uint32_t geometry,uint32_t submesh) {
+    if(!Graphics::temporalAntialiasing(backend.antialiasing()))return;
+    const auto allocation=runtime.engineAudio?runtime.engineAudio->allocationSpan(object):std::nullopt;
+    if(!allocation||!allocation->generation) {
+        backend.resetTemporalHistory();
+        throw Failure("Temporal geometry instance lacks its live original allocation generation");
+    }
+    draw.temporalObject=object;draw.temporalGeneration=allocation->generation;
+    draw.temporalGeometry=geometry;draw.temporalSubmesh=submesh;
+}
+
 constexpr uint32_t sharedSource=0x820D5730;
 std::atomic<uint32_t> nextIdentity{0x00500001};
 struct HostState {
@@ -56,6 +69,30 @@ struct HostState {
     ~HostState(){PPCFPSCRRegister::restoreHostCSR(fp);SetLastError(error);}
 };
 void need(bool value,const char* message) {if(!value) throw Failure(message);}
+template<class Mesh>
+void reportMeshSourceCache(const char* family,const StaticMeshSourceCache<Mesh>& cache,uint32_t variant=0) {
+    if(!StallProfiler::enabled)return;
+    const auto& stats=cache.statistics();const uint64_t lookups=stats.lookups;
+    // Early powers of two expose initial churn; subsequent output is bounded
+    // through32768, then one row per65536 lookups per cache; no capture work.
+    if(!lookups||!((lookups<=32768&&std::has_single_bit(lookups))||!(lookups&0xFFFF)))return;
+    std::fprintf(stderr,"[MESH SOURCE CACHE] family=%s variant=%08X lookups=%llu watch_hits=%llu full_lookups=%llu exact_hits=%llu misses=%llu insertions=%llu owned_insertions=%llu owned_logical_bytes=%llu owned_capacity_bytes=%llu evictions=%llu oversized_skips=%llu revalidations=%llu dirty_bindings=%llu hint_resets=%llu hash_lookups=%llu hashed_bytes=%llu searched_entries=%llu entries=%zu bytes=%zu peak_entries=%zu peak_bytes=%zu limits=%zu/%zu\n",
+        family,variant,static_cast<unsigned long long>(lookups),static_cast<unsigned long long>(cache.watchHits()),
+        static_cast<unsigned long long>(stats.fullLookups),static_cast<unsigned long long>(stats.exactHits),
+        static_cast<unsigned long long>(stats.misses),static_cast<unsigned long long>(stats.insertions),
+        static_cast<unsigned long long>(stats.ownedInsertions),static_cast<unsigned long long>(stats.ownedLogicalBytes),
+        static_cast<unsigned long long>(stats.ownedCapacityBytes),
+        static_cast<unsigned long long>(stats.evictions),static_cast<unsigned long long>(stats.oversizedSkips),
+        static_cast<unsigned long long>(stats.revalidations),static_cast<unsigned long long>(stats.dirtyBindings),
+        static_cast<unsigned long long>(stats.hintResets),static_cast<unsigned long long>(stats.hashLookups),
+        static_cast<unsigned long long>(stats.hashedBytes),static_cast<unsigned long long>(stats.searchedEntries),
+        cache.size(),cache.residentBytes(),stats.peakEntries,stats.peakBytes,cache.maxEntries(),cache.maxBytes());
+}
+template<class F>
+decltype(auto) meshStreamWork(const PPCContext& c,const char* name,uint32_t geometry,F&& work) {
+    StallProfiler::Scope scope(StallProfiler::Section::Rendering,name,&c,geometry);
+    return work();
+}
 uint32_t rigidSubmeshExtent(Runtime& runtime,uint32_t entries,uint32_t count) {
     // Original empty loops bind and close geometry without consuming rows.
     if(!count)return 0;
@@ -297,6 +334,7 @@ const Graphics::EffectIdentity& profile(uint32_t source) {
 }
 std::unique_ptr<EffectRecord> copyEffect(Runtime& rt,uint32_t source) {
     const auto& row=profile(source);
+    StallProfiler::Scope effectProfile(StallProfiler::Section::Rendering,"FX.copyEffect",nullptr,source,row.recordBytes);
     return std::make_unique<EffectRecord>(source,std::span<const uint8_t>(rt.pointer(source,row.recordBytes,false),row.recordBytes));
 }
 void poolRoot(Runtime& rt,uint32_t pool) {
@@ -443,6 +481,7 @@ struct EngineEffects::State {
         Record(Runtime& rt,uint32_t wrapper,uint32_t manager,uint32_t source,uint32_t pool,
                Graphics::NativeMaterialCompiler& compiler):
             view{0,wrapper,manager,source,0,pool,0,Phase::Created,{},{},{}},metadata(copyEffect(rt,source)) {
+            StallProfiler::Scope metadataProfile(StallProfiler::Section::Rendering,"FX.recordMetadata",nullptr,source,metadata->bytes().size());
             view.cacheBytes=metadata->cacheBytes();
             // Original creation copies the source prefix, including its private
             // mutable mask. Keep the live mask separate from immutable metadata.
@@ -454,13 +493,19 @@ struct EngineEffects::State {
             }
             const auto defaults=metadata->privateDefaults();
             for(size_t i=0;i<defaults.size();i+=4) view.defaultVectorWords.push_back(word(defaults,i));
+            metadataProfile.finish();
             for(const auto& shader:metadata->shaders()) {
-                const auto id=shaderRecords.create(shader.originalAddress,metadata->body().subspan(shader.bodyOffset,shader.recordBytes));
+                const auto id=[&] {
+                    StallProfiler::Scope registrationProfile(StallProfiler::Section::Rendering,"FX.registerShader",nullptr,shader.originalAddress,shader.recordBytes);
+                    return shaderRecords.create(shader.originalAddress,metadata->body().subspan(shader.bodyOffset,shader.recordBytes));
+                }();
                 shaders.push_back(id);
                 // Only these two FX shaders have qualified offline native code.
                 // All others own immutable bytes, with explicit Uncompiled capability.
-                if(shader.originalAddress==0x820B8F08 || shader.originalAddress==0x820B90D4)
+                if(shader.originalAddress==0x820B8F08 || shader.originalAddress==0x820B90D4) {
+                    StallProfiler::Scope shaderProfile(StallProfiler::Section::Rendering,"FX.eagerShader",nullptr,shader.originalAddress,shader.recordBytes);
                     shaderRecords.prepareForBind(id,compiler);
+                }
             }
         }
     };
@@ -839,6 +884,10 @@ struct EngineEffects::State {
     StaticMeshSourceCache<Graphics::NativeZPrepassMesh> zprepassSourceCache;
     // Guest-write-watched exact source caches for the rigid and skin mesh streams (same contract as zprepassSourceCache).
     StaticMeshSourceCache<Graphics::NativeRigidMesh> rigidSourceCache;
+    // Character and static shadow meshes (same contract). Without it every shadow draw
+    // copied, decoded and content-hashed its unchanged source: about 6% of Medal of
+    // Homer's main thread at 120 FPS.
+    StaticMeshSourceCache<Graphics::NativeShadowMesh> shadowSourceCache;
     // One per original skin vertex shader: the shader address is an upload input the exact key must not conflate.
     std::unordered_map<uint32_t,std::unique_ptr<StaticMeshSourceCache<Graphics::NativeSkinMesh>>> skinSourceCaches;
     StaticMeshSourceCache<Graphics::NativeSkinMesh>& skinSourceCache(uint32_t vertexAddress) {
@@ -903,6 +952,7 @@ struct EngineEffects::State {
         const char* verify=std::getenv("SIMPSONS_WATCH_VERIFY");
         zprepassSourceCache.setWriteWatch(rt.writeWatch(),verify&&*verify&&*verify!='0');
         rigidSourceCache.setWriteWatch(rt.writeWatch(),verify&&*verify&&*verify!='0');
+        shadowSourceCache.setWriteWatch(rt.writeWatch(),verify&&*verify&&*verify!='0');
     }
     void require(uint8_t* base) const {
         need(active==&runtime && base==runtime.base && GetCurrentThreadId()==thread,"Native FX accessed outside its runtime/thread");
@@ -1277,7 +1327,10 @@ void EngineEffects::create(PPCContext& ctx,uint8_t* base) {
     need(s.records.size()<64,"Native FX ownership bound exceeded");
     auto record=std::make_unique<State::Record>(s.runtime,wrapper,manager,ctx.r4.u32,ctx.r5.u32,s.compiler);
     record->contextIdentity=ctx.r3.u32;
-    s.attachShared(ctx,*record);
+    {
+        StallProfiler::Scope sharedProfile(StallProfiler::Section::Rendering,"FX.attachShared",nullptr,record->view.source,record->metadata->bytes().size());
+        s.attachShared(ctx,*record);
+    }
     const uint32_t token=s.allocateIdentity();record->view.identity=token;
     s.records.emplace(token,std::move(record));store(object+16,token);
     ctx.r3.u64=0;ctx.lr=0x826B4BB0;
@@ -2525,13 +2578,17 @@ void EngineEffects::monoMeshOperation(PPCContext& c,uint8_t* base,uint32_t site)
         const auto* bytes=s.runtime.pointer(address,count,false);return std::vector<uint8_t>(bytes,bytes+count);
     };
     if(site==0x826FF340||site==0x826FF3B4) {
+        StallProfiler::Scope streamScope(StallProfiler::Section::Rendering,"Mesh.mono.stream",&c,geometry);
         need(!mesh.phase&&!c.r4.u32&&c.r5.u32==geometry+0x38&&!c.r6.u32&&c.r7.u32==PPC_LOAD_U32(geometry+4)&&c.r8.u32==1,
              "Original static mono stream arguments differ");
         const auto count=PPC_LOAD_U32(geometry+8);need(count>=2&&count<=65,"Static mono declaration extent differs");
         need(validOriginalVertexExtent(PPC_LOAD_U32(geometry),c.r7.u32),"Original mono vertex byte owner or stride is invalid");
+        StallProfiler::Scope captureScope(StallProfiler::Section::Rendering,"Mesh.mono.rawCapture",&c,geometry);
         auto header=capture(geometry,0x78);const auto vertices=capture(PPC_LOAD_U32(geometry+0x10),PPC_LOAD_U32(geometry),originalGeometryMaxVertexBytes);
         const auto indices=capture(PPC_LOAD_U32(geometry+0x1C),PPC_LOAD_U32(geometry+0x14),originalGeometryMaxIndexBytes);
         const auto elements=capture(PPC_LOAD_U32(geometry+0xC),12*count);
+        captureScope.finish();
+        StallProfiler::Scope decodeScope(StallProfiler::Section::Rendering,"Mesh.mono.decode",&c,geometry);
         std::vector<Graphics::MonoVertex> decoded;
         try {
             if(mesh.bones) {
@@ -2569,14 +2626,15 @@ void EngineEffects::monoMeshOperation(PPCContext& c,uint8_t* base,uint32_t site)
         // Mono has no morph inputs. Skin weights/indices are retained for the
         // later original Boolean1 and palette commit; static payloads stay zero.
         const auto decodedIndices=decodeCharacterIndices(indices);
+        decodeScope.finish();
         need(PPC_LOAD_U32(geometry+0x18)==1&&(PPC_LOAD_U32(geometry+0x50)&~3u)==PPC_LOAD_U32(geometry+0x10)&&
              (PPC_LOAD_U32(geometry+0x54)&3)==2&&(PPC_LOAD_U32(geometry+0x58)&0xE0000003)==0x20000002&&
              PPC_LOAD_U32(geometry+0x70)==PPC_LOAD_U32(geometry+0x1C)&&PPC_LOAD_U32(geometry+0x74)==indices.size(),
              "Original static mono source buffer headers differ");
         const auto cache=PPC_LOAD_U32(geometry+0x30);s.runtime.pointer(cache,12,false);
         const auto declaration=PPC_LOAD_U32(cache+4);need(declaration&&c.r23.u32==declaration,"Original mono declaration is missing");
-        auto native=s.backend.uploadMonoMesh(decoded,decodedIndices,mesh.bones!=0);
-        if(recording)s.backend.bindMonoMeshVertices(s.monoRecording.payload,native);else s.backend.bindMonoMeshVertices(native);
+        auto native=meshStreamWork(c,"Mesh.mono.upload",geometry,[&]{return s.backend.uploadMonoMesh(decoded,decodedIndices,mesh.bones!=0);});
+        meshStreamWork(c,"Mesh.mono.bind",geometry,[&]{if(recording)s.backend.bindMonoMeshVertices(s.monoRecording.payload,native);else s.backend.bindMonoMeshVertices(native);});
         mesh.header=std::move(header);mesh.cache=cache;mesh.declaration=declaration;mesh.native=std::move(native);mesh.phase=1;
     } else {
         need(mesh.native&&mesh.header.size()==0x78&&!std::memcmp(s.runtime.pointer(geometry,0x78,false),mesh.header.data(),0x78)&&
@@ -2608,6 +2666,7 @@ void EngineEffects::monoMeshOperation(PPCContext& c,uint8_t* base,uint32_t site)
                  "Original static mono submesh arguments differ");
             const auto& effective=driver.effectiveState();const auto camera=driver.cameraBinding();
             using S=Graphics::ScalarState;Graphics::MonoMeshDraw draw{};
+            temporalIdentity(s.runtime,s.backend,draw,mesh.object,mesh.geometry,entry);
             draw.primitiveType=c.r4.u32;draw.baseVertex=c.r5.s32;draw.startIndex=c.r6.u32;draw.indexCount=c.r7.u32;draw.viewport=camera.viewport;
             if(const auto scissor=s.backend.scissor())draw.scissor=*scissor;
             draw.depthEnable=effective.scalar(S::DepthEnable);draw.depthWrite=effective.scalar(S::DepthWrite);draw.depthCompare=effective.scalar(S::DepthCompare);
@@ -2620,6 +2679,7 @@ void EngineEffects::monoMeshOperation(PPCContext& c,uint8_t* base,uint32_t site)
             draw.alphaToMask=effective.scalar(S::AlphaToMask);draw.depthBiasBits=effective.scalar(S::DepthBias);draw.slopeBiasBits=effective.scalar(S::SlopeBias);
             draw.depthPolicy=Graphics::ShadowMeshDepthPolicy::Reference20e4Rne;
             draw.blendEnable=effective.scalar(S::BlendEnable);draw.blendWord=effective.effectiveBlend(0);draw.expandedBlend=effective.scalar(S::ExpandedBlend0);
+        draw.temporalBlendEnable=draw.blendEnable;draw.temporalBlendWord=draw.blendWord;
             need(!effective.scalar(S::TessellationMode),"Static mono tessellation is unqualified");
             bool alphaOne=false;const auto color=driver.color(camera.colorIdentity,alphaOne);need(!alphaOne,"Mono front target has an alpha-one owner");
             if(recording)s.backend.recordMonoMesh(s.monoRecording.payload,color,driver.depth(camera.depthIdentity),mesh.native,*s.monoVertex,*s.monoPixel,
@@ -2775,6 +2835,8 @@ void EngineEffects::zprepassMeshOperation(PPCContext& c,uint8_t* base,uint32_t s
         const auto* bytes=s.runtime.pointer(address,count,false);return std::vector<uint8_t>(bytes,bytes+count);
     };
     if(site==0x826FF340) {
+        StallProfiler::Scope streamScope(StallProfiler::Section::Rendering,"Mesh.static.stream",&c,geometry);
+        StallProfiler::Scope lookupScope(StallProfiler::Section::Rendering,"Mesh.static.sourceLookup",&c,geometry);
         need(!mesh.phase&&!c.r4.u32&&c.r5.u32==geometry+0x38&&!c.r6.u32&&c.r7.u32==PPC_LOAD_U32(geometry+4)&&c.r8.u32==1,
              "Original static zprepass stream arguments differ");
         const auto count=PPC_LOAD_U32(geometry+8);need(count>=2&&count<=65,"Static zprepass declaration extent differs");
@@ -2807,18 +2869,23 @@ void EngineEffects::zprepassMeshOperation(PPCContext& c,uint8_t* base,uint32_t s
         // while an exact write barrier proves none of their pages was written
         // since the last full comparison (re-verified on a bounded schedule).
         const auto sourceLookup=s.zprepassSourceCache.lookup(vertexView,indexView,elementView,stride);
+        lookupScope.finish();
+        reportMeshSourceCache("static",s.zprepassSourceCache);
         if(auto hit=sourceLookup.mesh) {
             // Hit: skip snapshot copies, decoder and upload entirely.
             // bindZPrepassMeshVertices still validates the native owner/device
             // on the shared mesh.
-            s.backend.bindZPrepassMeshVertices(hit);
+            meshStreamWork(c,"Mesh.static.bind",geometry,[&]{s.backend.bindZPrepassMeshVertices(hit);});
             mesh.header=std::move(header);mesh.cache=cacheAddress;mesh.declaration=declarationAddress;
             mesh.native=std::move(hit);mesh.phase=1;
             c.lr=site+4;return;
         }
-        const auto vertices=capture(PPC_LOAD_U32(geometry+0x10),PPC_LOAD_U32(geometry),originalGeometryMaxVertexBytes);
-        const auto indices=capture(PPC_LOAD_U32(geometry+0x1C),PPC_LOAD_U32(geometry+0x14),originalGeometryMaxIndexBytes);
-        const auto elements=capture(PPC_LOAD_U32(geometry+0xC),12*count);
+        StallProfiler::Scope captureScope(StallProfiler::Section::Rendering,"Mesh.static.rawCapture",&c,geometry);
+        auto vertices=capture(PPC_LOAD_U32(geometry+0x10),PPC_LOAD_U32(geometry),originalGeometryMaxVertexBytes);
+        auto indices=capture(PPC_LOAD_U32(geometry+0x1C),PPC_LOAD_U32(geometry+0x14),originalGeometryMaxIndexBytes);
+        auto elements=capture(PPC_LOAD_U32(geometry+0xC),12*count);
+        captureScope.finish();
+        StallProfiler::Scope decodeScope(StallProfiler::Section::Rendering,"Mesh.static.decode",&c,geometry);
         std::vector<Graphics::ZPrepassVertex> decoded;
         try {decoded=decodeStaticZPrepassVertices(vertices,elements,c.r7.u32);}
         catch(const Failure& error) {
@@ -2845,16 +2912,19 @@ void EngineEffects::zprepassMeshOperation(PPCContext& c,uint8_t* base,uint32_t s
         // Absent skin/morph fields are dead only for the original Boolean0
         // branch, which is checked at entry and actual constant commit.
         const auto decodedIndices=decodeCharacterIndices(indices);
+        decodeScope.finish();
         need(PPC_LOAD_U32(geometry+0x18)==1&&(PPC_LOAD_U32(geometry+0x50)&~3u)==PPC_LOAD_U32(geometry+0x10)&&
              (PPC_LOAD_U32(geometry+0x54)&3)==2&&(PPC_LOAD_U32(geometry+0x58)&0xE0000003)==0x20000002&&
              PPC_LOAD_U32(geometry+0x70)==PPC_LOAD_U32(geometry+0x1C)&&PPC_LOAD_U32(geometry+0x74)==indices.size(),
              "Original static zprepass source buffer headers differ");
         const auto cache=PPC_LOAD_U32(geometry+0x30);s.runtime.pointer(cache,12,false);
         const auto declaration=PPC_LOAD_U32(cache+4);need(declaration&&c.r23.u32==declaration,"Original zprepass declaration is missing");
-        auto native=s.backend.uploadZPrepassMesh(decoded,decodedIndices);s.backend.bindZPrepassMeshVertices(native);
+        auto native=meshStreamWork(c,"Mesh.static.upload",geometry,[&]{return s.backend.uploadZPrepassMeshOwned(decoded,decodedIndices);});
+        meshStreamWork(c,"Mesh.static.bind",geometry,[&]{s.backend.bindZPrepassMeshVertices(native);});
         // Insert only after the full decoder/index/renderer validation above
         // succeeded; rejections throw before reaching here and cache nothing.
-        s.zprepassSourceCache.insert(vertices,indices,elements,stride,sourceLookup.key,native,&sourceLookup.pending);
+        meshStreamWork(c,"Mesh.static.cacheInsert",geometry,[&]{
+            return s.zprepassSourceCache.insertOwned(vertices,indices,elements,stride,sourceLookup.key,native,&sourceLookup.pending);});
         mesh.header=std::move(header);mesh.cache=cache;mesh.declaration=declaration;mesh.native=std::move(native);mesh.phase=1;
     } else {
         need(mesh.native&&mesh.header.size()==0x78&&!std::memcmp(s.runtime.pointer(geometry,0x78,false),mesh.header.data(),0x78)&&
@@ -3152,6 +3222,7 @@ void EngineEffects::skyMeshOperation(PPCContext& c,uint8_t* base,uint32_t site) 
         const auto& effective=driver.effectiveState();const auto camera=driver.cameraBinding();
         need(camera.camera==s.rigidCamera,"Sky draw camera owner changed");
         using S=Graphics::ScalarState;Graphics::SkyMeshDraw draw{};
+        temporalIdentity(s.runtime,s.backend,draw,mesh.object,mesh.geometry,row.entry);
         draw.primitiveType=c.r4.u32;draw.baseVertex=c.r5.s32;draw.startIndex=c.r6.u32;draw.indexCount=c.r7.u32;draw.viewport=camera.viewport;
         if(const auto scissor=s.backend.scissor())draw.scissor=*scissor;
         draw.depthEnable=effective.scalar(S::DepthEnable);draw.depthWrite=effective.scalar(S::DepthWrite);draw.depthCompare=effective.scalar(S::DepthCompare);
@@ -3164,6 +3235,7 @@ void EngineEffects::skyMeshOperation(PPCContext& c,uint8_t* base,uint32_t site) 
         draw.alphaToMask=effective.scalar(S::AlphaToMask);draw.depthBiasBits=effective.scalar(S::DepthBias);draw.slopeBiasBits=effective.scalar(S::SlopeBias);
         draw.depthPolicy=Graphics::ShadowMeshDepthPolicy::Reference20e4Rne;
         draw.blendEnable=effective.scalar(S::BlendEnable);draw.blendWord=effective.effectiveBlend(0);draw.expandedBlend=effective.scalar(S::ExpandedBlend0);
+        draw.temporalBlendEnable=draw.blendEnable;draw.temporalBlendWord=draw.blendWord;
         need(!effective.scalar(S::TessellationMode),"Sky tessellation is unqualified");
         // Sampler states come from the 24 metadata rows applied at begin;
         // validate the six pinned values per stage, then build the descriptors
@@ -3207,17 +3279,22 @@ void EngineEffects::skyMeshOperation(PPCContext& c,uint8_t* base,uint32_t site) 
     need(c.r1.u32==mesh.frame-0xA0&&PPC_LOAD_U32(c.r1.u32)==mesh.frame&&c.r27.u32==mesh.geometry&&
          c.r3.u32==mesh.context,"Sky deferred binding frame/context differs");
     if(site==0x826FF340) {
+        StallProfiler::Scope streamScope(StallProfiler::Section::Rendering,"Mesh.sky.stream",&c,geometry);
         need(!mesh.phase&&!c.r4.u32&&c.r5.u32==geometry+0x38&&!c.r6.u32&&c.r7.u32==PPC_LOAD_U32(geometry+4)&&c.r8.u32==1,
              "Original sky vertex-stream arguments differ");
         const auto capture=[&](uint32_t address,uint32_t bytes,size_t maxBytes=64*1024*1024){need(bytes&&bytes<=maxBytes,"Sky source byte extent is unqualified");
             const auto* p=s.runtime.pointer(address,bytes,false);return std::vector<uint8_t>(p,p+bytes);};
         const auto count=PPC_LOAD_U32(geometry+8);need(count>=2&&count<=65,"Sky declaration table extent is unqualified");
+        StallProfiler::Scope captureScope(StallProfiler::Section::Rendering,"Mesh.sky.rawCapture",&c,geometry);
         auto header=capture(geometry,0x78);
         const auto vertices=capture(PPC_LOAD_U32(geometry+0x10),PPC_LOAD_U32(geometry));
         const auto indices=capture(PPC_LOAD_U32(geometry+0x1C),PPC_LOAD_U32(geometry+0x14),originalGeometryMaxIndexBytes);
         const auto elements=capture(PPC_LOAD_U32(geometry+0xC),12*count);
+        captureScope.finish();
+        StallProfiler::Scope decodeScope(StallProfiler::Section::Rendering,"Mesh.sky.decode",&c,geometry);
         const auto decoded=decodeSkyVertices(vertices,elements,c.r7.u32);
         const auto decodedIndices=decodeCharacterIndices(indices);
+        decodeScope.finish();
         const auto cache=PPC_LOAD_U32(geometry+0x30);s.runtime.pointer(cache,12,false);
         const auto declaration=PPC_LOAD_U32(cache+4);
         need(PPC_LOAD_U32(geometry+0x18)==1&&(PPC_LOAD_U32(geometry+0x50)&~3u)==PPC_LOAD_U32(geometry+0x10)&&
@@ -3227,8 +3304,8 @@ void EngineEffects::skyMeshOperation(PPCContext& c,uint8_t* base,uint32_t site) 
         {static thread_local uint32_t skyVerticesSample{};
         if(sampleHotLog(skyVerticesSample))
             std::fprintf(stderr,"[NATIVE SKY VERTICES] geometry=%08X verts=%zu stride=%u\n",geometry,decoded.size(),c.r7.u32);}
-        auto native=s.backend.uploadSkyMesh(decoded,decodedIndices);
-        if(immediate)s.backend.bindSkyMeshVertices(native);else s.backend.bindSkyMeshVertices(payload,native);
+        auto native=meshStreamWork(c,"Mesh.sky.upload",geometry,[&]{return s.backend.uploadSkyMesh(decoded,decodedIndices);});
+        meshStreamWork(c,"Mesh.sky.bind",geometry,[&]{if(immediate)s.backend.bindSkyMeshVertices(native);else s.backend.bindSkyMeshVertices(payload,native);});
         mesh.header=std::move(header);mesh.cache=cache;mesh.declaration=declaration;mesh.native=std::move(native);mesh.phase=1;
     } else if(site==0x826FF498) {
         need(mesh.phase==1&&c.r4.u32==mesh.declaration,"Sky declaration binding is out of order");
@@ -3503,6 +3580,8 @@ void EngineEffects::rigidMeshOperation(PPCContext& c,uint8_t* base,uint32_t site
         s.runtime.resourceAudit.diagnostic("rigid_capture",asset,id.caller,parameters,ownership,id.scene,detail,o.reason);
     };
     if(site==0x826FF340) {
+        StallProfiler::Scope streamScope(StallProfiler::Section::Rendering,"Mesh.rigid.stream",&c,geometry);
+        StallProfiler::Scope lookupScope(StallProfiler::Section::Rendering,"Mesh.rigid.sourceLookup",&c,geometry);
         need(!mesh.phase&&!c.r4.u32&&c.r5.u32==geometry+0x38&&!c.r6.u32&&c.r7.u32==PPC_LOAD_U32(geometry+4)&&c.r8.u32==1,
              "Original rigid vertex-stream arguments differ");
         const auto capture=[&](uint32_t address,uint32_t bytes,size_t maxBytes=64*1024*1024){need(bytes&&bytes<=maxBytes,"Rigid source byte extent is unqualified");
@@ -3528,6 +3607,8 @@ void EngineEffects::rigidMeshOperation(PPCContext& c,uint8_t* base,uint32_t site
             const auto indexView=borrow(PPC_LOAD_U32(geometry+0x1C),PPC_LOAD_U32(geometry+0x14),originalGeometryMaxIndexBytes);
             const auto elementView=borrow(PPC_LOAD_U32(geometry+0xC),12*count,64*1024*1024);
             rigidSourceLookup=s.rigidSourceCache.lookup(vertexView,indexView,elementView,rigidVariant);
+            lookupScope.finish();
+            reportMeshSourceCache("rigid",s.rigidSourceCache);
             if(auto hit=rigidSourceLookup.mesh) {
                 const auto cache=PPC_LOAD_U32(geometry+0x30);s.runtime.pointer(cache,12,false);
                 const auto declaration=PPC_LOAD_U32(cache+4);
@@ -3535,14 +3616,17 @@ void EngineEffects::rigidMeshOperation(PPCContext& c,uint8_t* base,uint32_t site
                      (PPC_LOAD_U32(geometry+0x54)&3)==2&&(PPC_LOAD_U32(geometry+0x58)&0xE0000003)==0x20000002&&
                      PPC_LOAD_U32(geometry+0x70)==PPC_LOAD_U32(geometry+0x1C)&&PPC_LOAD_U32(geometry+0x74)==indexView.size()&&
                      declaration&&c.r23.u32==declaration,"Original rigid source/declaration headers differ");
-                if(immediate)s.backend.bindRigidMeshVertices(hit);else s.backend.bindRigidMeshVertices(payload,hit);
+                meshStreamWork(c,"Mesh.rigid.bind",geometry,[&]{if(immediate)s.backend.bindRigidMeshVertices(hit);else s.backend.bindRigidMeshVertices(payload,hit);});
                 mesh.header=std::move(header);mesh.cache=cache;mesh.declaration=declaration;mesh.native=std::move(hit);mesh.phase=1;
                 c.lr=site+4;return;
             }
         }
-        const auto vertices=capture(PPC_LOAD_U32(geometry+0x10),PPC_LOAD_U32(geometry));
-        const auto indices=capture(PPC_LOAD_U32(geometry+0x1C),PPC_LOAD_U32(geometry+0x14),originalGeometryMaxIndexBytes);
-        const auto elements=capture(PPC_LOAD_U32(geometry+0xC),12*count);
+        lookupScope.finish();
+        StallProfiler::Scope captureScope(StallProfiler::Section::Rendering,"Mesh.rigid.rawCapture",&c,geometry);
+        auto vertices=capture(PPC_LOAD_U32(geometry+0x10),PPC_LOAD_U32(geometry));
+        auto indices=capture(PPC_LOAD_U32(geometry+0x1C),PPC_LOAD_U32(geometry+0x14),originalGeometryMaxIndexBytes);
+        auto elements=capture(PPC_LOAD_U32(geometry+0xC),12*count);
+        captureScope.finish();
         if(record.view.source==0x8205D2D8) {
             // Chocolate vertex declaration (pink/black frontier): which
             // streams exist and in what order (fetch-to-semantic wiring).
@@ -3571,8 +3655,11 @@ void EngineEffects::rigidMeshOperation(PPCContext& c,uint8_t* base,uint32_t site
         const bool tangentInput=(rigidProfile(record.view.source).normalmap&&!s.alphaRigid())||chocolate;
         const bool uv1Input=record.view.source==0x8202AD78||(record.view.source==0x820465E8&&!s.alphaRigid())||(rigidProfile(record.view.source).gloss&&!s.alphaRigid())||
             rigidProfile(record.view.source).multitone||rigidProfile(record.view.source).normalmap||chocolate;
-        const auto decoded=decodeRigidVertices(vertices,elements,c.r7.u32,uv1Input,tangentInput,!isVfxRigidSource(record.view.source));const auto cache=PPC_LOAD_U32(geometry+0x30);
-        const auto decodedIndices=decodeCharacterIndices(indices);s.runtime.pointer(cache,12,false);
+        StallProfiler::Scope decodeScope(StallProfiler::Section::Rendering,"Mesh.rigid.decode",&c,geometry);
+        auto decoded=decodeRigidVertices(vertices,elements,c.r7.u32,uv1Input,tangentInput,!isVfxRigidSource(record.view.source));const auto cache=PPC_LOAD_U32(geometry+0x30);
+        const auto decodedVertexCount=decoded.size();
+        const auto decodedIndices=decodeCharacterIndices(indices);
+        decodeScope.finish();s.runtime.pointer(cache,12,false);
         const auto declaration=PPC_LOAD_U32(cache+4);
         need(PPC_LOAD_U32(geometry+0x18)==1&&(PPC_LOAD_U32(geometry+0x50)&~3u)==PPC_LOAD_U32(geometry+0x10)&&
              (PPC_LOAD_U32(geometry+0x54)&3)==2&&(PPC_LOAD_U32(geometry+0x58)&0xE0000003)==0x20000002&&
@@ -3618,7 +3705,7 @@ void EngineEffects::rigidMeshOperation(PPCContext& c,uint8_t* base,uint32_t site
             o.step="written";return RigidCaptureStatus::Complete;
         };
         std::shared_ptr<Graphics::NativeRigidMesh> native;
-        try {native=s.backend.uploadRigidMesh(decoded,decodedIndices);}
+        try {native=meshStreamWork(c,"Mesh.rigid.upload",geometry,[&]{return s.backend.uploadRigidMeshOwned(decoded,decodedIndices);});}
         catch(const Graphics::Error& error) {
             // Preserve rejected original inputs before any binding. Diagnostics
             // never repair attributes or change the original failure/result: the
@@ -3631,21 +3718,27 @@ void EngineEffects::rigidMeshOperation(PPCContext& c,uint8_t* base,uint32_t site
                     o.step="write_metadata";
                     std::ofstream out(s.runtime.frameCaptureDirectory/"rigid-rejected.json");
                     out<<"{\"geometry\":"<<geometry<<",\"metadata\":"<<mesh.metadata<<",\"object\":"<<mesh.object
-                       <<",\"payload\":"<<mesh.payloadId<<",\"stride\":"<<c.r7.u32<<",\"vertex_count\":"<<decoded.size()
+                       <<",\"payload\":"<<mesh.payloadId<<",\"stride\":"<<c.r7.u32<<",\"vertex_count\":"<<decodedVertexCount
                        <<",\"selected_submesh_entries\":[";
                     for(size_t i=0;i<mesh.draws.size();++i){if(i)out<<',';out<<mesh.draws[i].entry;}
                     out<<"],\"capture_source\":\"original_rigid_upload_rejection\",\"gameplay_verified\":false}\n";
                     out.close();need(bool(out),"Cannot write rejected original rigid metadata");
                     std::fprintf(stderr,"[NATIVE RIGID REJECTED INPUT] geometry=%08X vertices=%zu stride=%u payload=%08X: %s\n",
-                        geometry,decoded.size(),c.r7.u32,mesh.payloadId,error.what());
+                        geometry,decodedVertexCount,c.r7.u32,mesh.payloadId,error.what());
                     return RigidCaptureStatus::Complete;
                 },[&](const RigidCaptureOutcome& o){reportCapture(id,o,"diagnostic_only=1 primary_upload_error=preserved");});
             }
             throw;
         }
-        if(immediate)s.backend.bindRigidMeshVertices(native);else s.backend.bindRigidMeshVertices(payload,native);
+        meshStreamWork(c,"Mesh.rigid.bind",geometry,[&]{if(immediate)s.backend.bindRigidMeshVertices(native);else s.backend.bindRigidMeshVertices(payload,native);});
         // Insert only after the full decoder/index/renderer validation above succeeded.
-        if(rigidSourceCached&&c.r7.u32<0x10000)s.rigidSourceCache.insert(vertices,indices,elements,rigidVariant,rigidSourceLookup.key,native,&rigidSourceLookup.pending);
+        if(rigidSourceCached&&c.r7.u32<0x10000)meshStreamWork(c,"Mesh.rigid.cacheInsert",geometry,[&]{
+            // Capture-off misses transfer the private raw snapshots; diagnostics
+            // retain all three planes for the unchanged copying/capture path.
+            if(s.runtime.frameCaptureDirectory.empty())
+                s.rigidSourceCache.insertOwned(vertices,indices,elements,rigidVariant,rigidSourceLookup.key,native,&rigidSourceLookup.pending);
+            else s.rigidSourceCache.insert(vertices,indices,elements,rigidVariant,rigidSourceLookup.key,native,&rigidSourceLookup.pending);
+        });
         if(!s.runtime.frameCaptureDirectory.empty()&&!s.rigidFirstMeshDone&&!s.rigidFirstMeshAttempted&&!mesh.draws.empty()) {
             // One raw attempt per fresh latch, even if skipped or failed: a later
             // smaller table must not silently replace the first original input.
@@ -3699,6 +3792,7 @@ void EngineEffects::rigidMeshOperation(PPCContext& c,uint8_t* base,uint32_t site
             const auto& effective=driver.effectiveState();const auto camera=driver.cameraBinding();
             need(camera.camera==s.rigidCamera,"Rigid draw camera owner changed");
             using S=Graphics::ScalarState;Graphics::RigidMeshDraw draw{};
+            temporalIdentity(s.runtime,s.backend,draw,mesh.object,mesh.geometry,row.entry);
             draw.primitiveType=c.r4.u32;draw.baseVertex=c.r5.s32;draw.startIndex=c.r6.u32;draw.indexCount=c.r7.u32;draw.viewport=camera.viewport;
             if(const auto scissor=s.backend.scissor())draw.scissor=*scissor;
             draw.depthEnable=effective.scalar(S::DepthEnable);draw.depthWrite=effective.scalar(S::DepthWrite);draw.depthCompare=effective.scalar(S::DepthCompare);
@@ -3711,6 +3805,7 @@ void EngineEffects::rigidMeshOperation(PPCContext& c,uint8_t* base,uint32_t site
             draw.alphaToMask=effective.scalar(S::AlphaToMask);draw.depthBiasBits=effective.scalar(S::DepthBias);draw.slopeBiasBits=effective.scalar(S::SlopeBias);
             draw.depthPolicy=Graphics::ShadowMeshDepthPolicy::Reference20e4Rne;
             draw.blendEnable=effective.scalar(S::BlendEnable);draw.blendWord=effective.effectiveBlend(0);draw.expandedBlend=effective.scalar(S::ExpandedBlend0);
+        draw.temporalBlendEnable=draw.blendEnable;draw.temporalBlendWord=draw.blendWord;
             need(!effective.scalar(S::TessellationMode),"Rigid tessellation is unqualified");
             const bool rigidAlpha=s.rigidPixel->originalAddress()==0x8200E1BC;
             const bool a168Alpha=s.rigidPixel->originalAddress()==0x82017E4C;
@@ -6792,10 +6887,39 @@ void EngineEffects::shadowMeshOperation(PPCContext& c,uint8_t* base,uint32_t sit
         need(count>=2&&count<=65,"Original character declaration length is unsupported");
         need(validOriginalVertexExtent(PPC_LOAD_U32(geometry),c.r7.u32),"Original character vertex byte owner or stride is invalid");
         auto header=capture(geometry,0x78);
+        need(!mesh.staticGeometry||!bones,"Original static shadow mesh acquired a bone palette");
+        // Exact source lookup (see zprepassSourceCache): the variant folds in the decoder
+        // (static or character) and the bone limit it applies.
+        const bool sourceCached=c.r7.u32<0x10000;
+        const uint64_t variant=uint64_t(c.r7.u32)|(mesh.staticGeometry?0x10000u:0u)|(uint64_t(std::min(bones,64u))<<17);
+        StaticMeshSourceCache<Graphics::NativeShadowMesh>::LookupResult sourceLookup;
+        if(sourceCached) {
+            const auto borrow=[&](uint32_t address,uint32_t bytes,size_t maxBytes){
+                need(bytes&&bytes<=maxBytes,"Character mesh snapshot extent is invalid");
+                return std::span<const uint8_t>(s.runtime.pointer(address,bytes,false),bytes);};
+            const auto vertexView=borrow(PPC_LOAD_U32(geometry+0x10),PPC_LOAD_U32(geometry),originalGeometryMaxVertexBytes);
+            const auto indexView=borrow(PPC_LOAD_U32(geometry+0x1C),PPC_LOAD_U32(geometry+0x14),originalGeometryMaxIndexBytes);
+            const auto elementView=borrow(PPC_LOAD_U32(geometry+0xC),12*count,16*1024*1024);
+            sourceLookup=s.shadowSourceCache.lookup(vertexView,indexView,elementView,variant);
+            reportMeshSourceCache("shadow",s.shadowSourceCache);
+            if(auto hit=sourceLookup.mesh) {
+                // Hit: the same header and declaration guards, no copies, decode or upload.
+                need(PPC_LOAD_U32(geometry+0x18)==1&&
+                     (PPC_LOAD_U32(geometry+0x50)&~3u)==PPC_LOAD_U32(geometry+0x10)&&
+                     (PPC_LOAD_U32(geometry+0x54)&3)==2&&
+                     (PPC_LOAD_U32(geometry+0x58)&0xE0000003)==0x20000002&&
+                     PPC_LOAD_U32(geometry+0x70)==PPC_LOAD_U32(geometry+0x1C)&&
+                     PPC_LOAD_U32(geometry+0x74)==indexView.size(),"Character source buffer headers differ");
+                const auto cache=PPC_LOAD_U32(geometry+0x30);s.runtime.pointer(cache,12,false);
+                const auto declaration=PPC_LOAD_U32(cache+4);need(declaration,"Original character declaration is missing");
+                s.backend.bindShadowMeshVertices(hit);
+                mesh.header=std::move(header);mesh.cache=cache;mesh.declaration=declaration;mesh.native=std::move(hit);mesh.phase=1;
+                c.lr=site+4;return;
+            }
+        }
         auto vertices=capture(PPC_LOAD_U32(geometry+0x10),PPC_LOAD_U32(geometry),originalGeometryMaxVertexBytes);
         auto indices=capture(PPC_LOAD_U32(geometry+0x1C),PPC_LOAD_U32(geometry+0x14),originalGeometryMaxIndexBytes);
         auto elements=capture(PPC_LOAD_U32(geometry+0xC),12*count);
-        need(!mesh.staticGeometry||!bones,"Original static shadow mesh acquired a bone palette");
         std::vector<Graphics::ShadowMeshVertex> decoded;
         try {decoded=mesh.staticGeometry?decodeStaticShadowVertices(vertices,elements,c.r7.u32):
                                         decodeCharacterVertices(vertices,elements,c.r7.u32,std::min(bones,64u));}
@@ -6830,6 +6954,8 @@ void EngineEffects::shadowMeshOperation(PPCContext& c,uint8_t* base,uint32_t sit
         const auto declaration=PPC_LOAD_U32(cache+4);need(declaration,"Original character declaration is missing");
         auto native=s.backend.uploadShadowMesh(decoded,decodedIndices);
         s.backend.bindShadowMeshVertices(native);
+        // Insert only after the decoder/index/renderer validation above succeeded.
+        if(sourceCached)s.shadowSourceCache.insertOwned(vertices,indices,elements,variant,sourceLookup.key,native,&sourceLookup.pending);
         mesh.header=std::move(header);mesh.vertices=std::move(vertices);mesh.indices=std::move(indices);mesh.elements=std::move(elements);
         mesh.cache=cache;mesh.declaration=declaration;mesh.native=std::move(native);mesh.phase=1;
     } else {
@@ -7193,6 +7319,8 @@ void EngineEffects::skinMeshOperation(PPCContext& c,uint8_t* base,uint32_t site)
         for(uint32_t i=0;i<6;++i)if(mesh.morphBoundMask&(1u<<i))decodeSkinMorphStream(vertices,i+1,mesh.morphStreams[i]);
     };
     if(site==0x826FF340) {
+        StallProfiler::Scope streamScope(StallProfiler::Section::Rendering,"Mesh.skin.stream",&c,geometry);
+        StallProfiler::Scope lookupScope(StallProfiler::Section::Rendering,"Mesh.skin.sourceLookup",&c,geometry);
         need(!mesh.phase&&!c.r4.u32&&c.r5.u32==geometry+0x38&&!c.r6.u32&&c.r7.u32==PPC_LOAD_U32(geometry+4)&&c.r8.u32==1,
              "Original skin vertex-stream arguments differ");
         {static thread_local uint32_t skinVerticesSample{};
@@ -7216,36 +7344,45 @@ void EngineEffects::skinMeshOperation(PPCContext& c,uint8_t* base,uint32_t site)
             const auto indexView=borrow(PPC_LOAD_U32(geometry+0x1C),PPC_LOAD_U32(geometry+0x14),originalGeometryMaxIndexBytes);
             const auto elementView=borrow(PPC_LOAD_U32(geometry+0xC),12*count,64*1024*1024);
             skinSourceLookup=s.skinSourceCache(s.skinVertex->originalAddress()).lookup(vertexView,indexView,elementView,skinVariant);
+            lookupScope.finish();
+            reportMeshSourceCache("skin",s.skinSourceCache(s.skinVertex->originalAddress()),s.skinVertex->originalAddress());
             if(auto hit=skinSourceLookup.mesh) {
                 const auto cache=PPC_LOAD_U32(geometry+0x30);s.runtime.pointer(cache,12,false);
                 const auto declaration=PPC_LOAD_U32(cache+4);
                 need(PPC_LOAD_U32(geometry+0x18)==1&&declaration&&c.r23.u32==declaration,"Original skin source/declaration headers differ");
-                s.backend.bindSkinMeshVertices(hit);
+                meshStreamWork(c,"Mesh.skin.bind",geometry,[&]{s.backend.bindSkinMeshVertices(hit);});
                 mesh.header=std::move(header);mesh.cache=cache;mesh.declaration=declaration;mesh.native=std::move(hit);mesh.phase=1;
                 c.lr=site+4;return;
             }
         }
+        lookupScope.finish();
+        StallProfiler::Scope captureScope(StallProfiler::Section::Rendering,"Mesh.skin.rawCapture",&c,geometry);
         const auto vertices=capture(PPC_LOAD_U32(geometry+0x10),PPC_LOAD_U32(geometry));
         const auto indices=capture(PPC_LOAD_U32(geometry+0x1C),PPC_LOAD_U32(geometry+0x14),originalGeometryMaxIndexBytes);
         const auto elements=capture(PPC_LOAD_U32(geometry+0xC),12*count);
+        captureScope.finish();
+        StallProfiler::Scope decodeScope(StallProfiler::Section::Rendering,"Mesh.skin.decode",&c,geometry);
         auto decoded=decodeSkinVertices(vertices,elements,c.r7.u32,record.view.source,s.alphaSkin());applyMorphs(decoded);
         const auto decodedIndices=decodeCharacterIndices(indices);
+        decodeScope.finish();
         const auto cache=PPC_LOAD_U32(geometry+0x30);s.runtime.pointer(cache,12,false);
         const auto declaration=PPC_LOAD_U32(cache+4);
         need(PPC_LOAD_U32(geometry+0x18)==1&&declaration&&c.r23.u32==declaration,"Original skin source/declaration headers differ");
         std::shared_ptr<Graphics::NativeSkinMesh> native;
-        try {native=s.backend.uploadSkinMesh(decoded,decodedIndices,s.skinVertex->originalAddress());}
+        try {native=meshStreamWork(c,"Mesh.skin.upload",geometry,[&]{return s.backend.uploadSkinMesh(decoded,decodedIndices,s.skinVertex->originalAddress());});}
         catch(const Graphics::Error& error) {
             if(!s.runtime.frameCaptureDirectory.empty()) {
                 std::fprintf(stderr,"[NATIVE SKIN REJECTED INPUT] geometry=%08X: %s\n",geometry,error.what());
             }
             throw;
         }
-        s.backend.bindSkinMeshVertices(native);
-        if(skinSourceCached)s.skinSourceCache(s.skinVertex->originalAddress()).insert(vertices,indices,elements,skinVariant,skinSourceLookup.key,native,&skinSourceLookup.pending);
+        meshStreamWork(c,"Mesh.skin.bind",geometry,[&]{s.backend.bindSkinMeshVertices(native);});
+        if(skinSourceCached)meshStreamWork(c,"Mesh.skin.cacheInsert",geometry,[&]{s.skinSourceCache(s.skinVertex->originalAddress()).insert(vertices,indices,elements,skinVariant,skinSourceLookup.key,native,&skinSourceLookup.pending);});
         mesh.header=std::move(header);mesh.cache=cache;mesh.declaration=declaration;mesh.native=std::move(native);mesh.phase=1;
     } else if(site==0x826FF498) {
         if(!mesh.phase) {
+            StallProfiler::Scope streamScope(StallProfiler::Section::Rendering,"Mesh.skin.deferred.stream",&c,geometry);
+            StallProfiler::Scope lookupScope(StallProfiler::Section::Rendering,"Mesh.skin.deferred.sourceLookup",&c,geometry);
             // Original826FF338 skips the 826FF340 stream-commit bl when
             // geometry+52 is set (skin shape: *(r23+36)==0xFFFFFF00 path);
             // the declaration bl at 826FF498 still runs with r4/r23 holding
@@ -7271,21 +7408,28 @@ void EngineEffects::skinMeshOperation(PPCContext& c,uint8_t* base,uint32_t site)
                 const auto indexView=borrow(PPC_LOAD_U32(geometry+0x1C),PPC_LOAD_U32(geometry+0x14),originalGeometryMaxIndexBytes);
                 const auto elementView=borrow(PPC_LOAD_U32(geometry+0xC),12*deferredCount,64*1024*1024);
                 deferredLookup=s.skinSourceCache(s.skinVertex->originalAddress()).lookup(vertexView,indexView,elementView,deferredVariant);
+                lookupScope.finish();
+                reportMeshSourceCache("skin",s.skinSourceCache(s.skinVertex->originalAddress()),s.skinVertex->originalAddress());
                 if(auto hit=deferredLookup.mesh) {
                     const auto cache=PPC_LOAD_U32(geometry+0x30);s.runtime.pointer(cache,12,false);
                     const auto declaration=PPC_LOAD_U32(cache+4);
                     need(PPC_LOAD_U32(geometry+0x18)==1&&declaration&&c.r23.u32==declaration&&c.r4.u32==declaration,
                          "Original skin deferred declaration headers differ");
-                    s.backend.bindSkinMeshVertices(hit);
+                    meshStreamWork(c,"Mesh.skin.deferred.bind",geometry,[&]{s.backend.bindSkinMeshVertices(hit);});
                     mesh.header=std::move(deferredHeader);mesh.cache=cache;mesh.declaration=declaration;mesh.native=std::move(hit);mesh.phase=1;
                 }
             }
             if(!mesh.phase) {
+            lookupScope.finish();
+            StallProfiler::Scope captureScope(StallProfiler::Section::Rendering,"Mesh.skin.deferred.rawCapture",&c,geometry);
             const auto deferredVertices=captureDeferred(PPC_LOAD_U32(geometry+0x10),PPC_LOAD_U32(geometry));
             const auto deferredIndices=captureDeferred(PPC_LOAD_U32(geometry+0x1C),PPC_LOAD_U32(geometry+0x14),originalGeometryMaxIndexBytes);
             const auto deferredElements=captureDeferred(PPC_LOAD_U32(geometry+0xC),12*deferredCount);
+            captureScope.finish();
+            StallProfiler::Scope decodeScope(StallProfiler::Section::Rendering,"Mesh.skin.deferred.decode",&c,geometry);
             auto deferredDecoded=decodeSkinVertices(deferredVertices,deferredElements,PPC_LOAD_U32(geometry+4),record.view.source,s.alphaSkin());applyMorphs(deferredDecoded);
             const auto deferredDecodedIndices=decodeCharacterIndices(deferredIndices);
+            decodeScope.finish();
             const auto deferredCache=PPC_LOAD_U32(geometry+0x30);s.runtime.pointer(deferredCache,12,false);
             const auto deferredDeclaration=PPC_LOAD_U32(deferredCache+4);
             need(PPC_LOAD_U32(geometry+0x18)==1&&deferredDeclaration&&c.r23.u32==deferredDeclaration&&c.r4.u32==deferredDeclaration,
@@ -7296,9 +7440,9 @@ void EngineEffects::skinMeshOperation(PPCContext& c,uint8_t* base,uint32_t site)
             {static thread_local uint32_t skinVerticesStrideSample{};
             if(sampleHotLog(skinVerticesStrideSample))
                 std::fprintf(stderr,"[NATIVE SKIN VERTICES] geometry=%08X stride=%u\n",geometry,deferredStride);}
-            auto deferredNative=s.backend.uploadSkinMesh(deferredDecoded,deferredDecodedIndices,s.skinVertex->originalAddress());
-            s.backend.bindSkinMeshVertices(deferredNative);
-            if(deferredSourceCached)s.skinSourceCache(s.skinVertex->originalAddress()).insert(deferredVertices,deferredIndices,deferredElements,deferredVariant,deferredLookup.key,deferredNative,&deferredLookup.pending);
+            auto deferredNative=meshStreamWork(c,"Mesh.skin.deferred.upload",geometry,[&]{return s.backend.uploadSkinMesh(deferredDecoded,deferredDecodedIndices,s.skinVertex->originalAddress());});
+            meshStreamWork(c,"Mesh.skin.deferred.bind",geometry,[&]{s.backend.bindSkinMeshVertices(deferredNative);});
+            if(deferredSourceCached)meshStreamWork(c,"Mesh.skin.deferred.cacheInsert",geometry,[&]{s.skinSourceCache(s.skinVertex->originalAddress()).insert(deferredVertices,deferredIndices,deferredElements,deferredVariant,deferredLookup.key,deferredNative,&deferredLookup.pending);});
             mesh.header=std::move(deferredHeader);mesh.cache=deferredCache;mesh.declaration=deferredDeclaration;
             mesh.native=std::move(deferredNative);mesh.phase=1;
             }
@@ -7333,6 +7477,7 @@ void EngineEffects::skinMeshOperation(PPCContext& c,uint8_t* base,uint32_t site)
         const auto& effective=driver.effectiveState();const auto camera=driver.cameraBinding();
         need(camera.camera==s.skinCamera,"Skin draw camera owner changed");
         using S=Graphics::ScalarState;Graphics::SkinMeshDraw draw{};
+        temporalIdentity(s.runtime,s.backend,draw,mesh.object,mesh.geometry,row.entry);
         draw.primitiveType=c.r4.u32;draw.baseVertex=c.r5.s32;draw.startIndex=c.r6.u32;draw.indexCount=c.r7.u32;draw.viewport=camera.viewport;
         if(const auto scissor=s.backend.scissor())draw.scissor=*scissor;
         draw.depthEnable=effective.scalar(S::DepthEnable);draw.depthWrite=effective.scalar(S::DepthWrite);draw.depthCompare=effective.scalar(S::DepthCompare);
@@ -7345,6 +7490,7 @@ void EngineEffects::skinMeshOperation(PPCContext& c,uint8_t* base,uint32_t site)
         draw.alphaToMask=effective.scalar(S::AlphaToMask);draw.depthBiasBits=effective.scalar(S::DepthBias);draw.slopeBiasBits=effective.scalar(S::SlopeBias);
         draw.depthPolicy=Graphics::ShadowMeshDepthPolicy::Reference20e4Rne;
         draw.blendEnable=effective.scalar(S::BlendEnable);draw.blendWord=effective.effectiveBlend(0);draw.expandedBlend=effective.scalar(S::ExpandedBlend0);
+        draw.temporalBlendEnable=draw.blendEnable;draw.temporalBlendWord=draw.blendWord;
         observeSkinDraw(draw,mesh.geometry,row.entry);
         prepareSkinDrawTextures(draw);
         need(!effective.scalar(S::TessellationMode),"Skin tessellation is unqualified");
@@ -7717,6 +7863,7 @@ void EngineEffects::skinDraw(PPCContext& c,uint8_t* base) {
     const auto& effective=driver.effectiveState();const auto camera=driver.cameraBinding();
     need(camera.camera==s.skinCamera,"Skin draw camera owner changed");
     using S=Graphics::ScalarState;Graphics::SkinMeshDraw draw{};
+        temporalIdentity(s.runtime,s.backend,draw,mesh.object,mesh.geometry,row.entry);
     draw.primitiveType=c.r4.u32;draw.baseVertex=c.r5.s32;draw.startIndex=c.r6.u32;draw.indexCount=c.r7.u32;draw.viewport=camera.viewport;
     if(const auto scissor=s.backend.scissor())draw.scissor=*scissor;
     draw.depthEnable=effective.scalar(S::DepthEnable);draw.depthWrite=effective.scalar(S::DepthWrite);draw.depthCompare=effective.scalar(S::DepthCompare);
@@ -7729,6 +7876,7 @@ void EngineEffects::skinDraw(PPCContext& c,uint8_t* base) {
     draw.alphaToMask=effective.scalar(S::AlphaToMask);draw.depthBiasBits=effective.scalar(S::DepthBias);draw.slopeBiasBits=effective.scalar(S::SlopeBias);
     draw.depthPolicy=Graphics::ShadowMeshDepthPolicy::Reference20e4Rne;
     draw.blendEnable=effective.scalar(S::BlendEnable);draw.blendWord=effective.effectiveBlend(0);draw.expandedBlend=effective.scalar(S::ExpandedBlend0);
+        draw.temporalBlendEnable=draw.blendEnable;draw.temporalBlendWord=draw.blendWord;
     observeSkinDraw(draw,mesh.geometry,row.entry);
     prepareSkinDrawTextures(draw);
     need(!effective.scalar(S::TessellationMode),"Skin tessellation is unqualified");

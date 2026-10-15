@@ -7,6 +7,9 @@
 #include "ppc_image_metadata.h"
 #include <thread>
 #include <cstring>
+#include <algorithm>
+#include <array>
+#include <memory>
 extern "C" float roundevenf(float);
 namespace Simpsons {
 struct NativeMemoryContractProbe {
@@ -28,6 +31,157 @@ static PPC_FUNC(testAotWorker) {
     require(PPC_LOAD_U32(PPC_LOAD_U32(ctx.r13.u32))==0x1234abcd,"Worker static TLS initialization mismatch");
     workerArgument=ctx.r3.u32;
     ctx.r3.u64=42;
+}
+// Exercise production teardown with a real Runtime and actual guest-worker join.
+// The worker waits on the destructor's cancellation event, not on a timed sleep
+// or a guest wait that could reject cancellation before inspecting the services.
+uint8_t* PPCGuestPointerRead(uint8_t*,uint32_t,unsigned);
+uint8_t* PPCGuestPointerWrite(uint8_t*,uint32_t,unsigned);
+namespace {
+struct TeardownHandle {
+    HANDLE value{};
+    ~TeardownHandle() {if(value)CloseHandle(value);}
+    TeardownHandle()=default;
+    TeardownHandle(const TeardownHandle&)=delete;
+    TeardownHandle& operator=(const TeardownHandle&)=delete;
+};
+struct TeardownObservation {
+    Simpsons::Runtime* runtime{};
+    uint8_t* base{};
+    std::atomic<uint8_t>* armed{};
+    std::atomic<uint32_t>* version{};
+    void* handler{};
+    HANDLE ready{},stop{};
+    bool liveOnCancellation{},fastStore{},permissionStore{},scratch{},fault{},cancelled{},tlsExit{};
+    std::array<char,256> failure{};
+    bool servicesLive() const noexcept {
+        return Simpsons::active==runtime && runtime && runtime->base==base &&
+            runtime->vectoredHandler==handler && handler &&
+            Simpsons::guestWatchArmedTable==armed && armed &&
+            Simpsons::guestWatchVersionTable==version && version;
+    }
+    void fail(const char* message) noexcept {
+        if(!failure[0])std::snprintf(failure.data(),failure.size(),"%s",message);
+    }
+};
+TeardownObservation* teardownObservation{};
+struct TeardownRegistration {
+    explicit TeardownRegistration(TeardownObservation& value) {
+        require(!teardownObservation,"Runtime teardown observer already registered");
+        teardownObservation=&value;
+    }
+    ~TeardownRegistration() {teardownObservation=nullptr;}
+};
+struct TeardownExitProbe {
+    TeardownObservation* observation{};
+    ~TeardownExitProbe() {
+        // Runs after threadMain's finished publication and stack unmap but before
+        // the native HANDLE signals. No read occurs after Runtime's joined exit.
+        if(observation)observation->tlsExit=observation->servicesLive();
+    }
+};
+thread_local TeardownExitProbe teardownExitProbe;
+}
+static PPC_FUNC(testTeardownWorker) {
+    auto* observed=teardownObservation;
+    require(observed && observed->runtime && observed->base==base,
+            "Runtime teardown worker has no owned observation");
+    auto& state=*observed;
+    teardownExitProbe.observation=observed;
+    if(!SetEvent(state.ready)) {state.fail("Runtime teardown ready signal failed");ctx.r3.u64=2;return;}
+    if(WaitForSingleObject(state.stop,5000)!=WAIT_OBJECT_0) {
+        state.fail("Runtime teardown worker did not receive destructor cancellation");ctx.r3.u64=2;return;
+    }
+    state.liveOnCancellation=state.servicesLive();
+    if(!state.liveOnCancellation) {
+        // Expected failure for the old destructor ordering. Do not intentionally
+        // execute a hardware fault after its conversion handler has disappeared.
+        state.fail("Runtime teardown removed guest memory services before worker exit");ctx.r3.u64=2;return;
+    }
+    try {
+        auto& rt=*state.runtime;
+        const auto watch=rt.writeWatch();
+        const auto beforeStore=watch.armPage(0x10);
+        *(volatile uint32_t*)PPCGuestPointerWrite(base,0x10020,4)=__builtin_bswap32(0xA1B2C3D4u);
+        require(!watch.armed[0x10].load() && watch.version[0x10].load()==beforeStore+1 &&
+                __builtin_bswap32(*(volatile uint32_t*)(base+0x10020))==0xA1B2C3D4u,
+                "Runtime teardown lost exact fast-store watch invalidation");
+        state.fastStore=true;
+        const auto beforePermission=watch.armPage(0x11);
+        const auto beforeEpoch=Simpsons::guestPermissionEpoch.load();
+        rt.pageAccess[0x11].store(3);
+        require(!watch.armed[0x11].load() && watch.version[0x11].load()==beforePermission+1 &&
+                Simpsons::guestPermissionEpoch.load()==beforeEpoch+1,
+                "Runtime teardown lost permission-table watch invalidation");
+        state.permissionStore=true;
+        require(!rt.pageAccess[5].load(),"Runtime teardown scratch page was already mapped");
+        require(__builtin_bswap32(*(volatile uint32_t*)PPCGuestPointerRead(base,0x5020,4))==0 &&
+                rt.pageAccess[5].load()==3,"Runtime teardown lost hardware scratch demand mapping");
+        *(volatile uint32_t*)PPCGuestPointerWrite(base,0x5020,4)=__builtin_bswap32(0x55667788u);
+        require(__builtin_bswap32(*(volatile uint32_t*)PPCGuestPointerRead(base,0x5020,4))==0x55667788u,
+                "Runtime teardown scratch storage did not remain usable");
+        state.scratch=true;
+        try {
+            (void)*(volatile uint32_t*)PPCGuestPointerRead(base,0x30000,4);
+        } catch(const Simpsons::Failure& error) {
+            state.fault=std::strcmp(error.what(),"Unmapped/protected guest read address=0x00030000")==0;
+        }
+        require(state.fault,"Runtime teardown lost exact hardware-fault Failure conversion");
+        require(PPCStopRequested==1,"Runtime teardown failed to publish the entry cancellation flag");
+        try {PPCStopNow(ctx);}
+        catch(const Simpsons::Failure& error) {
+            if(std::strcmp(error.what(),"Native runtime shutdown")==0) {state.cancelled=true;throw;}
+            throw;
+        }
+        throw Simpsons::Failure("Runtime teardown entry poll did not observe real cancellation");
+    } catch(const std::exception& error) {
+        if(state.cancelled)throw; // Let the real threadMain cancellation boundary unwind.
+        state.fail(error.what());ctx.r3.u64=2;
+    }
+}
+static void runtimeTeardownContracts() {
+    TeardownHandle ready,native;
+    ready.value=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+    require(ready.value!=nullptr,"Runtime teardown ready event creation failed");
+    TeardownObservation observed;
+    observed.ready=ready.value;
+    TeardownRegistration registration(observed);
+    // These declarations keep observation/events alive through every exceptional
+    // Runtime destruction; no borrowed observation is released before its join.
+    auto rt=std::make_unique<Simpsons::Runtime>();
+    auto* base=rt->base;
+    const auto watch=rt->writeWatch();
+    observed.runtime=rt.get();observed.base=base;observed.armed=watch.armed;observed.version=watch.version;
+    observed.handler=rt->vectoredHandler;observed.stop=rt->stopEvent;
+    require(observed.servicesLive(),"Runtime teardown fixture lacks original memory services");
+    rt->map(0x10000,0x2000,true,"teardown watched RAM");
+    rt->map(uint32_t(PPC_IMAGE_BASE+PPC_IMAGE_SIZE),(PPC_CODE_SIZE*2+0xfff)&~0xfffull,true,
+            "teardown AOT dispatch",Simpsons::MemoryUse::Host);
+    rt->map(kTls_raw_data_address&~0xfffu,0x1000,true,"teardown static TLS",Simpsons::MemoryUse::Image);
+    PPC_LOOKUP_FUNC(base,PPC_CODE_BASE)=testTeardownWorker;
+    PPCContext caller{};
+    caller.r3.u64=0x10000;caller.r4.u64=0x4000;caller.r7.u64=PPC_CODE_BASE;
+    require(rt->createThread(caller)==0,"Runtime teardown real worker creation failed");
+    {
+        const auto worker=rt->getHandle(PPCLoadU32(base,0x10000));
+        require(worker && DuplicateHandle(GetCurrentProcess(),worker->native,GetCurrentProcess(),&native.value,
+                0,FALSE,DUPLICATE_SAME_ACCESS),"Runtime teardown worker handle duplication failed");
+    }
+    require(WaitForSingleObject(ready.value,5000)==WAIT_OBJECT_0,"Runtime teardown worker never entered its owned body");
+    rt.reset(); // The only operation which requests the observed cancellation.
+    require(WaitForSingleObject(native.value,0)==WAIT_OBJECT_0,
+            "Runtime destructor returned before the native worker terminated");
+    require(!observed.failure[0],observed.failure.data());
+    require(observed.liveOnCancellation && observed.tlsExit,
+            "Runtime memory services did not survive through native TLS exit");
+    DWORD code=0;
+    require(GetExitCodeThread(native.value,&code) && code==1,
+            "Runtime teardown did not use the original cancellation unwind boundary");
+    require(observed.fastStore && observed.permissionStore && observed.scratch && observed.fault && observed.cancelled,
+            "Runtime teardown skipped a live memory-service/cancellation contract");
+    require(!Simpsons::active && !Simpsons::guestWatchArmedTable && !Simpsons::guestWatchVersionTable,
+            "Runtime teardown retained global runtime/watch ownership after its joined exit");
+    puts("PASS: real Runtime teardown retains guest memory services through cancellation and native TLS exit");
 }
 static void memoryFastPathContracts() {
     Simpsons::Runtime rt;
@@ -88,6 +242,7 @@ static void memoryFastPathContracts() {
 }
 int main() {
     try {
+        runtimeTeardownContracts();
         memoryFastPathContracts();
         Simpsons::Runtime rt;
         rt.map(0x10000,0x1000,true,"test RAM");
@@ -340,6 +495,27 @@ int main() {
         ctx.r3.u32=1;ctx.r4.u32=0;ctx.r5.u32=0x10410;
         __imp__KeDelayExecutionThread(ctx,base);
         require(ctx.r3.u32==0,"Relative native delay did not report successful expiry");
+        {   // A guest Sleep(1) keeps its console duration instead of the host's default
+            // 15.6 ms timer granularity; an absolute expiry is honoured as such.
+            std::array<double,9> elapsed{};
+            for(auto& value:elapsed) {
+                PPC_STORE_U64(0x10410,uint64_t(-10000ll));ctx.r3.u32=1;ctx.r4.u32=0;ctx.r5.u32=0x10410;
+                LARGE_INTEGER start{},end{},frequency{};QueryPerformanceFrequency(&frequency);QueryPerformanceCounter(&start);
+                __imp__KeDelayExecutionThread(ctx,base);QueryPerformanceCounter(&end);
+                require(ctx.r3.u32==0,"Relative 1 ms delay did not report successful expiry");
+                value=double(end.QuadPart-start.QuadPart)*1000.0/double(frequency.QuadPart);
+                require(value>=0.95,"Relative 1 ms delay returned early");
+            }
+            std::sort(elapsed.begin(),elapsed.end());
+            require(elapsed[4]<4.0,"Relative 1 ms delay followed coarse host timer granularity");
+            FILETIME now{};GetSystemTimePreciseAsFileTime(&now);
+            const uint64_t deadline=((uint64_t(now.dwHighDateTime)<<32)|now.dwLowDateTime)+30000; // +3 ms absolute
+            PPC_STORE_U64(0x10410,deadline);ctx.r3.u32=1;ctx.r4.u32=0;ctx.r5.u32=0x10410;
+            __imp__KeDelayExecutionThread(ctx,base);
+            FILETIME after{};GetSystemTimePreciseAsFileTime(&after);
+            require(ctx.r3.u32==0 && ((uint64_t(after.dwHighDateTime)<<32)|after.dwLowDateTime)>=deadline,
+                    "Absolute native delay expired before its deadline");
+        }
         for(unsigned i=0;i<32;++i) {
             PPCContext expected;std::memcpy(&expected,&ctx,sizeof(ctx));
             const DWORD lastError=0x1234ABCD;SetLastError(lastError);

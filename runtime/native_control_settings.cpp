@@ -13,6 +13,7 @@ bool NativeControlSettings::validKey(uint32_t code) {
     // Win32 key-message virtual keys and all five physical mouse buttons.
     // Exclude packet/process pseudo keys and unassigned/reserved ranges.
     if(code==1||code==2||code==4||code==5||code==6)return true;
+    if(code==wheelUp||code==wheelDown)return true;
     if(code==8||code==9||code==12||code==13||code==16||code==17||code==18||code==19||code==20||code==27)return true;
     if(code>=0x20&&code<=0x2F)return true;
     if(code>=0x30&&code<=0x39)return true;
@@ -36,11 +37,20 @@ bool NativeControlSettings::valid() const {
 NativeControlSettings NativeControlSettings::load(const std::filesystem::path& file) {
     NativeControlSettings out;
     std::ifstream in(file);uint32_t version=0,sensitivity=0,invertX=0,invertY=0;
-    if(!(in>>version>>sensitivity>>invertX>>invertY)||version!=1||invertX>1||invertY>1)return {};
+    if(!(in>>version>>sensitivity>>invertX>>invertY)||(version!=1&&version!=2)||invertX>1||invertY>1)return {};
     out.mouseSensitivity=sensitivity;out.invertMouseX=invertX!=0;out.invertMouseY=invertY!=0;
-    for(auto& action:out.bindings)for(auto& code:action)if(!(in>>code))return {};
+    const uint32_t stored=version==1?version1ActionCount:actionCount;
+    for(uint32_t action=0;action<stored;++action)for(auto& code:out.bindings[action])if(!(in>>code))return {};
     in>>std::ws;
-    if(!in.eof()||!out.valid())return {};
+    if(!in.eof())return {};
+    if(version==1) {
+        // New actions keep their defaults unless the player already uses
+        // that key for an original action; then they start unbound.
+        std::array<bool,256> used{};
+        for(uint32_t action=0;action<version1ActionCount;++action)for(const auto code:out.bindings[action])if(code<used.size())used[code]=true;
+        for(uint32_t action=version1ActionCount;action<actionCount;++action)for(auto& code:out.bindings[action])if(code<used.size()&&code&&used[code])code=0;
+    }
+    if(!out.valid())return {};
     return out;
 }
 void NativeControlSettings::save(const std::filesystem::path& file) const {
@@ -48,7 +58,7 @@ void NativeControlSettings::save(const std::filesystem::path& file) const {
     if(!valid())throw std::runtime_error("Cannot save invalid native controls");
     if(!file.parent_path().empty())std::filesystem::create_directories(file.parent_path());
     std::ofstream out(file,std::ios::trunc);
-    out<<1<<' '<<mouseSensitivity<<' '<<invertMouseX<<' '<<invertMouseY<<'\n';
+    out<<2<<' '<<mouseSensitivity<<' '<<invertMouseX<<' '<<invertMouseY<<'\n';
     for(const auto& action:bindings)out<<action[0]<<' '<<action[1]<<'\n';
     out.close();if(!out)throw std::runtime_error("Unable to save native control settings");
 }
@@ -71,7 +81,8 @@ void NativeControlSettings::step(uint32_t row,int direction) {
 }
 std::string NativeControlSettings::actionLabel(ControlAction action) {
     constexpr std::array names{"Move forward","Move backward","Move left","Move right","Jump","Attack","Special attack","Action / interact",
-        "Switch character","Target lock","Left stick click","Right stick click","Character menu","Special power","Left trigger","Pause"};
+        "Switch character","Target lock","Left stick click","Right stick click","Character menu","Special power","Left trigger","Pause",
+        "Look up","Look down","Look left","Look right","Walk (hold)","Free camera","Photo mode"};
     const auto index=uint32_t(action);if(index>=names.size())throw std::runtime_error("Unknown native control action");
     return names[index];
 }
@@ -82,6 +93,7 @@ std::string NativeControlSettings::keyLabel(uint32_t code) {
     switch(code) {
     case 0:return "Unbound";
     case 1:return "Mouse 1";case 2:return "Mouse 2";case 4:return "Mouse 3";case 5:return "Mouse 4";case 6:return "Mouse 5";
+    case wheelUp:return "Wheel up";case wheelDown:return "Wheel down";
     case 8:return "Backspace";case 9:return "Tab";case 12:return "Clear";case 13:return "Enter";
     case 16:return "Shift";case 17:return "Ctrl";case 18:return "Alt";case 19:return "Pause";case 20:return "Caps Lock";case 27:return "Escape";
     case 32:return "Space";case 33:return "Page Up";case 34:return "Page Down";case 35:return "End";case 36:return "Home";

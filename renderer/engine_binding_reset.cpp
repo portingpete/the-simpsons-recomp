@@ -44,7 +44,7 @@ void validateTarget(ID3D11Texture2D* texture,ID3D11View* view,ID3D11Device* devi
     if(!width || !height || desc.Width!=width || desc.Height!=height || desc.Format!=format ||
        desc.MipLevels!=1 || desc.ArraySize!=1 || desc.SampleDesc.Count!=1 || desc.SampleDesc.Quality ||
        desc.Usage!=D3D11_USAGE_DEFAULT || desc.BindFlags!=bindFlags || desc.CPUAccessFlags || desc.MiscFlags)
-        throw Error("Native binding reset target metadata exceeds the owned single-sample profile");
+        throw Error("Native binding reset target metadata differs from the owned sample profile");
 }
 }
 

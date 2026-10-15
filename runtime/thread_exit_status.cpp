@@ -35,7 +35,6 @@ void SimpsonsNativeThreadExitStatus(PPCContext& ctx,uint8_t* base) {
 
     const uint32_t address=ctx.r3.u32;
     std::shared_ptr<Simpsons::KernelHandle> owner;
-    uint32_t mappedHandle=0;
     {
         std::lock_guard lock(rt.handleMutex);
         const auto found=rt.objectReferences.find(address);
@@ -46,10 +45,6 @@ void SimpsonsNativeThreadExitStatus(PPCContext& ctx,uint8_t* base) {
         owner=found->second.object;
         if(!owner->native || owner->native==INVALID_HANDLE_VALUE)
             throw Simpsons::Failure("Native thread-exit status reference has no native thread handle");
-        // Best available handle identity at this reference snapshot. A closed
-        // guest handle or the self pseudo-handle need not have a map entry.
-        for(const auto& [handle,object]:rt.handles)
-            if(object==owner && (!mappedHandle || handle<mappedHandle)) mappedHandle=handle;
     }
     // No registry lock spans Windows calls. The local shared owner keeps its
     // native handle and KTHREAD alive, even if the guest handle closes now.
@@ -62,6 +57,15 @@ void SimpsonsNativeThreadExitStatus(PPCContext& ctx,uint8_t* base) {
         nativeFailure("WaitForSingleObject",error,address,wait);
     }
     if(wait==WAIT_OBJECT_0 && !completedDiagnostic.exchange(true,std::memory_order_relaxed)) {
+        // Diagnostic identity at this current registry snapshot only. A closed
+        // guest handle or the self pseudo-handle need not have a map entry.
+        // Running polls never scan the handle registry for this one-time log.
+        uint32_t mappedHandle=0;
+        {
+            std::lock_guard lock(rt.handleMutex);
+            for(const auto& [handle,object]:rt.handles)
+                if(object==owner && (!mappedHandle || handle<mappedHandle)) mappedHandle=handle;
+        }
         const DWORD id=GetThreadId(owner->native);
         const DWORD idError=id?ERROR_SUCCESS:GetLastError();
         std::fprintf(stderr,

@@ -77,7 +77,9 @@ class ChocolateInventoryTests(unittest.TestCase):
         self.assertIn('const bool tangentInput=(rigidProfile(record.view.source).normalmap&&!s.alphaRigid())||chocolate;',runtime)
         self.assertIn('rigidProfile(record.view.source).multitone||rigidProfile(record.view.source).normalmap||chocolate;',runtime)
         self.assertIn('const bool tangent=rigidProfile(record.view.source).normalmap&&!s.alphaRigid();',runtime)
-        self.assertIn('kVSChocolate,sizeof(kVSChocolate),&result->chocolateLayout',renderer)
+        self.assertRegex(renderer,
+            r'CreateInputLayout\(tangentElements,UINT\(std::size\(tangentElements\)\),'
+            r'kVSChocolate,sizeof\(kVSChocolate\),&\w+->chocolateLayout\)')
         self.assertIn('if(normalmap||choc)m.requireTangentBindings(context.Get(),choc,chocAlpha)',renderer)
         self.assertIn('draw->layout=vfx?m.vfxLayout:chocOpaque?m.chocolateOpaqueLayout:chocAlpha?m.chocolateLayout:normalmap?m.tangentLayout:m.layout',renderer)
         self.assertIn('bindChocolateMeshDeclaration(mesh.native,s.alphaRigid())',runtime)

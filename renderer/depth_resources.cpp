@@ -34,19 +34,23 @@ std::shared_ptr<DepthTarget> NativeBackend::createDepthTarget(uint32_t width,uin
     D3D11_TEXTURE2D_DESC desc{};desc.Width=extent[0];desc.Height=extent[1];
     result->physicalWidth=desc.Width;result->physicalHeight=desc.Height;
     desc.MipLevels=1;desc.ArraySize=1;desc.Format=DXGI_FORMAT_R32G8X24_TYPELESS;
-    desc.SampleDesc.Count=1;desc.Usage=D3D11_USAGE_DEFAULT;
+    desc.SampleDesc={1,0};desc.Usage=D3D11_USAGE_DEFAULT;
     desc.BindFlags=D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE;
     check(device->CreateTexture2D(&desc,nullptr,&result->texture),"allocation");
     tagRenderExtent(result->texture.Get(),width,height);
     D3D11_DEPTH_STENCIL_VIEW_DESC depthDesc{};
-    depthDesc.Format=DXGI_FORMAT_D32_FLOAT_S8X24_UINT;depthDesc.ViewDimension=D3D11_DSV_DIMENSION_TEXTURE2D;
+    depthDesc.Format=DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+    depthDesc.ViewDimension=desc.SampleDesc.Count>1?D3D11_DSV_DIMENSION_TEXTURE2DMS:D3D11_DSV_DIMENSION_TEXTURE2D;
     check(device->CreateDepthStencilView(result->texture.Get(),&depthDesc,&result->view),"DSV creation");
     D3D11_SHADER_RESOURCE_VIEW_DESC sample{};
-    sample.Format=DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;sample.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;
-    sample.Texture2D.MipLevels=1;
+    sample.Format=DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+    sample.ViewDimension=desc.SampleDesc.Count>1?D3D11_SRV_DIMENSION_TEXTURE2DMS:D3D11_SRV_DIMENSION_TEXTURE2D;
+    if(desc.SampleDesc.Count==1)sample.Texture2D.MipLevels=1;
     check(device->CreateShaderResourceView(result->texture.Get(),&sample,&result->depthView),"depth SRV creation");
     sample.Format=DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
     check(device->CreateShaderResourceView(result->texture.Get(),&sample,&result->stencilView),"stencil SRV creation");
+    result->scaleRole=scale;
+    if(scale!=TargetScale::Fixed)registerLive(liveDepthTargets,result);
     return result;
 }
 void NativeBackend::clearDepthTarget(const std::shared_ptr<DepthTarget>& target,float depth,uint8_t stencil,
@@ -61,6 +65,7 @@ void NativeBackend::clearDepthTarget(const std::shared_ptr<DepthTarget>& target,
     if(depth==0.0f) depth=0.0f; // Normalize -0.0: original format has no signed zero.
     context->ClearDepthStencilView(target->view.Get(),(clearDepth?D3D11_CLEAR_DEPTH:0)|(clearStencil?D3D11_CLEAR_STENCIL:0),
                                   clearDepth?depth:0,stencil);
+    noteTemporalSceneClear({},target,(clearDepth?2u:0u)|(clearStencil?4u:0u));
 }
 std::vector<uint8_t> NativeBackend::readbackDepthTarget(const std::shared_ptr<DepthTarget>& target) {
     flushIm2D();

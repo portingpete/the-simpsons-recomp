@@ -135,7 +135,7 @@ struct Im2DPipeline {
         if(scratch.width==width && scratch.height==height) return;
         Scratch next;next.width=width;next.height=height;
         D3D11_TEXTURE2D_DESC desc{};
-        desc.Width=width;desc.Height=height;desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;
+        desc.Width=width;desc.Height=height;desc.MipLevels=desc.ArraySize=1;desc.SampleDesc={1,0};
         desc.Format=DXGI_FORMAT_R10G10B10A2_UINT;desc.Usage=D3D11_USAGE_DEFAULT;
         desc.BindFlags=D3D11_BIND_RENDER_TARGET;
         check(device->CreateTexture2D(&desc,nullptr,&next.output),"integer output allocation");
@@ -180,7 +180,7 @@ struct Im2DPipeline {
             check(device->CreateDepthStencilState(&dd,&depths[i]),"depth/stencil creation");
         }
         for(size_t i=0;i<rasterizers.size();++i) {
-            D3D11_RASTERIZER_DESC rd{};rd.FillMode=D3D11_FILL_SOLID;rd.DepthClipEnable=TRUE;
+            D3D11_RASTERIZER_DESC rd{};rd.FillMode=D3D11_FILL_SOLID;rd.DepthClipEnable=TRUE;rd.MultisampleEnable=TRUE;
             rd.CullMode=i==0?D3D11_CULL_NONE:D3D11_CULL_BACK;
             // cull2: back rejection + CCW front. cull6: back rejection + CW
             // front, conditional on the original negative viewport-Y scale.
@@ -259,7 +259,7 @@ void NativeBackend::drawIm2DImpl(const std::shared_ptr<RenderTarget>& target,con
     if(!attachment || targetDesc.Format!=DXGI_FORMAT_R10G10B10A2_UNORM ||
        targetDesc.Width!=target->pixelWidth() || targetDesc.Height!=target->pixelHeight() ||
        targetDesc.ArraySize!=1 || targetDesc.MipLevels!=1 || targetDesc.SampleDesc.Count!=1 || targetDesc.SampleDesc.Quality)
-        throw Error("Native Im2D target backing exceeds the single-sample packed profile");
+        throw Error("Native Im2D target backing differs from its declared packed single-sample profile");
     if(depth) {
         // Even disabled depth must be the actual selected, owned attachment.
         validateDepthCopyTarget(depth);
@@ -315,7 +315,7 @@ void NativeBackend::drawIm2DImpl(const std::shared_ptr<RenderTarget>& target,con
         throw Error("Native Im2D enabled depth requires the qualified native viewport depth range 0..1");
     // No viewport substitution. Native clipping handles overhanging geometry;
     // original coverage qualification remains the caller's responsibility.
-    // Scissor, MSAA, depth bias and alternate clip/round modes are excluded.
+    // Scissor, depth bias and alternate clip/round modes are excluded.
     if(vp.Width<=0 || vp.Height<=0 || vp.TopLeftX<0 || vp.TopLeftY<0 || vp.TopLeftX+vp.Width>float(target->pixelWidth()) ||
        vp.TopLeftY+vp.Height>float(target->pixelHeight()))
         throw Error("Native Im2D viewport extends beyond the selected target");
@@ -498,6 +498,7 @@ void NativeBackend::drawIm2DImpl(const std::shared_ptr<RenderTarget>& target,con
     ID3D11ShaderResourceView* nullView=nullptr;
     auto* output=packedView.Get();auto* sampled=destinationView.Get();
     const auto copyBounds=[&](ID3D11Texture2D* to,ID3D11Texture2D* from,const D3D11_BOX& bounds) {
+        // Draws retain their original conservative partial bounds.
         context->CopySubresourceRegion(to,0,bounds.left,bounds.top,0,from,0,&bounds);
         ++im2dColorCopies;
     };
@@ -531,6 +532,8 @@ void NativeBackend::drawIm2DImpl(const std::shared_ptr<RenderTarget>& target,con
     context->PSSetShaderResources(1,1,&nullView);
     output=target->view.Get();context->OMSetRenderTargets(1,&output,depth?depth->view.Get():nullptr);
     if(!depthOnly)copyBounds(target->texture.Get(),packedOutput.Get(),packetBounds);
+    noteTemporalSceneDraw(target,depth,depthOnly?0u:draw.colorWriteMask,
+        draw.depthTest&&draw.depthWrite,false,std::array<float,2>{});
     context->RSSetViewports(1,&originalVp);
     for(UINT i=0;i<2;++i){auto* restored=savedTextures[i].Get();context->PSSetShaderResources(i,1,&restored);}
     sample=savedSampler.Get();context->PSSetSamplers(0,1,&sample);

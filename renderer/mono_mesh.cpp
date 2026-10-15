@@ -1,3 +1,4 @@
+#include "temporal_scene.h"
 #include "mono_mesh.h"
 #include "runtime/stall_profiler.h"
 #include "material_resources.h"
@@ -253,7 +254,7 @@ std::shared_ptr<NativeMonoMesh> NativeBackend::uploadMonoMesh(
     for(UINT i=0;i<6;++i) {
         D3D11_RASTERIZER_DESC r{};r.FillMode=D3D11_FILL_SOLID;r.DepthClipEnable=TRUE;
         r.CullMode=i%3==0?D3D11_CULL_NONE:D3D11_CULL_BACK;r.FrontCounterClockwise=i%3==1;
-        r.ScissorEnable=i>=3;
+        r.ScissorEnable=i>=3;r.MultisampleEnable=TRUE;
         // Both bias terms are computed in the PS, NOT integer D32 raster bias.
         check(device->CreateRasterizerState(&r,&next->rasterizers[i]),"rasterizer creation");
     }
@@ -329,6 +330,7 @@ void monoFinite(const MonoConstants& data) {
 struct MonoRecordedConstants {MonoConstants vertex;MonoBooleans booleans;NativeRecordingMask inputMask;};
 static_assert(sizeof(MonoRecordedConstants)==3960&&std::is_trivially_copyable_v<MonoRecordedConstants>);
 struct MonoRecordedDraw {
+    std::shared_ptr<TemporalGeometryDraw> temporal;
     const NativeBackend* owner{};DWORD thread{};ComPtr<ID3D11Device> device;
     std::shared_ptr<NativeMonoMesh> mesh;std::shared_ptr<NativeMonoReplayConstants> live;
     std::shared_ptr<RenderTarget> color;std::shared_ptr<DepthTarget> depth;
@@ -354,6 +356,7 @@ struct MonoRecordedDraw {
         deferred->IASetVertexBuffers(0,UINT(streams.size()),streams.data(),strides.data(),offsets.data());
         deferred->IASetInputLayout(layout.Get());deferred->IASetIndexBuffer(indices.Get(),DXGI_FORMAT_R16_UINT,0);
         deferred->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        if(temporal)temporal->bind(deferred);
         forEachOriginalR16StripChunk(start,count,[&](uint32_t n,uint32_t first){deferred->DrawIndexed(n,first,base);});
     }
 };
@@ -417,7 +420,8 @@ void NativeBackend::recordMonoMesh(const std::shared_ptr<NativeRecordingPayload>
     const auto* attachment=attachmentDescriptor(*target);const D3D11_TEXTURE2D_DESC colorDesc=attachment?*attachment:D3D11_TEXTURE2D_DESC{};
     need(attachment&&colorDesc.Format==colorFormat&&colorDesc.Width==target->pixelWidth()&&
          colorDesc.Height==target->pixelHeight()&&colorDesc.MipLevels==1&&colorDesc.ArraySize==1&&colorDesc.SampleDesc.Count==1&&
-         !colorDesc.SampleDesc.Quality&&depth->width==target->width&&depth->height==target->height,
+         !colorDesc.SampleDesc.Quality&&
+         depth->width==target->width&&depth->height==target->height&&depth->storageWidth()==target->pixelWidth()&&depth->storageHeight()==target->pixelHeight(),
          "Native mono mesh attachments have a different device, format or extent");
     const bool reverse=d.viewport[4]==0x3F800000&&d.viewport[5]==0;
     need(!d.viewport[0]&&!d.viewport[1]&&d.viewport[2]==target->width&&d.viewport[3]==target->height&&
@@ -436,9 +440,11 @@ void NativeBackend::recordMonoMesh(const std::shared_ptr<NativeRecordingPayload>
     constantsDesc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;const D3D11_SUBRESOURCE_DATA initial{materialVS.data(),0,0};
     check(device->CreateBuffer(&constantsDesc,&initial,&draw->constants),"recorded constant allocation");
     std::memcpy(draw->uploadedVertex.data(),materialVS.data(),sizeof(materialVS));
-    draw->booleans=immutable(device.Get(),booleans.data(),sizeof(booleans),D3D11_BIND_CONSTANT_BUFFER);
-    const DepthConstants depthValues{uint32_t(reverse),d.depthBiasBits,d.slopeBiasBits,0};
-    draw->depthConstants=immutable(device.Get(),&depthValues,sizeof(depthValues),D3D11_BIND_CONSTANT_BUFFER);
+    // The existing static-profile guard proves all four Boolean words zero.
+    // Each recorded draw pins immutable banks; writable material storage stays
+    // private above so sibling replay updates cannot overwrite its snapshot.
+    draw->booleans=zeroBooleans();
+    draw->depthConstants=sceneDepthConstantBuffer(uint32_t(reverse),d.depthBiasBits,d.slopeBiasBits);
     draw->depthState=m.depths[(d.depthEnable?16u:0u)|(d.depthWrite?8u:0u)|d.depthCompare];
     const auto maskIndex=d.colorMask==0?0u:(d.colorMask==8?1u:2u);
     auto& alphaBlend=d.colorMask==8?(d.blendEnable?m.blendedAlphaOnly:m.alphaOnly):
@@ -451,6 +457,7 @@ void NativeBackend::recordMonoMesh(const std::shared_ptr<NativeRecordingPayload>
     draw->scissor=renderScissor(target,d.scissorEnable?D3D11_RECT{LONG(d.scissor[0]),LONG(d.scissor[1]),LONG(d.scissor[2]),LONG(d.scissor[3])}:
                                 D3D11_RECT{0,0,LONG(target->width),LONG(target->height)});
     draw->inputMask=receipt.inputMask;const MonoRecordedConstants data{materialVS,booleans,receipt.inputMask};
+    draw->temporal=temporalGeometryDraw(target,depth,d,vertex.originalAddress(),2,true);
     NativeRecordingPrepare prepare=[](ID3D11DeviceContext* immediate,const std::shared_ptr<void>& owner,std::span<const uint8_t> bytes) {
         const auto draw=std::static_pointer_cast<MonoRecordedDraw>(owner);
         need(bool(draw)&&bytes.size()==sizeof(MonoRecordedConstants),"Mono recorded constant snapshot changed");
@@ -469,14 +476,29 @@ void NativeBackend::recordMonoMesh(const std::shared_ptr<NativeRecordingPayload>
             if(material.inputMask[group/8]&(0x80u>>(group%8)))material.vertex[row]=draw->live->state->vertex[row];
         }
         monoFinite(material.vertex);
+        if(draw->temporal)draw->temporal->prepare(immediate,material.vertex,false);
         if(std::memcmp(draw->uploadedVertex.data(),material.vertex.data(),sizeof(material.vertex))) {
             StallProfiler::Scope updateProfile(StallProfiler::Section::Rendering,"D3D11.UpdateSubresource.monoVertex",nullptr,reinterpret_cast<uintptr_t>(draw->constants.Get()));
             immediate->UpdateSubresource(draw->constants.Get(),0,nullptr,material.vertex.data(),0,0);
             std::memcpy(draw->uploadedVertex.data(),material.vertex.data(),sizeof(material.vertex));
         }
     };
+    // Live rendering changes re-derive storage views and physical rectangles
+    // from the same owners and original state (mono samples no textures).
+    auto refresh=[this,draw,
+                  scissor=d.scissorEnable?D3D11_RECT{LONG(d.scissor[0]),LONG(d.scissor[1]),LONG(d.scissor[2]),LONG(d.scissor[3])}:
+                      D3D11_RECT{0,0,LONG(target->width),LONG(target->height)}] {
+        const auto& target=draw->color;
+        draw->colorView=target->view;draw->depthView=draw->depth->view;
+        draw->viewport=renderViewport(target,{0,0,float(target->width),float(target->height),0,1});
+        draw->scissor=renderScissor(target,scissor);
+    };
     recordRecordingDraw(payload,std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&data),sizeof(data)),draw,std::move(prepare),
-        [draw](ID3D11DeviceContext* deferred){draw->record(deferred);});
+        [draw](ID3D11DeviceContext* deferred){draw->record(deferred);},
+        [this,draw,colorMask=d.colorMask,depthWrite=bool(d.depthEnable&&d.depthWrite)] {
+            noteTemporalSceneDraw(draw->color,draw->depth,colorMask,depthWrite,false,
+                draw->temporal?std::optional{temporalSceneJitter()}:std::nullopt);
+        },std::move(refresh));
 }
 void NativeBackend::drawMonoMesh(const std::shared_ptr<RenderTarget>& target,const std::shared_ptr<DepthTarget>& depth,
     const std::shared_ptr<NativeMonoMesh>& mesh,const CompiledMaterial& vertex,const CompiledMaterial& pixel,
@@ -525,7 +547,8 @@ void NativeBackend::drawMonoMesh(const std::shared_ptr<RenderTarget>& target,con
     const auto* attachment=attachmentDescriptor(*target);const D3D11_TEXTURE2D_DESC colorDesc=attachment?*attachment:D3D11_TEXTURE2D_DESC{};
     need(attachment&&colorDesc.Format==colorFormat&&
          colorDesc.Width==target->pixelWidth()&&colorDesc.Height==target->pixelHeight()&&colorDesc.MipLevels==1&&colorDesc.ArraySize==1&&
-         colorDesc.SampleDesc.Count==1&&!colorDesc.SampleDesc.Quality&&depth->width==target->width&&depth->height==target->height,
+         colorDesc.SampleDesc.Count==1&&!colorDesc.SampleDesc.Quality&&
+         depth->width==target->width&&depth->height==target->height&&depth->storageWidth()==target->pixelWidth()&&depth->storageHeight()==target->pixelHeight(),
          "Native mono mesh attachments have a different device, format or extent");
     const bool reverse=d.viewport[4]==0x3F800000&&d.viewport[5]==0;
     need(!d.viewport[0]&&!d.viewport[1]&&d.viewport[2]==target->width&&d.viewport[3]==target->height&&
@@ -539,12 +562,11 @@ void NativeBackend::drawMonoMesh(const std::shared_ptr<RenderTarget>& target,con
     requireSelectedTargets({target,nullptr,nullptr,nullptr},depth);requireNoOutputUavs();
     requireMonoShaders(vertex,pixel);requireMonoCommit(commit,m.skinned);m.requireBindings(context.Get());requireNoAuxiliaryStages(context.Get());
     const DepthConstants values{uint32_t(reverse),d.depthBiasBits,d.slopeBiasBits,0};
-    // Reuse identical immutable buffers; never update in flight. Miss creates
-    // a NEW immutable buffer with the same descriptor, published only after
-    // success; eviction keeps old GPU/live refs alive via caller ComPtr.
+    // Keep the per-mesh fast path while sharing exact immutable misses across
+    // meshes. Cached/live/GPU refs pin old buffers independently of eviction.
     ComPtr<ID3D11Buffer> constants;
     if(auto* hit=m.depthConstants.find(values))constants=hit;
-    else{constants=immutable(device.Get(),&values,sizeof(values),D3D11_BIND_CONSTANT_BUFFER);m.depthConstants.publish(values,constants.Get());}
+    else{constants=sceneDepthConstantBuffer(values.reverse,values.constantBits,values.slopeBits);m.depthConstants.publish(values,constants.Get());}
     // All rejection and allocation precede the flush or mono context mutation.
     flushIm2D();
     requireSelectedTargets({target,nullptr,nullptr,nullptr},depth);
@@ -565,8 +587,13 @@ void NativeBackend::drawMonoMesh(const std::shared_ptr<RenderTarget>& target,con
         auto* cb=constants.Get();context->PSSetConstantBuffers(1,1,&cb);context->PSSetShader(m.pixel.Get(),nullptr,0);
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
         // R16 triangle strips consume FFFF as cut indices, including parity reset.
+        auto temporal=temporalGeometryDraw(target,depth,d,vertex.originalAddress(),2);
+        if(temporal){const auto raw=temporalVertexConstants();temporal->prepare(context.Get(),raw,m.skinned);}
+        ScopedTemporalGeometryDraw temporalBindings(context.Get(),temporal);
         forEachOriginalR16StripChunk(d.startIndex,d.indexCount,[&](uint32_t n,uint32_t first){context->DrawIndexed(n,first,d.baseVertex);});
         ++monoMeshDraws;
+        noteTemporalSceneDraw(target,depth,d.colorMask,d.depthEnable&&d.depthWrite,false,
+            temporal?std::optional{temporalSceneJitter()}:std::nullopt);
     }
     requireMonoShaders(vertex,pixel);requireMonoCommit(commit,m.skinned);m.requireBindings(context.Get());
     requireSelectedTargets({target,nullptr,nullptr,nullptr},depth);requireOwner();

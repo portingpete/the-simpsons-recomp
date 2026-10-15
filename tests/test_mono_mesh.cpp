@@ -1,8 +1,11 @@
 #include "renderer/mono_mesh.h"
+#include "header/test_graphics_device.h"
 #include "renderer/mesh_upload_cache.h"
+#include "header/test_owned_mesh_cache.h"
 #include "renderer/native_material_compiler.h"
 #include "renderer/effect_reflection.h"
 #include "renderer/device_availability.h"
+#include "renderer/d3d_call_stats.h"
 #include "PSShadowMeshDepth.h"
 #include <d3d11sdklayers.h>
 #include <algorithm>
@@ -18,15 +21,19 @@
 #include <string>
 #include <thread>
 #include <vector>
+extern "C" uint64_t gD3DDeviceCounts[64];
 
 // Reuse the existing backend fixture access point.
 #include "header/test_mesh_gpu_retirement.h"
 #include "header/test_r16_strip_boundary.h"
 namespace Simpsons::Graphics {
 struct NativeIm2DProbe {
+    static void resetSceneCache(NativeBackend& b){b.resetSceneStateCacheForDevice();}
+    static ID3D11DeviceContext* deferred(NativeBackend& b,const std::shared_ptr<NativeRecordingPayload>& p){return b.checkedRecordingPayloadContext(p);}
     static ID3D11Device* device(NativeBackend& b){return b.device.Get();}
     static ID3D11DeviceContext* context(NativeBackend& b){return b.context.Get();}
     static void debug(NativeBackend& b,bool hardware) {
+        if(testUsesVulkan())return; // D3D11 debug layer: a D3D11-only diagnostic.
         ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;D3D_FEATURE_LEVEL level{};
         const D3D_FEATURE_LEVEL levels[]={D3D_FEATURE_LEVEL_11_1,D3D_FEATURE_LEVEL_11_0};
         const auto hr=D3D11CreateDevice(nullptr,hardware?D3D_DRIVER_TYPE_HARDWARE:D3D_DRIVER_TYPE_WARP,nullptr,
@@ -132,8 +139,8 @@ struct Fixture {
     MonoMeshDraw draw{};
     ID3D11DeviceContext* context{};
     static constexpr UINT extent=16;
-    explicit Fixture(const std::vector<uint8_t>& image,bool hardware):backend(!hardware),compiler(backend) {
-        NativeIm2DProbe::debug(backend,hardware);context=NativeIm2DProbe::context(backend);
+    explicit Fixture(const std::vector<uint8_t>& image,bool hardware,bool debugLayer=true):backend(!hardware),compiler(backend) {
+        if(debugLayer)NativeIm2DProbe::debug(backend,hardware);context=NativeIm2DProbe::context(backend);
         for(const auto& record:originalMaterialIdentities())if(record.originalAddress==0x82120C04) {
             const auto id=registry.create(record.originalAddress,std::span<const uint8_t>(image).subspan(record.originalAddress-0x82000000,record.recordBytes));
             vertex=&registry.prepareForBind(id,compiler);
@@ -207,6 +214,219 @@ void colors(Fixture& f,bool accepted) {
     }
 }
 bool interior(UINT x,UINT y){return x>=1&&x<15&&y>=1&&y<15;}
+std::vector<uint8_t> actualBufferBytes(ID3D11Device* device,ID3D11DeviceContext* context,ID3D11Buffer* source) {
+    D3D11_BUFFER_DESC desc{};source->GetDesc(&desc);const UINT bytes=desc.ByteWidth;
+    desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Buffer> staging;hr(device->CreateBuffer(&desc,nullptr,&staging),"Mono constants staging allocation");
+    context->CopyResource(staging.Get(),source);D3D11_MAPPED_SUBRESOURCE mapped{};
+    hr(context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped),"Mono constants staging map");
+    struct Unmap {ID3D11DeviceContext* context;ID3D11Buffer* buffer;~Unmap(){context->Unmap(buffer,0);}} unmap{context,staging.Get()};
+    need(mapped.pData&&mapped.RowPitch>=bytes,"Mono constants staging extent differs");
+    std::vector<uint8_t> result(bytes);std::memcpy(result.data(),mapped.pData,bytes);return result;
+}
+class DrawDepthCapture {
+    using Draw=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,UINT,UINT,INT);
+    inline static DrawDepthCapture* active{};
+    ComPtr<ID3D11DeviceContext> context;
+    void*** slot;void** original;
+    std::array<void*,115> cloned{}; // Public base interface through FinishCommandList114.
+    static void STDMETHODCALLTYPE observe(ID3D11DeviceContext* context,UINT count,UINT first,INT base) {
+        auto& capture=*active;if(context==capture.context.Get()){context->PSGetConstantBuffers(1,1,&capture.buffer);++capture.draws;}
+        reinterpret_cast<Draw>(capture.original[12])(context,count,first,base);
+    }
+public:
+    ComPtr<ID3D11Buffer> buffer;UINT draws{};
+    explicit DrawDepthCapture(ID3D11DeviceContext* value):context(value),slot(reinterpret_cast<void***>(value)),original(value?*slot:nullptr) {
+        need(context&&context->GetType()==D3D11_DEVICE_CONTEXT_IMMEDIATE&&!active,"Mono draw observer requires one owned immediate context");
+        std::copy_n(original,cloned.size(),cloned.begin());need(cloned[12]!=nullptr,"Mono draw observer lost original indexed draw");
+        cloned[12]=reinterpret_cast<void*>(&observe);active=this;*slot=cloned.data();
+    }
+    ~DrawDepthCapture(){*slot=original;active=nullptr;}
+    DrawDepthCapture(const DrawDepthCapture&)=delete;DrawDepthCapture& operator=(const DrawDepthCapture&)=delete;
+    void reset(){buffer.Reset();draws=0;}
+};
+void depthBytes(NativeBackend& backend,ID3D11Buffer* buffer,const MonoMeshDraw& draw) {
+    need(buffer!=nullptr,"Actual mono draw did not bind depth constants");
+    ComPtr<ID3D11Device> owner;D3D11_BUFFER_DESC desc{};buffer->GetDevice(&owner);buffer->GetDesc(&desc);
+    need(owner.Get()==NativeIm2DProbe::device(backend)&&desc.ByteWidth==16&&desc.Usage==D3D11_USAGE_IMMUTABLE&&
+         desc.BindFlags==D3D11_BIND_CONSTANT_BUFFER&&!desc.CPUAccessFlags&&!desc.MiscFlags&&!desc.StructureByteStride,
+         "Actual mono depth constants descriptor/device differs");
+    const auto bytes=actualBufferBytes(owner.Get(),NativeIm2DProbe::context(backend),buffer);
+    const std::array<uint32_t,4> expected{uint32_t(draw.viewport[4]==bits(1)&&draw.viewport[5]==0),draw.depthBiasBits,draw.slopeBiasBits,0};
+    need(bytes.size()==sizeof(expected)&&!std::memcmp(bytes.data(),expected.data(),sizeof(expected)),"Actual mono depth GPU bytes differ");
+}
+void runDepthConstantReuse(const std::vector<uint8_t>& image,bool hardware) {
+    Fixture f(image,hardware,false);installD3DCallStats(f.context,NativeIm2DProbe::device(f.backend));
+    auto first=f.backend.uploadMonoMesh(quad(),strip),second=f.backend.uploadMonoMesh(quad(.25f),strip);
+    const auto unused=f.backend.uploadMonoMesh(quad(.75f),strip);need(first!=second,"Mono reuse needs distinct mesh owners");
+    DrawDepthCapture capture(f.context);
+    const auto submit=[&](const std::shared_ptr<NativeMonoMesh>& mesh,const MonoMeshDraw& draw,uint64_t creates,float z) {
+        f.bind(mesh);f.clear();capture.reset();const auto before=gD3DDeviceCounts[3];f.submit(mesh,draw);
+        need(gD3DDeviceCounts[3]==before+creates,"Mono depth reuse made the wrong CreateBuffer count");
+        need(capture.draws==1&&capture.buffer,"Mono observer did not see one original indexed draw");depthBytes(f.backend,capture.buffer.Get(),draw);
+        const float value=mappedDepth(z,draw.viewport[4]==bits(1)&&draw.viewport[5]==0,std::bit_cast<float>(draw.depthBiasBits),std::bit_cast<float>(draw.slopeBiasBits),0);
+        f.pixels([&](UINT x,UINT y){return interior(x,y)?value:0.0f;});return capture.buffer;
+    };
+    auto original=submit(first,f.draw,1,.5f);auto* originalPointer=original.Get();
+    need(submit(second,f.draw,0,.25f).Get()==original.Get(),"Distinct mono meshes did not reuse exact depth constants");
+    auto negativeZero=f.draw;negativeZero.depthBiasBits=0x80000000;
+    const auto negative=submit(first,negativeZero,1,.5f);
+    need(negative.Get()!=original.Get()&&submit(second,negativeZero,0,.25f).Get()==negative.Get(),"Mono depth cache collapsed signed zero or missed reuse");
+    auto bias=f.draw;bias.depthBiasBits=bits(1.0f/256);need(submit(first,bias,1,.5f).Get()!=original.Get(),"Mono bias key reused zero");
+    auto slope=f.draw;slope.slopeBiasBits=bits(1.0f/128);need(submit(first,slope,1,.5f).Get()!=original.Get(),"Mono slope key reused zero");
+    auto forward=f.draw;forward.viewport[4]=0;forward.viewport[5]=bits(1);need(submit(first,forward,1,.5f).Get()!=original.Get(),"Mono direction key reused reverse");
+    // Drop diagnostic owners before reset: only the live meshes may pin this
+    // original local bank. A new mesh must allocate a new global entry.
+    original.Reset();capture.reset();NativeIm2DProbe::resetSceneCache(f.backend);
+    need(submit(first,f.draw,0,.5f).Get()==originalPointer,"Scene reset lost the live mono local depth owner");
+    need(submit(unused,f.draw,1,.75f).Get()!=originalPointer,"Unused mono mesh reused a cleared global depth owner");
+    std::printf("AUDIT_GPU_MONO_DEPTH_REUSE meshes=2 immutable_bytes=16 first_create=1 second_create=0 exact_gpu_bytes=passed signed_zero=passed local_owner_after_scene_reset=passed state_pixels=passed\n");
+}
+struct RecordedBanks {ComPtr<ID3D11Buffer> vertex,booleans,depth;};
+// Only this owned object's base ID3D11DeviceContext vtable is cloned. No
+// shared driver table changes, deferred Get* calls, or production API are
+// needed. Restore the original table before the retained context Release.
+class RecordedBankCapture {
+    using Set=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,UINT,UINT,ID3D11Buffer* const*);
+    using Draw=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,UINT,UINT,INT);
+    inline static RecordedBankCapture* active{};
+    ComPtr<ID3D11DeviceContext> context;
+    void*** slot;void** original;
+    std::array<void*,115> cloned{}; // Public base interface ends at FinishCommandList114.
+    RecordedBanks current;
+    static void STDMETHODCALLTYPE setVS(ID3D11DeviceContext* context,UINT first,UINT count,ID3D11Buffer* const* buffers) {
+        auto& capture=*active;
+        if(context==capture.context.Get())for(UINT i=0;i<count;++i) {
+            if(first+i==0)capture.current.vertex=buffers?buffers[i]:nullptr;
+            if(first+i==1)capture.current.booleans=buffers?buffers[i]:nullptr;
+        }
+        reinterpret_cast<Set>(capture.original[7])(context,first,count,buffers);
+    }
+    static void STDMETHODCALLTYPE setPS(ID3D11DeviceContext* context,UINT first,UINT count,ID3D11Buffer* const* buffers) {
+        auto& capture=*active;
+        if(context==capture.context.Get())for(UINT i=0;i<count;++i)if(first+i==1)capture.current.depth=buffers?buffers[i]:nullptr;
+        reinterpret_cast<Set>(capture.original[16])(context,first,count,buffers);
+    }
+    static void STDMETHODCALLTYPE draw(ID3D11DeviceContext* context,UINT count,UINT first,INT base) {
+        auto& capture=*active;if(context==capture.context.Get())capture.draws.push_back(capture.current);
+        reinterpret_cast<Draw>(capture.original[12])(context,count,first,base);
+    }
+public:
+    std::vector<RecordedBanks> draws;
+    explicit RecordedBankCapture(ID3D11DeviceContext* value):context(value),slot(reinterpret_cast<void***>(value)),original(value?*slot:nullptr) {
+        need(context&&context->GetType()==D3D11_DEVICE_CONTEXT_DEFERRED&&!active,"Mono recorded observer requires one owned deferred context");
+        std::copy_n(original,cloned.size(),cloned.begin());
+        need(cloned[7]&&cloned[16]&&cloned[12],"Mono recorded observer lost original methods");
+        cloned[7]=reinterpret_cast<void*>(&setVS);cloned[16]=reinterpret_cast<void*>(&setPS);cloned[12]=reinterpret_cast<void*>(&draw);
+        active=this;*slot=cloned.data();
+    }
+    ~RecordedBankCapture(){*slot=original;active=nullptr;}
+    RecordedBankCapture(const RecordedBankCapture&)=delete;RecordedBankCapture& operator=(const RecordedBankCapture&)=delete;
+};
+void recordedBankBytes(Fixture& f,const RecordedBanks& banks,const MonoConstants& vertex,const MonoMeshDraw& draw) {
+    need(banks.vertex&&banks.booleans&&banks.depth,"Recorded mono draw omitted an actual bank binding");
+    depthBytes(f.backend,banks.depth.Get(),draw);
+    for(const auto& buffer:{banks.vertex,banks.booleans}) {
+        ComPtr<ID3D11Device> owner;D3D11_BUFFER_DESC desc{};buffer->GetDevice(&owner);buffer->GetDesc(&desc);
+        const bool immutable=buffer.Get()==banks.booleans.Get();
+        need(owner.Get()==NativeIm2DProbe::device(f.backend)&&desc.ByteWidth==(immutable?16u:UINT(sizeof(vertex)))&&
+             desc.Usage==(immutable?D3D11_USAGE_IMMUTABLE:D3D11_USAGE_DEFAULT)&&desc.BindFlags==D3D11_BIND_CONSTANT_BUFFER&&
+             !desc.CPUAccessFlags&&!desc.MiscFlags&&!desc.StructureByteStride,"Recorded mono bank descriptor/device changed");
+        const auto bytes=actualBufferBytes(owner.Get(),f.context,buffer.Get());
+        if(immutable) {
+            const std::array<uint32_t,4> zero{};
+            need(bytes.size()==sizeof(zero)&&!std::memcmp(bytes.data(),zero.data(),sizeof(zero)),"Recorded mono immutable Boolean GPU bytes changed");
+        } else need(bytes.size()==sizeof(vertex)&&!std::memcmp(bytes.data(),vertex.data(),sizeof(vertex)),"Recorded mono private writable VS GPU bytes changed");
+    }
+}
+void runRecordedConstantReuse(const std::vector<uint8_t>& image,bool hardware) {
+    Fixture f(image,hardware,false);installD3DCallStats(f.context,NativeIm2DProbe::device(f.backend));
+    const auto firstMesh=f.backend.uploadMonoMesh(quad(),strip),secondMesh=f.backend.uploadMonoMesh(quad(.25f),strip);
+    need(firstMesh!=secondMesh,"Recorded mono reuse needs distinct mesh owners");f.bind(firstMesh);f.draw.multisampleMask=0xFFFF;
+    std::unique_ptr<EffectRecord> effect,pool;
+    for(const auto& id:originalEffectIdentities())if(id.originalAddress==0x8211F480||id.originalAddress==0x820D5730) {
+        auto record=std::make_unique<EffectRecord>(id.originalAddress,std::span<const uint8_t>(image).subspan(id.originalAddress-0x82000000,id.recordBytes));
+        if(id.originalAddress==0x8211F480)effect=std::move(record);else pool=std::move(record);
+    }
+    need(effect&&pool,"Recorded constant reuse lost original mono/pool metadata");
+    std::vector<std::string_view> names;for(const auto& p:pool->parameters(true))names.push_back(p.name);
+    const EffectReflection reflection(*effect,true,names);need(!reflection.passes.empty(),"Recorded constant reuse lost original mono pass");
+    NativeRecordingMask mask{};
+    for(size_t stage=0;stage<2;++stage)for(size_t byte=0;byte<8;++byte)mask[8*stage+byte]=uint8_t(reflection.passes.front().masks[stage]>>(56-8*byte));
+    need(mask[0]&0x80,"Recorded constant reuse lost original projection inheritance");
+    const auto recording=f.backend.createRecordingContext();const auto live=f.backend.createMonoReplayConstants();
+    const auto begin=[&]{auto p=f.backend.allocateRecordingPayload(recording,0x3000);f.backend.beginRecordingPayload(p,4,mask,mask);return p;};
+    const auto record=[&](const std::shared_ptr<NativeMonoMesh>& mesh,const MonoConstants& material,const MonoMeshDraw& draw,uint64_t creates) {
+        auto payload=begin();const auto beforeState=snapshot(f.context);
+        const auto beforeColor=f.backend.readbackTarget(f.color),beforeDepth=f.backend.readbackDepthTarget(f.depth);
+        RecordedBanks observed;
+        {
+            RecordedBankCapture capture(NativeIm2DProbe::deferred(f.backend,payload));const auto before=gD3DDeviceCounts[3];
+            f.backend.recordMonoMesh(payload,f.color,f.depth,mesh,*f.vertex,*f.pixel,material,{},live,draw);
+            need(gD3DDeviceCounts[3]==before+creates,"Recorded mono shared banks made the wrong CreateBuffer count");
+            need(capture.draws.size()==1,"Recorded mono observer missed one actual indexed draw");observed=capture.draws.front();
+        }
+        f.backend.finishRecordingPayload(payload);
+        const auto receipt=f.backend.recordingPayloadReceipt(payload);
+        need(receipt.recordedDraws==1&&receipt.ownedDataBytes==3960&&snapshot(f.context)==beforeState&&
+             f.backend.readbackTarget(f.color)==beforeColor&&sameDepthStencil(f.backend.readbackDepthTarget(f.depth),beforeDepth),
+             "Recorded mono bank sharing changed snapshots, payload bytes or immediate state/pixels");
+        recordedBankBytes(f,observed,material,draw);return std::pair{payload,observed};
+    };
+    auto firstMaterial=f.constants,secondMaterial=f.constants;firstMaterial[200]={.125f,.25f,.375f,.5f};secondMaterial[200]={.75f,.625f,.5f,.375f};
+    // Fixture commit already owns zeroBooleans; empty global depth cache means
+    // the first record creates private VS0+depth, the second only private VS0.
+    auto [first,firstBanks]=record(firstMesh,firstMaterial,f.draw,2);
+    auto [second,secondBanks]=record(secondMesh,secondMaterial,f.draw,1);
+    need(firstBanks.depth.Get()==secondBanks.depth.Get()&&firstBanks.booleans.Get()==secondBanks.booleans.Get(),
+         "Distinct recorded mono meshes did not share actual immutable depth/Boolean banks");
+    need(firstBanks.vertex.Get()!=secondBanks.vertex.Get()&&firstBanks.vertex.Get()!=firstBanks.depth.Get()&&
+         secondBanks.vertex.Get()!=secondBanks.booleans.Get(),"Recorded mono writable VS storage was shared with a sibling/immutable bank");
+    auto negativeZero=f.draw;negativeZero.depthBiasBits=0x80000000;
+    auto [negative,negativeBanks]=record(firstMesh,firstMaterial,negativeZero,2);
+    need(negativeBanks.depth.Get()!=firstBanks.depth.Get()&&negativeBanks.booleans.Get()==firstBanks.booleans.Get(),
+         "Recorded mono collapsed signed depth zero or replaced the immutable Boolean bank");
+    f.backend.updateMonoReplayConstants(live,f.constants);
+    const auto execute=[&](const std::shared_ptr<NativeRecordingPayload>& payload,float z,bool halfWidth=false) {
+        f.clear();const auto state=snapshot(f.context);f.backend.executeRecordingPayload(payload);f.backend.waitIdle();
+        need(snapshot(f.context)==state,"Shared recorded mono banks changed immediate restoration");
+        f.pixels([&](UINT x,UINT y){return interior(x,y)&&(!halfWidth||(x>=4&&x<12))?1-z:0.0f;});
+    };
+    execute(first,.5f);execute(second,.25f);recordedBankBytes(f,firstBanks,firstMaterial,f.draw);recordedBankBytes(f,secondBanks,secondMaterial,f.draw);
+    auto inherited=f.constants;inherited[0][0]=.5f;f.backend.updateMonoReplayConstants(live,inherited);execute(first,.5f,true);
+    auto changedFirst=firstMaterial;changedFirst[0][0]=.5f;
+    recordedBankBytes(f,firstBanks,changedFirst,f.draw);recordedBankBytes(f,secondBanks,secondMaterial,f.draw);
+    execute(second,.25f,true);auto changedSecond=secondMaterial;changedSecond[0][0]=.5f;
+    recordedBankBytes(f,secondBanks,changedSecond,f.draw);recordedBankBytes(f,firstBanks,changedFirst,f.draw);
+    // Remove every observer depth reference before proving retained ownership.
+    // This fresh fixture has never populated a mesh-local direct depth cache.
+    auto* retainedDepth=firstBanks.depth.Get();secondBanks.depth.Reset();
+    NativeIm2DProbe::resetSceneCache(f.backend);
+    need(firstBanks.depth.Detach()->Release()>0,"Sealed mono payloads did not retain the cleared global depth bank");
+    depthBytes(f.backend,retainedDepth,f.draw);execute(first,.5f,true);execute(second,.25f,true);
+    auto [replacement,replacementBanks]=record(firstMesh,firstMaterial,f.draw,2);
+    need(replacementBanks.depth.Get()!=retainedDepth,"New recorded mono draw reused the cleared global owner");
+    depthBytes(f.backend,retainedDepth,f.draw);
+    auto empty=begin();const auto recorded=f.backend.recordingDrawCount();
+    {
+        RecordedBankCapture capture(NativeIm2DProbe::deferred(f.backend,empty));
+        for(size_t lane=0;lane<4;++lane) {
+            MonoBooleans invalid{};invalid[lane]=1;const auto before=gD3DDeviceCounts[3];
+            f.rejected([&]{f.backend.recordMonoMesh(empty,f.color,f.depth,firstMesh,*f.vertex,*f.pixel,firstMaterial,invalid,live,f.draw);},"static opaque shader pair");
+            const auto receipt=f.backend.recordingPayloadReceipt(empty);
+            need(gD3DDeviceCounts[3]==before&&!receipt.recordedDraws&&!receipt.ownedDataBytes&&
+                 f.backend.recordingDrawCount()==recorded&&capture.draws.empty(),"Invalid recorded Boolean bank mutated allocation, commands or payload accounting");
+        }
+    }
+    // Rejected banks leave the empty original session active. Discard it
+    // before replaying a sealed sibling, preserving the execution guard.
+    f.backend.releaseRecordingPayload(empty);
+    execute(first,.5f,true);depthBytes(f.backend,retainedDepth,f.draw);
+    f.backend.releaseRecordingPayload(first);f.backend.releaseRecordingPayload(second);
+    f.backend.releaseRecordingPayload(negative);f.backend.releaseRecordingPayload(replacement);
+    f.backend.releaseMonoReplayConstants(live);f.backend.releaseRecordingContext(recording);
+    std::printf("AUDIT_GPU_MONO_RECORDED_BANK_REUSE meshes=2 immutable_depth_boolean_bytes=16_16 first_create=2 second_create=1 actual_bound_gpu_bytes=passed writable_vs_distinct=passed original_inheritance=passed signed_zero=passed retained_payload_after_scene_reset=passed invalid_bank_no_mutation=passed\n");
+}
 void runRecording(const std::vector<uint8_t>& image,bool hardware) {
     Fixture f(image,hardware);auto mesh=f.backend.uploadMonoMesh(quad(),strip);f.bind(mesh);
     // Whole original82740420 ->82701448 forces the application's maskFFFF,
@@ -386,6 +606,7 @@ void runRecording(const std::vector<uint8_t>& image,bool hardware) {
 // forced-key collisions must miss, eviction stays bounded and drops only the
 // cache's strong reference.
 void runGenericMeshCacheChecks() {
+    runOwnedMeshCacheChecks(need);
     struct Probe {
         int id{};
     };
@@ -859,6 +1080,6 @@ void run(const std::vector<uint8_t>& image,bool hardware) {
 int main(int argc,char** argv)try {
     need(argc==2||(argc==3&&std::string(argv[2])=="--hardware"),"Supply analysis/simpsons.pe and optional --hardware");
     std::ifstream input(argv[1],std::ios::binary);const std::vector<uint8_t> image((std::istreambuf_iterator<char>(input)),{});
-    need(image.size()==15466496,"Original flat image size differs");run(image,argc==3);runRecording(image,argc==3);
+    need(image.size()==15466496,"Original flat image size differs");runDepthConstantReuse(image,argc==3);runRecordedConstantReuse(image,argc==3);run(image,argc==3);runRecording(image,argc==3);
     requireMeshGpuRetirements([](bool value,const char* message){need(value,message);});return 0;
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL mono mesh after %zu checks: %s\n",checks,e.what());return 1;}

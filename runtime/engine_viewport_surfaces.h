@@ -17,9 +17,13 @@ public:
     void release(PPCContext&,uint8_t*);
     void publishDepth(PPCContext&,uint8_t*);
     void retireDepth(PPCContext&,uint8_t*);
+    // Existing 82751750 boundary: retain every original guard, prepare main post
+    // Output only afterward, then copy routed depth once and resume at 82751754.
     void copyDepth(PPCContext&,uint8_t*);
-    // Row-zero slots0/2/3/4/6/7 retain the original texture headers/allocation, with
-    // separate native snapshots from the auxiliary render attachments.
+    // Row-zero slots0/1/2/3/4/6/7 retain original headers/allocation and lifetime.
+    // Full/half/quarter post snapshots and scaled auxiliary attachments use Output
+    // in temporal modes; 256/64/query resources stay Fixed. History slot1 persists.
+    // Snapshots remain separate from their auxiliary render attachments.
     std::shared_ptr<Graphics::RenderTarget> colorTexture(uint32_t header) const;
     void copyColor(PPCContext&,uint8_t*,uint32_t site);
     // Used by the checked original distortion phase; source must be selected.

@@ -1,0 +1,154 @@
+{
+  "repository": "https://github.com/NVIDIA/DLSS",
+  "tag": "v310.9.1",
+  "commit": "374959484e79a640feaba44c93ac8cfb0a03f5b5",
+  "files": {
+    "LICENSE.txt": {
+      "bytes": 26620,
+      "git_blob": "80756566d773cdac55179c5ae16c4495df7f73b5",
+      "sha256": "d4216e39ebef5f9b50a6712ebb37beeb5379862a67733a9999c651f21592aaf0"
+    },
+    "README.md": {
+      "bytes": 690,
+      "git_blob": "53eabf65f9013d58bd280b7ffba9a41b37522905",
+      "sha256": "323a99117be4a1b6595ab0d721e9c613750c278366615b57168b3ea9967afac5"
+    },
+    "doc/DLSS_Programming_Guide_Release.pdf": {
+      "bytes": 6207258,
+      "git_blob": "2a7895c2692e6515900f6499d5228dd74987f81a",
+      "sha256": "dca4d2e68ccedc04a431803595867a893474b1cce033e65a41e9eab9f6b436f8"
+    },
+    "include/nvsdk_ngx.h": {
+      "bytes": 40289,
+      "git_blob": "ae6b49174049eed69cc377b2fffd3c901651f764",
+      "sha256": "dc38e7467cf415379c9d12ae1b6e4a494c453ed92720fb53e92aecb523e7b848"
+    },
+    "include/nvsdk_ngx_defs.h": {
+      "bytes": 44313,
+      "git_blob": "807fa2475e90214f6846b9b4840be92e7bd66b5b",
+      "sha256": "ea23f33497cd274860d1c25a97644fce807dcb0037c594547203343103fad03e"
+    },
+    "include/nvsdk_ngx_defs_dlssd.h": {
+      "bytes": 14693,
+      "git_blob": "8b73e3f347fab4f315443869ad57eeeb61168d7f",
+      "sha256": "2e97fe1595b1334f71b51724f2cb67496e8c296a7a2eec5606da53055882e716"
+    },
+    "include/nvsdk_ngx_defs_dlssg.h": {
+      "bytes": 22885,
+      "git_blob": "3337ad5e8b2221bc914069b4171c2bc6461e2eed",
+      "sha256": "98ec3a6faa5aa250828c174bf8f3491aafac693dfe57cc798049c8918597fc60"
+    },
+    "include/nvsdk_ngx_defs_vk.h": {
+      "bytes": 3196,
+      "git_blob": "f02503e1ce90e5320053ca10883883ae71100136",
+      "sha256": "0a24d0861ace7d6b9362a67b7f08bea1b33ea123c5ce730b19133de8a891d031"
+    },
+    "include/nvsdk_ngx_helpers.h": {
+      "bytes": 5317,
+      "git_blob": "e6a0f2581e1586240821afa7523a65a75654e847",
+      "sha256": "5bcbadfe7478b802cf6d3aca4dc5ddd7d0889b99726e69c63f9e9bd555f44471"
+    },
+    "include/nvsdk_ngx_helpers_cuda.h": {
+      "bytes": 3593,
+      "git_blob": "251ba9d5fcf0800bbc3fbb5e8870c61739c6d98a",
+      "sha256": "f2851a76107bdf4fbcb7b261f3c35573c312d8ecb4bc18fb02d9e2cec7705042"
+    },
+    "include/nvsdk_ngx_helpers_d3d.h": {
+      "bytes": 31976,
+      "git_blob": "664f99d95d3f8375304dc558ec601a66635ade7b",
+      "sha256": "ec75224f36ed6580baaf250fa83620405ad81a1d98c2c436654a0c9cf6a6b8ba"
+    },
+    "include/nvsdk_ngx_helpers_dlssd.h": {
+      "bytes": 732,
+      "git_blob": "479c949ade46e1fcbef05f5e49ba8f5e6b359a03",
+      "sha256": "a25fdda925b479dfe869593aeba311ef08793da54e0391f2fe2fe756cbef5532"
+    },
+    "include/nvsdk_ngx_helpers_dlssd_cuda.h": {
+      "bytes": 29175,
+      "git_blob": "cebba04f16e581bafe3d94d46b865f9b55e37147",
+      "sha256": "7e35cde214d905346a487b9a28c05d35e1c55b480e237fe3de69580a7e332730"
+    },
+    "include/nvsdk_ngx_helpers_dlssd_d3d.h": {
+      "bytes": 72668,
+      "git_blob": "4e9c30f036be43bfe51c91e8a5d6a24bc218bfeb",
+      "sha256": "6df9d02c6f47feee3afc8d12340a9f554a7ddce4ddacb1b6a13a42b26c2c6293"
+    },
+    "include/nvsdk_ngx_helpers_dlssd_vk.h": {
+      "bytes": 38337,
+      "git_blob": "2fda1bbb62ba1b5b60010cf3949cef6fad61d2a2",
+      "sha256": "11df8fbda532a97fe867c8ef2b40058b49b7898183710f3468e55b1eedb8f40b"
+    },
+    "include/nvsdk_ngx_helpers_dlssg.h": {
+      "bytes": 732,
+      "git_blob": "45d7815ae1c0b79aa2fff88d543e6c5e22ebb8cf",
+      "sha256": "6881d21419c40c78ec948b326902ece09fc112b0223144d51c4905f3fced7a1f"
+    },
+    "include/nvsdk_ngx_helpers_dlssg_d3d.h": {
+      "bytes": 17445,
+      "git_blob": "351245357a197aefb8c16189703ccc7656ded261",
+      "sha256": "6335ebcb95de39a361e87fe0257d6ce0723e5d8deaa15db3b35afacf2b3f4220"
+    },
+    "include/nvsdk_ngx_helpers_dlssg_vk.h": {
+      "bytes": 17077,
+      "git_blob": "9db4ff7de4209495adceb56ab1c759d868200418",
+      "sha256": "b371d90b9f4372b9a415e68a0afbdc2f31b7b552e219a9637d848749bc965316"
+    },
+    "include/nvsdk_ngx_helpers_vk.h": {
+      "bytes": 19720,
+      "git_blob": "664ac5302ea62cb57cd03a3779cbe2fc0a418397",
+      "sha256": "c192bff72138f12f770db48e12c1d8f712dfc81ea0e8e055ebb27d8dd1b31623"
+    },
+    "include/nvsdk_ngx_loader.h": {
+      "bytes": 13252,
+      "git_blob": "13756a449673327b08dfc9e6715937636de4ca48",
+      "sha256": "abdf5f66a692620538357d29fdf78e3e2a677ee8140b7a638962ecb766585e75"
+    },
+    "include/nvsdk_ngx_params.h": {
+      "bytes": 7744,
+      "git_blob": "014d9f4adec600ea3677947b7f98258da9f9c7fc",
+      "sha256": "943bc8cc5cdae03b6303016fbad3183636f2335ae27a2d18776798c3b4efabbc"
+    },
+    "include/nvsdk_ngx_params_dlssd.h": {
+      "bytes": 1199,
+      "git_blob": "6950ed305ba4d2eba1a2eab3c6463fec9ce10e6d",
+      "sha256": "d41e3ba8f1d72583b55273092c99bf426dc4a0d46de827229e25d5b1325a370e"
+    },
+    "include/nvsdk_ngx_params_dlssg.h": {
+      "bytes": 6137,
+      "git_blob": "69c6715e28456380a92e658a482d243f6c96b43e",
+      "sha256": "c24fa5aa68ffa2808c828b75cfa32843f1606f80a145f84055ac450d7e6c74ad"
+    },
+    "include/nvsdk_ngx_standalone_common.h": {
+      "bytes": 12985,
+      "git_blob": "e765305ff16f92714269410a76c2bac3ffdb76f8",
+      "sha256": "38413c3338b0aea0202c07da95d426bfee7080a42913823fa2d9dd585b087b53"
+    },
+    "include/nvsdk_ngx_standalone_cuda.h": {
+      "bytes": 10906,
+      "git_blob": "98c248bbac9ec263564ae5fe7735db4a6afac1c5",
+      "sha256": "b23436ed5040051ac8e81554c9af080f2463c941435bbc3b82222e5431a09499"
+    },
+    "include/nvsdk_ngx_vk.h": {
+      "bytes": 38382,
+      "git_blob": "70d895409132b68eff0d6027fb1ea2552d8c749b",
+      "sha256": "2d364ce7132881eb669e9498fd570d74cba563b1fbebc82c235f8e1ad2dd8b6d"
+    },
+    "lib/Windows_x86_64/rel/nvngx_dlss.dll": {
+      "bytes": 58956912,
+      "git_blob": "875981984f56e71b4fde6605484ef767dadf9910",
+      "sha256": "3975567b8943c53acce397f2b72380092f84f162d00b0d2c7d08a1025c563983"
+    },
+    "lib/Windows_x86_64/x64/nvsdk_ngx_d.lib": {
+      "bytes": 4090730,
+      "git_blob": "6ddf9dbcb4961d2948982177ab7db73fce7a4d40",
+      "sha256": "4b6cecad7f1906571c94010241f650e4a5457e64fad49ddaccb82de79f6c2999"
+    },
+    "lib/Windows_x86_64/x64/nvsdk_ngx_s.lib": {
+      "bytes": 3782558,
+      "git_blob": "fcd9adc26d111e7013be555d27a4cf60e5753eb5",
+      "sha256": "4e5d355086d2bc11e1a0842457d2519ea528ee1f3e112c45679a84960c07dff3"
+    }
+  },
+  "license": "LICENSE.txt",
+  "download_execution": false
+}

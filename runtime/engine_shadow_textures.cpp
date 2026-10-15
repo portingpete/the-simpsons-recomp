@@ -3,10 +3,12 @@
 #include "runtime.h"
 #include "renderer/native_backend.h"
 #include "renderer/engine_state.h"
+#include "guest_read_memo.h"
 #include <array>
 #include <cstdio>
 #include <cstring>
 #include <unordered_map>
+#include <vector>
 
 namespace {
 using namespace Simpsons;
@@ -43,6 +45,30 @@ struct EngineShadowTextures::State {
     };
     std::array<Camera,2> cameras;
     uint64_t scissors{},copies{};
+    // ownsCamera() runs for every shadow draw (about 700 calls per frame in Medal of
+    // Homer) and re-walked the same guest structures each time. The walk is a pure
+    // function of the guest words it reads, the guest page permissions it checks and
+    // the host records/leases. Each slot keeps the exact words of its last successful
+    // walk: when every word still holds its value, no permission changed (epoch) and the
+    // records have the same version, the walk would repeat its result. Page write-watch
+    // cannot express this: the game rewrites other fields on these pages between draws.
+    // The attachment leases are still compared through the driver on every call.
+    uint64_t version=0; // Any record or camera change.
+    // `host` is where the word lives; an unchanged permission epoch keeps it mapped.
+    struct Word {const uint8_t* host;uint32_t value;bool byte;};
+    struct CameraProof {std::vector<Word> words;uint64_t version=~0ull,epoch=0;};
+    mutable std::array<CameraProof,2> cameraProofs;
+    mutable std::vector<Word>* recording=nullptr; // Set while a camera walk records its reads.
+    uint32_t load32(uint32_t address) const {
+        const uint32_t value=PPCLoadU32(runtime.base,address);
+        if(recording)recording->push_back({runtime.probe(address,4,false),value,false});
+        return value;
+    }
+    uint8_t load8(uint32_t address) const {
+        const uint8_t value=PPCLoadU8(runtime.base,address);
+        if(recording)recording->push_back({runtime.probe(address,1,false),value,true});
+        return value;
+    }
     State(Runtime& rt,Graphics::NativeBackend& graphics,uint32_t c):
         runtime(rt),backend(graphics),thread(GetCurrentThreadId()),context(c) {}
     void require(uint8_t* base) const {
@@ -58,30 +84,30 @@ struct EngineShadowTextures::State {
         need(owner && !(owner&3) && uint64_t(owner)+0x6C0<=0x100000000ull,
             "Invalid original shadows owner address");
         runtime.pointer(owner,0x6C0,true);
-        need(PPC_LOAD_U32(owner)==0x8214E518,"Native shadow texture lost its original typed owner");
+        need(load32(owner)==0x8214E518,"Native shadow texture lost its original typed owner");
     }
     Camera cameraSnapshot(uint8_t* base,uint32_t owner,uint32_t slot) const {
-        typed(base,owner);const auto c=PPC_LOAD_U32(owner+0x5B4+4*slot);
+        typed(base,owner);const auto c=load32(owner+0x5B4+4*slot);
         need(c && !(c&3),"Original shadows camera is absent or unaligned");
         runtime.pointer(c,0x8C,false);
-        need(PPC_LOAD_U32(c)==0x04000000 && PPC_LOAD_U32(c+0x10)==0x823D2940 &&
-             PPC_LOAD_U32(c+0x14)==2 && PPC_LOAD_U32(c+0x18)==0x823D1100 && PPC_LOAD_U32(c+0x1C)==0x823D1160,
+        need(load32(c)==0x04000000 && load32(c+0x10)==0x823D2940 &&
+             load32(c+0x14)==2 && load32(c+0x18)==0x823D1100 && load32(c+0x1C)==0x823D1160,
              "Original shadows camera type/projection/callbacks changed");
-        const auto f=PPC_LOAD_U32(c+4),color=PPC_LOAD_U32(c+0x60),depth=PPC_LOAD_U32(c+0x64);
+        const auto f=load32(c+4),color=load32(c+0x60),depth=load32(c+0x64);
         need(f && color && depth && color!=depth,"Original shadows camera lost its frame/attachment pair");
         runtime.pointer(f,0xA4,false);runtime.pointer(color,0x34,false);runtime.pointer(depth,0x34,false);
-        need(!PPC_LOAD_U32(f+4) && !PPC_LOAD_U32(f+0x98) && !PPC_LOAD_U32(f+0x9C) && PPC_LOAD_U32(f+0xA0)==f &&
-             PPC_LOAD_U32(f+0x90)==c+8 && PPC_LOAD_U32(f+0x94)==c+8 && PPC_LOAD_U32(c+8)==f+0x90 && PPC_LOAD_U32(c+0xC)==f+0x90,
+        need(!load32(f+4) && !load32(f+0x98) && !load32(f+0x9C) && load32(f+0xA0)==f &&
+             load32(f+0x90)==c+8 && load32(f+0x94)==c+8 && load32(c+8)==f+0x90 && load32(c+0xC)==f+0x90,
              "Original shadows frame/camera attachment changed");
-        const auto extension=PPC_LOAD_U32(0x82E3DC94);
-        need(extension>=0x34 && !(extension&3) && uint64_t(extension)+0x20<=PPC_LOAD_U32(0x82CD1E28),
+        const auto extension=load32(0x82E3DC94);
+        need(extension>=0x34 && !(extension&3) && uint64_t(extension)+0x20<=load32(0x82CD1E28),
              "Original shadows raster plugin bounds changed");
         for(const auto r:{color,depth}) {
             runtime.pointer(r,extension+0x20,false);
-            need(PPC_LOAD_U32(r)==r && PPC_LOAD_U32(r+0xC)==1024 && PPC_LOAD_U32(r+0x10)==1024 &&
-                 PPC_LOAD_U8(r+0x20)==(r==color?5:1),"Original shadows root raster profile changed");
+            need(load32(r)==r && load32(r+0xC)==1024 && load32(r+0x10)==1024 &&
+                 load8(r+0x20)==(r==color?5:1),"Original shadows root raster profile changed");
         }
-        const auto colorId=PPC_LOAD_U32(color+extension),depthId=PPC_LOAD_U32(depth+extension);
+        const auto colorId=load32(color+extension),depthId=load32(depth+extension);
         bool alpha{};const auto colorLease=runtime.engineDriver->color(colorId,alpha);const auto depthLease=runtime.engineDriver->depth(depthId);
         need(colorLease && !alpha && depthLease && colorLease->width==1024 && colorLease->height==1024 &&
              depthLease->pixelWidth()==1024 && depthLease->pixelHeight()==1024,"Original shadows camera native backing differs");
@@ -94,7 +120,7 @@ struct EngineShadowTextures::State {
                 id,currentContext?uint32_t(currentContext->lr):0);throw Failure(why);
         }
         auto& record=it->second;typed(base,record.view.owner);
-        need(PPC_LOAD_U32(record.view.owner+record.view.field)==id && !runtime.pageAccess[id>>12].load(),
+        need(load32(record.view.owner+record.view.field)==id && !runtime.pageAccess[id>>12].load(),
             "Native shadow texture identity/publication differs");
         return record;
     }
@@ -118,7 +144,7 @@ EngineShadowTextures::~EngineShadowTextures() {
     if(!state->records.empty()) std::fprintf(stderr,"[NATIVE SHADOW TEXTURE] terminal release of %zu native owners; original shadows cleanup incomplete\n",state->records.size());
 }
 void EngineShadowTextures::create(PPCContext& ctx,uint8_t* base) {
-    auto& s=*state;s.require(base);
+    auto& s=*state;s.require(base);++s.version;
     const uint32_t caller=uint32_t(ctx.lr),owner=ctx.r31.u32;
     const uint32_t field=caller==0x82706610?0xF0:(caller==0x8270663C?0xF4:(caller==0x82706670?0xFC:0));
     if(!field) {
@@ -152,7 +178,8 @@ void EngineShadowTextures::create(PPCContext& ctx,uint8_t* base) {
     if(border) need(PPC_LOAD_U32(owner+0xF8)==PPC_LOAD_U32(0x82D0CF84),"Original shadows borrowed depth-copy role differs");
     State::Record record{{0,owner,field,extent,extent,format,0,Phase::Allocated},{},{}};
     if(border) record.texture=s.backend.createWritableTexture(extent,extent,Graphics::TextureFormat::RGBA8);
-    else record.depth=s.backend.createDepthTarget(extent,extent);
+    // Copied shadow maps match their cameras' shadow-quality storage.
+    else record.depth=s.backend.createDepthTarget(extent,extent,extent==1024?Graphics::TargetScale::Shadow:Graphics::TargetScale::Fixed);
     const uint32_t id=s.runtime.engineDriver->allocateTargetIdentity();record.view.identity=id;
     need(s.records.emplace(id,std::move(record)).second,"Native shadow texture identity collision");
     ctx.r3.u64=id; // The original caller publishes O+F0/F4/FC itself.
@@ -160,7 +187,7 @@ void EngineShadowTextures::create(PPCContext& ctx,uint8_t* base) {
         owner,field,id,extent,extent,format);
 }
 void EngineShadowTextures::lock(PPCContext& ctx,uint8_t* base) {
-    auto& s=*state;s.require(base);auto& r=s.find(base,ctx.r3.u32);
+    auto& s=*state;s.require(base);++s.version;auto& r=s.find(base,ctx.r3.u32);
     need(uint32_t(ctx.lr)==0x8270668C && ctx.r31.u32==r.view.owner && !ctx.r4.u32 &&
          !ctx.r6.u32 && !ctx.r7.u32 && uint64_t(ctx.r1.u32)+0x50==ctx.r5.u32,
          "Unsupported original shadow texture lock ABI");
@@ -183,7 +210,7 @@ void EngineShadowTextures::lock(PPCContext& ctx,uint8_t* base) {
         r.view.identity,staging,stagingBytes,pitch);
 }
 void EngineShadowTextures::unlock(PPCContext& ctx,uint8_t* base) {
-    auto& s=*state;s.require(base);auto& r=s.find(base,ctx.r3.u32);
+    auto& s=*state;s.require(base);++s.version;auto& r=s.find(base,ctx.r3.u32);
     need(uint32_t(ctx.lr)==0x827066F8 && ctx.r31.u32==r.view.owner && !ctx.r4.u32 &&
          r.view.field==0xFC && r.view.phase==Phase::Locked && r.view.staging && bool(r.texture),
          "Unsupported original shadow texture unlock state/ABI");
@@ -203,7 +230,7 @@ void EngineShadowTextures::unlock(PPCContext& ctx,uint8_t* base) {
     std::fprintf(stderr,"[NATIVE SHADOW TEXTURE] uploaded id=%08X original32x32 border:124 white/900 black pixels;8192 CPU bytes consumed,4096 GPU bytes\n",r.view.identity);
 }
 void EngineShadowTextures::release(PPCContext& ctx,uint8_t* base) {
-    auto& s=*state;s.require(base);const uint32_t id=ctx.r3.u32;auto& r=s.find(base,id);
+    auto& s=*state;s.require(base);++s.version;const uint32_t id=ctx.r3.u32;auto& r=s.find(base,id);
     const uint32_t caller=r.view.field==0xF0?0x827057AC:(r.view.field==0xF4?0x827057C0:0x827057D4);
     need(uint32_t(ctx.lr)==caller && ctx.r31.u32==r.view.owner && r.view.phase!=Phase::Locked && !r.view.staging,
          "Native shadow texture release lacks its original unlocked owner");
@@ -234,6 +261,29 @@ bool EngineShadowTextures::ownsCamera(uint32_t camera) const {
     if(!camera || s.records.size()!=3)return false;
     for(uint32_t slot=0;slot<2;++slot) {
         const auto& before=s.cameras[slot];if(before.camera!=camera)continue;
+        auto& proof=s.cameraProofs[slot];
+        if(!GuestReadMemo::disabled() && proof.version==s.version &&
+           proof.epoch==guestPermissionEpoch.load(std::memory_order_acquire)) {
+            bool same=true;
+            for(const auto& word:proof.words) {
+                uint32_t value=*word.host;
+                if(!word.byte){std::memcpy(&value,word.host,4);value=__builtin_bswap32(value);}
+                if(value!=word.value){same=false;break;}
+            }
+            bool alpha{};
+            if(same && !before.colorLease.expired() && !before.depthLease.expired() &&
+               s.runtime.engineDriver->color(before.colorId,alpha)==before.colorLease.lock() && !alpha &&
+               s.runtime.engineDriver->depth(before.depthId)==before.depthLease.lock() && !GuestReadMemo::verify())
+                return true;
+            // Diagnostic (SIMPSONS_WATCH_VERIFY=1) or a changed word: the full walk decides.
+        }
+        struct Recording {
+            const State& s;
+            Recording(const State& owner,std::vector<State::Word>& words):s(owner){words.clear();s.recording=&words;}
+            ~Recording(){s.recording=nullptr;}
+        } recording{s,proof.words};
+        proof.version=~0ull;
+        const uint64_t epoch=guestPermissionEpoch.load(std::memory_order_acquire);
         for(const auto& [id,record]:s.records) {
             s.find(base,id);need(record.view.owner==before.owner && record.view.phase!=Phase::Locked,
                 "Original shadows camera has an incomplete texture owner");
@@ -243,6 +293,7 @@ bool EngineShadowTextures::ownsCamera(uint32_t camera) const {
              now.colorId==before.colorId && now.depthId==before.depthId && !before.colorLease.expired() && !before.depthLease.expired() &&
              now.colorLease.lock()==before.colorLease.lock() && now.depthLease.lock()==before.depthLease.lock(),
              "Original shadows camera or native attachment generation changed");
+        proof.version=s.version;proof.epoch=epoch;
         return true;
     }
     return false;
@@ -312,6 +363,7 @@ void EngineShadowTextures::copyDepth(PPCContext& c,uint8_t* base) {
     s.backend.copyDepth(depth,destination.depth);
     // Ordinary SDK completion824560CC/824562E0 returns zero. Its deferred
     // console resource lists are replaced by the backend's owning receipt.
+    if(destination.view.phase!=Phase::Uploaded)++s.version;
     destination.view.phase=Phase::Uploaded;++s.copies;c.r3.u64=0;c.lr=0x82704C30;
     if(s.copies<=8)std::fprintf(stderr,"[NATIVE SHADOW DEPTH COPY] owner=%08X camera=%08X source=%08X destination=%08X count=%llu; exact1024 depth/stencil transfer submitted, no clear/draw\n",
          owner,camera,binding.depthIdentity,v.identity,static_cast<unsigned long long>(s.copies));
