@@ -56,6 +56,7 @@ void multitonePixels() {
         // owns different gate registers. Test those comparisons at their edges.
         auto controls=c;controls[46][0]=c[47][3]>=.5f?1.f:0.f;
         controls[47][0]=c[47][2]>.5f?1.f:0.f;
+        // pixelExpected applies the PS palette snap to uv1 (paletteSnap).
         const Probe packed={p[0],p[1],p[2],p[3],p[5]};
         return pixelExpected(packed,controls,maps,&sampled,true);
     };
@@ -120,6 +121,13 @@ void multitonePixels() {
     for(float u:{-2.125f,0.f,.999f,3.625f})for(float v:{-1.375f,.25f,.75f,2.25f}) {
         auto p=input;p[0][2]=u;p[0][3]=v;
         draw(p,constants,grids,"multitone secondary UV wrap packing",base,noise);
+    }
+    // Palette snap bounds: half the tolerance from a grid line takes the grid
+    // code; twice the tolerance keeps the unsnapped floor/frac result.
+    for(float grid:{0.f,.5f,1.f,.703125f,-2.f})for(float side:{-1.f,1.f})for(float scale:{.5f,2.f}) {
+        const float value=grid+side*scale*std::max(std::abs(grid),1.f/64)/65536;
+        auto p=input;p[0][2]=p[0][3]=value;
+        draw(p,constants,grids,"multitone palette grid snap bounds",base,noise);
     }
     // At half-texel fractions every selected tap must independently flip final
     // alpha. Nonselected RGB lanes deliberately disagree with the selected lane.

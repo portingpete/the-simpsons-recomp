@@ -192,6 +192,24 @@ def issue(i,row,stage):
         if sop in (28,29):out+=['        p0=predicate;']
     return '\n'.join(out+['    }'])
 
+# Xenos interpolates each attribute as P0+i*(P1-P0)+j*(P2-P0), so a value all
+# three vertices share arrives exactly; host perspective interpolation can land a
+# few ulps away. The opaque rigid PSs pack a palette coordinate as
+# floor(64*frac(u)) and 32*floor(32*frac(2v)) (plus the 2v>=1 bit), which change
+# only at multiples of 1/64: a shared v=0.5 interpolated an ulp low wraps frac(2v)
+# to ~1 and changes the code on alternate rows (the Eighty Bites floor strip;
+# live meshes of this PS, dual-textured, gloss and multitone carry such values).
+# Snapping onto that grid within 2^-16 of the value restores a shared grid value
+# exactly and moves a varying one by at most that. It follows the shared prefix
+# (before struct RigidInput), so only palette PSs and includers of this file get it.
+PALETTE_COORDINATE = '''float2 rigidPaletteCoordinate(float2 value) {
+    precise float2 grid=round(value*64)/64;
+    precise float2 tolerance=max(abs(grid),1.0/64)/65536;
+    return float2(abs(value.x-grid.x)<=tolerance.x?grid.x:value.x,
+                  abs(value.y-grid.y)<=tolerance.y?grid.y:value.y);
+}'''
+
+
 def shader_source(image):
     vs,vr=record(image,PROFILES[0]);ps,pr=record(image,PROFILES[1])
     lines=['// Exact selected rigid0003FFFC: VS8200D3AC / PS8200D9E8.',
@@ -229,10 +247,12 @@ def shader_source(image):
     lines.extend(issue(i,vr[i],'VS') for i in range(8,29))
     lines+=['    RigidOutput result;result.position=output62;result.uv=output0.xy;result.characterShadow=output1;',
         '    result.worldShadow=output2;result.normal=output3.xyz;result.color=output4;return result;','}',
+        PALETTE_COORDINATE,
         'float4 PSRigid(RigidOutput input):SV_Target0 {']
     literals=struct.unpack_from('>16I',ps,912)
     for reg in range(4):lines+=['    const float4 k'+str(252+reg)+'=asfloat(uint4('+','.join('0x%08Xu'%v for v in literals[4*reg:4*reg+4])+'));']
-    lines+=['    precise float4 r0=float4(input.uv,0,0),r1=input.characterShadow,r2=input.worldShadow;',
+    # uv is the palette coordinate; slots 11/12 read it only through frac().
+    lines+=['    precise float4 r0=float4(rigidPaletteCoordinate(input.uv),0,0),r1=input.characterShadow,r2=input.worldShadow;',
         '    precise float4 r3=float4(input.normal,0),r4=input.color,r5=0,r6=0,r7=0,output0=0;',
         '    precise float ps=0;bool p0=false;']
     lines.extend(issue(i,pr[i],'PS') for i in range(10,27))

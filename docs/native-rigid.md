@@ -167,3 +167,74 @@ projection W. Zero-length normals use the audited legacy zero-product rule,
 with independent normalization and final-output probes. Unused constant lanes
 are poisoned in GPU fixtures. Other original NaN/denormal handling and exact physical-console rounding are not established
 by these native GPU tests or the offline transcription.
+
+## Multitone palette coordinates (Eighty Bites floor strip, 2026-10-15)
+
+The opaque multitone PS (VS82054F2C/PS82055710) writes a palette code into red:
+`id+32*floor(32*frac(2v))+floor(64*frac(u))` from the interpolated uv1, with the
+object id from c49.z or c40.x; the edge/AA pass inks wherever neighbouring codes
+differ. The brewery pipe in Eighty Bites carries uv1 values that every vertex of a
+triangle shares and that sit on the 1/64 palette grid (for example (0.7,0.5);
+other meshes use (0,1), (1,0) and (1,1)). Xenos interpolates an attribute as
+P0+i*(P1-P0)+j*(P2-P0), so a shared value arrives exactly. Host perspective
+interpolation (NVIDIA D3D11 and Vulkan, and WARP) can return a value an ulp below
+it: frac(2*0.49999997) is about 1, so the code jumps by 31*32 (RGB10A2 red 379 vs
+875) on alternate rows and the edge pass turned the pipe into black/red/white
+noise.
+
+`tools/analyze_rigid_shader.py` owns `rigidPaletteCoordinate` (its
+`PALETTE_COORDINATE` text), which each palette PS applies to its palette
+coordinate before any other use: a component within 2^-16 (relative to
+max(|grid value|,1/64)) of a multiple of 1/64 snaps onto it. Only that grid can
+change `floor(64*frac(u))`, `floor(32*frac(2v))` or the `2v>=1` bit, so a shared
+grid value is exact again and a varying value moves by at most the tolerance.
+Base UVs, noise UVs and every other input are untouched; the temporal (TAA)
+exports reuse the same PS bodies.
+
+## Palette-coordinate audit (2026-10-15)
+
+Every opaque palette PS packs a raw vertex coordinate that its VS passes
+through unchanged: uv0 for plain rigid (PS8200D9E8, green channel) and plain skin
+(PS8200A02C); uv1 for rigid dual-textured (8202BB44), dual-textured UV
+(820477A8), gloss (8201A6EC), multitone (82055710), normalmap (82058CBC),
+chocolate opaque (8205E5E0, via t4.w/t5.w) and skin dual (82020B9C), dual UV
+(8204E2DC), gloss (82027C18) and flipbook (82040118). Textured rigid, single-UV
+rigid, projtex, textured skin, the rigid flipbook and every alpha variant pack
+no UV palette; their other `frac()` calls are shadow-filter weights, which are
+continuous across the wrap. A triangle is at risk when one component has the
+same non-zero value on all three vertices and that value is a multiple of 1/64
+(exact zero interpolates exactly).
+
+A temporary CPU probe on the rigid and skin draw paths counted such triangles
+over 70 s wander routes in all 16 stage launchers and spr_hub:
+
+| PS | triangles drawn | at risk | stages |
+| --- | ---: | ---: | --- |
+| rigid 8200D9E8 (uv0) | 3.2 M | 29 | brt, dayofthedolphins, spr_hub |
+| dual-textured 8202BB44 | 0.78 M | 5,418 | 8 stages; one dayofthedolphins mesh has v=1 on 5,058 of 6,168 |
+| gloss 8201A6EC | 19 k | 10 | bigsuperhappy |
+| multitone 82055710 | 0.32 M | 3,094 | 7 stages including eighty_bites |
+| dual-textured UV, normalmap | 3.6 k, 115 | 0 | |
+| skin, skin dual, gloss, flipbook | 5.0 M, 41 k, 26 k, 130 | 0 | |
+| chocolate opaque, skin dual UV | not drawn on these routes | | |
+
+Counts are unique draw ranges, so repeated draws are counted once. The snap is
+applied to the four families with at-risk triangles: plain rigid
+(`analyze_rigid_shader.py`, `renderer/rigid_shader.hlsl`), dual-textured
+(`analyze_rigid_dualtextured_shader.py`, which includes rigid_shader.hlsl),
+gloss (`analyze_rigid_gloss_shader.py`) and multitone. The others are unchanged:
+the sweep found no such triangles, though dual-textured UV, normalmap, chocolate
+opaque and skin dual UV were barely or never drawn, so a wider sweep would be
+needed to rule them out.
+
+`tests/test_rigid_mesh.cpp` (`paletteInterpolation`, both renderers, WARP and
+hardware) draws a 256x144 quad with per-vertex W from 1 to 9 through the real
+plain, dual-textured, gloss and multitone VS/PS pairs with seven
+triangle-constant palette coordinates, on the recorded and the immediate path,
+and requires one exact word on every pixel. Without the snap plain rigid packed
+green 1023 where 44 was expected (v=0.5 an ulp low, upper bit lost) and
+dual-textured and gloss packed red 875 where 379 was expected, on WARP, NVIDIA
+D3D11 and Vulkan. `tests/test_rigid_shader.cpp` models the snap in
+`pixelExpected` and the gloss oracle and checks inputs at half and twice the
+tolerance around grid lines for plain and dual-textured; the multitone probe
+does the same.

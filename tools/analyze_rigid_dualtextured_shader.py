@@ -216,7 +216,8 @@ def shader_source(image):
     for i in range(5):
         values = ','.join('0x%08Xu' % v for v in LITERALS[i*4:i*4+4])
         lines.append('    const float4 k'+str(251+i)+'=asfloat(uint4('+values+'));')
-    lines += ['    precise float4 r0=float4(input.uv,0,0),r1=float4(input.uv1,0,0);',
+    # uv1 is the palette coordinate (rigidPaletteCoordinate, analyze_rigid_shader).
+    lines += ['    precise float4 r0=float4(input.uv,0,0),r1=float4(rigidPaletteCoordinate(input.uv1),0,0);',
               '    precise float4 r2=input.characterShadow,r3=input.worldShadow,r4=float4(input.normal,0);',
               '    precise float4 r5=input.color,r6=0,r7=0,output0=0;',
               '    precise float ps=0; bool p0=false;']

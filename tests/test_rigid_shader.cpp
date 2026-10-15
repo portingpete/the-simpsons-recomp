@@ -60,6 +60,13 @@ void nearValue(float actual,double expected,const char* name,size_t index,size_t
 }
 double sat(double v){return std::clamp(v,0.0,1.0);}
 double frac(double v){return v-std::floor(v);}
+// The palette PSs snap their interpolated palette coordinate onto the 1/64
+// grid within 2^-16 of it (rigidPaletteCoordinate): a value Xenos interpolates
+// exactly cannot wrap frac() on the host.
+double paletteSnap(float value) {
+    const double grid=std::round(double(value)*64)/64;
+    return std::abs(double(value)-grid)<=std::max(std::abs(grid),1.0/64)/65536?grid:double(value);
+}
 double mix(double a,double b,double t){return a+(b-a)*t;}
 // Independent geometric oracle: conventional row matrices, not shader registers.
 std::array<double,21> vertexExpected(const Vertex& input,const VConstants& c) {
@@ -94,7 +101,7 @@ double shadowFilter(const Vec& projection,const Grid& grid) {
     return .5*(mix(left,right,fx)+center);
 }
 std::array<double,4> pixelExpected(const Probe& input,const PConstants& c,const std::array<Grid,2>& grids,const Vec* base=nullptr,bool dual=false) {
-    const double u=frac(input[0][0]),v=frac(input[0][1]);
+    const double u=frac(paletteSnap(input[0][0])),v=frac(paletteSnap(input[0][1]));
     const double length=std::sqrt(double(input[3][0])*input[3][0]+double(input[3][1])*input[3][1]+double(input[3][2])*input[3][2]);
     std::array<double,3> normal{};double light=0;
     // The original zero vector remains zero after legacy normalization; it
@@ -114,7 +121,7 @@ std::array<double,4> pixelExpected(const Probe& input,const PConstants& c,const 
     }
     if(dual) {
         need(base!=nullptr,"Dual shader oracle requires a base texture sample");
-        const double detailU=frac(input[0][2]),detailV=frac(input[0][3]);
+        const double detailU=frac(paletteSnap(input[0][2])),detailV=frac(paletteSnap(input[0][3]));
         return {(id+32*std::floor(32*frac(2*detailV))+std::floor(64*detailU))*double(1.0f/2046.0f),
             (32*std::floor(32*std::clamp(double((*base)[1]),0.0,double(.96f)))+
              std::floor(32*std::clamp(double((*base)[0]),0.0,double(.96f))))*double(1.0f/1023.0f),
@@ -325,7 +332,7 @@ struct Fixture {
         // Color arithmetic rounds to float32 before the integer floor packing.
         for(const Vec normal:{Vec{1,0,0,0},Vec{0,1,0,0},Vec{.8660254f,.5f,0,0},Vec{.8f,.6f,0,0}})
         for(float exponent:{0.f,1.f,4.f})for(float scale:{0.f,.25f,1.f})
-        for(float alpha:{0.f,.5f,1.f})for(float v:{.25f,.75f})
+        for(float alpha:{0.f,.5f,1.f})for(float v:{.25f,.75f,std::nextafter(.5f,0.f)})
         for(unsigned shadowCase=0;shadowCase<6;++shadowCase) {
             const bool enabled=shadowCase!=0,receiver=shadowCase>=2;
             const bool characterLit=shadowCase<2||(shadowCase&1)==0;
@@ -360,7 +367,7 @@ struct Fixture {
             const float green=std::min(float(sat(texel[1]+alpha*specular)),.96f);
             const double blue=sat(texel[2]+alpha*specular);
             const std::array<double,4> want={
-                (37+32*std::floor(32*(2*v-(v>=.5f?1:0)))+12)*double(1.0f/2046),
+                (37+32*std::floor(32*frac(2*frac(paletteSnap(v))))+12)*double(1.0f/2046),
                 (32*std::floor(32*green)+std::floor(32*red))*double(1.0f/1023),
                 blue*double(.2f)+.5+(ny<=.125?.25:0),
                 enabled&&ny>0&&(!characterLit||!worldLit)?1.0:double(.7f)};
@@ -413,6 +420,12 @@ int main(int argc,char** argv)try {
             Vec{0,0,.5f,1},Vec{0,2,0,0},Vec{0,0,.9f,1}};
         std::array<Grid,2> grids{};
         dual.pixels(p,c,grids,"dual fixed UV0/UV1 sample",false);
+        // Palette snap bounds on UV1: half the tolerance from a grid line takes
+        // the grid code; twice the tolerance keeps the unsnapped floor/frac result.
+        for(float grid:{0.f,.5f,1.f,.703125f,-2.f})for(float side:{-1.f,1.f})for(float scale:{.5f,2.f}) {
+            auto one=p;one[0][2]=one[0][3]=grid+side*scale*std::max(std::abs(grid),1.f/64)/65536;
+            dual.pixels(one,c,grids,"dual palette grid snap bounds",false);
+        }
     }
     for(bool textured:{false,true}) {
     Fixture f(argc==2,textured);
@@ -454,6 +467,11 @@ int main(int argc,char** argv)try {
         auto c=pc;c[36][1]=light;c[49][2]=custom;c[46][0]=2;f.pixels(probe,c,grids,"rim and custom object id",false);
     }
     for(float u:{-2.125f,0.f,.999f,3.625f}){auto one=probe;one[0][0]=u;one[0][1]=-1.375f;f.pixels(one,pc,grids,"UV wrap arithmetic",false);}
+    // Palette snap bounds on UV0 (plain rigid packs it; textured ignores it).
+    for(float grid:{0.f,.5f,1.f,.703125f,-2.f})for(float side:{-1.f,1.f})for(float scale:{.5f,2.f}) {
+        auto one=probe;one[0][0]=one[0][1]=grid+side*scale*std::max(std::abs(grid),1.f/64)/65536;
+        f.pixels(one,pc,grids,"palette grid snap bounds",false);
+    }
     if(textured)for(size_t channel=0;channel<4;++channel)for(float value:{-.5f,0.f,.125f,.5f,.96f,1.5f}) {
         const auto saved=f.baseTexels;
         for(auto& texel:f.baseTexels)texel[channel]=value;
