@@ -97,7 +97,9 @@ the wall against the opening scene and the cabinet texture, the patched Apt
 structures, that painted cloud columns never enter the 16:9 view in any title
 frame (16:9 stays pixel-identical), that the pause shutters cover the same 16:9
 span and reach past 32:9, that the studio wall stays outside the 16:9 view,
-that no pause TV places the walled cabinet, that every ultrawide patch lands in
+that no pause TV places the walled cabinet, that every screen in both packages
+draws the walled cabinet only at the menu framing (0.67 on the stage centre,
+where it covers 16:9), that every ultrawide patch lands in
 a built package, that the stage renders identically with and without overscan,
 and that full-width bands span wide outputs row for row.
 

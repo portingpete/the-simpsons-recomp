@@ -7,7 +7,7 @@ from build_native_ultrawide_art import (BGNDTV_INTRO, CABINET_KEEPOUT, CLOUD_END
     PAUSE_SHUTTERS, PAUSE_TIMELINE, PAUSE_TVS, ROOM_COVERS_16_9, ROOM_DEPTH, ROOM_REPLACED, ROOM_SPAN,
     ROOM_ZOOM_SPRITE, SHUTTER_SPRITE, SIGNATURE, STUDIO_OVERLAP, STUDIO_SPRITE, TITLE_SPRITE, VIEW_HALF_16_9,
     characters, f32, find_root, frame_controls, frame_placements, geometry, itxd_texture, living_room_wall,
-    matrix_of, outside, patch_cloud_ends, patch_pause, patch_shared_library, patch_start, read_pixels,
+    matrix_of, outside, patch_cloud_ends, patch_pause, patch_shared_library, patch_start, patch_ultrawide, read_pixels,
     retail_resource, solid_rect, sprite_frames, string_at, studio_wall, transform, u)
 
 FRONTEND = 'frontend/frontend.str'
@@ -77,6 +77,66 @@ class LivingRoomWall(unittest.TestCase):
         self.assertGreater(hole[0]-x0, 100); self.assertGreater(x1-hole[-1], 100)
         top = read_pixels(payload, texture, 400, 24, 1824, 28)[2]
         self.assertTrue(all(pixel[3] == 255 for pixel in top))  # Keep-out top edge (y0 = 26).
+
+
+def swf_resources(package):
+    from build_native_video_menu import ROOT, decode_entry, resource_chunks, stoc_entries
+    data = (ROOT/'Simpsons Game, The (USA)'/package).read_bytes()
+    for entry in stoc_entries(data)['entries']:
+        decoded, _ = decode_entry(data, entry)
+        for chunk in resource_chunks(decoded):
+            name = chunk.get('name') or ''
+            if name.endswith('.swf') and 'payload_decoded_offset' in chunk:
+                at = chunk['payload_decoded_offset']
+                yield name, bytes(decoded[at:at+chunk['payload_size']])
+
+
+def cabinet_framings(payload, movie):
+    """Every stage matrix SharedLibrary.BgndTV is drawn with, over all frames of every timeline."""
+    apt, _ = apt_of(payload); root = find_root(apt); chars = characters(apt, root)
+    targets = {cid for cid, name in imports(apt, root).items() if name == ('SharedLibrary', 'BgndTV')}
+    if movie == 'SharedLibrary.swf': targets |= {cid for name, cid in exports(apt, root) if name == 'BgndTV'}
+    placed = {}  # timeline -> {child: {matrix}}
+    for timeline in [root]+[at for at in chars if at and u(apt, at) == 5]:
+        held, children = {}, placed.setdefault(timeline, {})
+        for entry in sprite_frames(apt, timeline):
+            for at in frame_controls(apt, entry):
+                if u(apt, at) == 4: held.pop(u(apt, at+4), None)
+                if u(apt, at) != 3: continue
+                flags, depth = u(apt, at+4), u(apt, at+8)
+                if flags & 2: held[depth] = u(apt, at+12)
+                if depth in held and flags & 6:
+                    matrix = matrix_of(apt, at) if flags & 4 else (1, 0, 0, 1, 0, 0)
+                    children.setdefault(held[depth], set()).add(matrix)
+
+    def compose(p, c):
+        a, b, cc, d, tx, ty = p
+        return (a*c[0]+cc*c[1], b*c[0]+d*c[1], a*c[2]+cc*c[3], b*c[2]+d*c[3], a*c[4]+cc*c[5]+tx, b*c[4]+d*c[5]+ty)
+
+    def walk(timeline, matrix, depth=0):
+        for child, matrices in placed.get(timeline, {}).items():
+            for m in matrices:
+                if child in targets: yield compose(matrix, m)
+                elif depth < 8 and child < len(chars) and chars[child] in placed:
+                    yield from walk(chars[child], compose(matrix, m), depth+1)
+    return list(walk(root, (1, 0, 0, 1, 0, 0)))
+
+
+class CabinetUses(unittest.TestCase):
+    def test_walled_cabinet_only_at_the_menu_framing(self):
+        """The living-room wall stays outside 16:9 only with the cabinet at 0.67 on the stage centre.
+
+        The pause menu zooms its TVs, so it uses the plain cabinet; nothing
+        else may draw the walled one at another scale or position.
+        """
+        menu = (0.67, 0, 0, 0.67, 320, 240)
+        uses = 0
+        for package in (FRONTEND, CHARACTERS):
+            for name, payload in swf_resources(package):
+                for framing in cabinet_framings(patch_ultrawide(name, payload), name):
+                    uses += 1
+                    self.assertTrue(all(abs(got-want) < 1e-4 for got, want in zip(framing, menu)), (package, name, framing))
+        self.assertGreater(uses, 10)
 
 
 class CabinetPatch(unittest.TestCase):
