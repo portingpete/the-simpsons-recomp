@@ -26,6 +26,7 @@ template<class F>void rejects(F action){bool failed=false;try{action();}catch(co
 #include "header/test_engine_binding_reset.h"
 #include "header/test_mesh_gpu_retirement.h"
 #include "header/test_r16_strip_boundary.h"
+#include "header/test_palette_interpolation.h"
 namespace Simpsons::Graphics {
 struct NativeRecordingProbe {
     static ID3D11DeviceContext* context(NativeBackend& b){return b.context.Get();}
@@ -890,12 +891,8 @@ void paletteInterpolation(const std::vector<uint8_t>& image,bool hardware) {
         {"flipbook",0x8203D93C,0x82040118,true,false,true,false},
         {"dualtextured-uv",0x8204BA4C,0x8204E2DC,true,false,true,true},
         {"dualtextured-uv-alpha",0x8204CE90,0x8204E75C,true,false,true,true}}};
-    constexpr uint32_t width=256,height=144,id=714;
-    const auto code=[](double u,double v){return 32*uint32_t(std::floor(32*(2*v-std::floor(2*v))))+uint32_t(std::floor(64*(u-std::floor(u))));};
-    // Grid values seen in live meshes and at palette corners, plus one cell
-    // centre that never depended on exact interpolation.
-    const std::array<std::array<float,2>,7> cases={{{.7f,.5f},{0,1},{1,1},{.5f,0},{0,.5f},{-.5f,3},{.320299983f,.789099991f}}};
-    const std::array<std::array<float,3>,4> corners={{{-1,1,1},{-1,-1,4},{1,1,6},{1,-1,9}}};
+    constexpr uint32_t width=Test::paletteWidth,height=Test::paletteHeight,id=Test::paletteId;
+    const auto& cases=Test::paletteCases;const auto& corners=Test::paletteCorners;
     size_t draws=0;
     for(const auto& family:families) {
         NativeBackend backend(!hardware);NativeMaterialCompiler compiler(backend);MaterialRegistry registry;
@@ -938,17 +935,16 @@ void paletteInterpolation(const std::vector<uint8_t>& image,bool hardware) {
             for(size_t i=0;i<4;++i) {
                 const float w=corners[i][2];auto& v=vertices[i];
                 v.position={corners[i][0]*w,corners[i][1]*w,w};v.normal={0,0,-1};v.indices={1,0,0,0};v.weights={1,0,0,0};
-                // Colour away from the floor(color.x) rim flag and other
-                // thresholds, which have their own exactness (eye rim control).
+                // Colour clear of the floor(color.x) rim flag and other
+                // thresholds; opaqueEyeRimControl and dualRimControl cover those.
                 v.color={.5f,.5f,.5f,.6f};v.uv={.25f,.25f};v.uv1={.25f,.25f};
                 (family.red?v.uv1:v.uv)=coordinate;
             }
             const std::array<uint16_t,4> indices{0,1,2,3};
             const auto mesh=backend.uploadSkinMesh(vertices,indices,family.vertex);
-            const uint32_t palette=code(coordinate[0],coordinate[1]);
-            // Red stores (id+code)/2046 (even sums here), green stores code/1023.
-            const uint32_t expected=family.red?(id+palette)/2:palette;
-            require(!family.red||!((id+palette)&1),"Skin palette fixture code must be even");
+            const uint32_t palette=Test::paletteCode(coordinate[0],coordinate[1]);
+            const uint32_t expected=Test::paletteChannel(family.red,palette);
+            require(Test::paletteChannelExact(family.red,palette),"Skin palette fixture code must be even");
             const auto check=[&](const char* path) {
                 const auto colors=backend.readbackTarget(color);
                 const uint32_t first=word(colors,0);

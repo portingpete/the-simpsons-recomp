@@ -1,6 +1,7 @@
 #ifndef RIGID_PALETTE_COORDINATE
 #define RIGID_PALETTE_COORDINATE
-// The opaque rigid and skin PSs pack a palette coordinate (uv0 or uv1) as
+// Every rigid and skin palette PS (the opaque passes and the skin dual UV
+// alpha pass) packs a palette coordinate (uv0 or uv1) as
 // floor(64*frac(u)) and 32*floor(32*frac(2v)) plus the 2v>=1 bit, which change
 // only at multiples of 1/64. Xenos interpolates each attribute as
 // P0+i*(P1-P0)+j*(P2-P0), so a value all three vertices share arrives exactly;

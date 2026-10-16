@@ -36,6 +36,7 @@ template<class F>void rejects(F action){bool rejected=false;try{action();}catch(
 #include "header/test_engine_binding_reset.h"
 #include "header/test_mesh_gpu_retirement.h"
 #include "header/test_r16_strip_boundary.h"
+#include "header/test_palette_interpolation.h"
 namespace Simpsons::Graphics {
 struct NativeRecordingProbe {
     static ID3D11Device* device(NativeBackend& b){return b.device.Get();}
@@ -751,13 +752,9 @@ void paletteInterpolation(const std::vector<uint8_t>& image,bool hardware) {
         {"normalmap",Kind::normalmap,0x8205855C,0x82058CBC},
         {"dualtextured-uv",Kind::dualUv,0x82046D9C,0x820477A8},
         {"chocolate",Kind::chocolate,0x8205DABC,0x8205E5E0}}};
-    constexpr UINT width=256,height=144;
-    constexpr uint32_t id=714;
-    const auto code=[](double u,double v){return 32*uint32_t(std::floor(32*(2*v-std::floor(2*v))))+uint32_t(std::floor(64*(u-std::floor(u))));};
-    // Grid values seen in live meshes and at palette corners, plus one cell
-    // centre that never depended on exact interpolation.
-    const std::array<std::array<float,2>,7> cases={{{.7f,.5f},{0,1},{1,1},{.5f,0},{0,.5f},{-.5f,3},{.320299983f,.789099991f}}};
-    const std::array<std::array<float,3>,4> corners={{{-1,1,1},{-1,-1,4},{1,1,6},{1,-1,9}}};
+    constexpr UINT width=Test::paletteWidth,height=Test::paletteHeight;
+    constexpr uint32_t id=Test::paletteId;
+    const auto& cases=Test::paletteCases;const auto& corners=Test::paletteCorners;
     const auto texel=[&](NativeBackend& backend,std::array<uint8_t,4> rgba){return backend.createTexture(1,1,TextureFormat::RGBA8,rgba);};
     size_t draws=0;
     for(const auto& family:families) {
@@ -816,10 +813,9 @@ void paletteInterpolation(const std::vector<uint8_t>& image,bool hardware) {
             }
             const std::array<uint16_t,4> quad={0,1,2,3};
             auto mesh=f.backend.uploadRigidMesh(vertices,quad);
-            const uint32_t palette=code(coordinate[0],coordinate[1]);
-            // Red stores (id+code)/2046 (even sums here), green stores code/1023.
-            const uint32_t expected=red?(id+palette)/2:palette;
-            require(!red||!((id+palette)&1),"Palette fixture code must be even");
+            const uint32_t palette=Test::paletteCode(coordinate[0],coordinate[1]);
+            const uint32_t expected=Test::paletteChannel(red,palette);
+            require(Test::paletteChannelExact(red,palette),"Palette fixture code must be even");
             const auto check=[&](const char* path) {
                 const auto colors=f.backend.readbackTarget(f.color);
                 const uint32_t first=word(colors,0);

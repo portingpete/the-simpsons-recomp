@@ -220,13 +220,14 @@ over 70 s wander routes in all 16 stage launchers and spr_hub:
 | skin, skin dual, gloss, flipbook | 5.0 M, 41 k, 26 k, 130 | 0 | |
 | chocolate opaque, skin dual UV | not drawn on these routes | | |
 
-The rigid, dual-textured, gloss, dual-textured UV, skin dual UV, skin gloss and
-skin flipbook translations under `renderer/` are local (gitignored). The build
-verifies the first five against their analyzers before compiling them
+The rigid, dual-textured, gloss, dual-textured UV and skin dual UV translations
+under `renderer/` are local (gitignored) and compiled in place of the generated
+copies. The build verifies each against its analyzer first
 (`rigid_palette_hlsl_verified.stamp`, `rigid_dualtextured_uv_verified.stamp`,
-`skin_dualtextured_uv_copy_verified.stamp`). `--write` (rigid, dual-textured,
-gloss) or `--emit-hlsl` (dual-textured UV, skin dual UV, and
-`analyze_skin_variants_shader.py gloss|flipbook`) regenerates a stale copy.
+`skin_dualtextured_uv_copy_verified.stamp`), and `--write` (rigid,
+dual-textured, gloss) or `--emit-hlsl` (dual-textured UV, skin dual UV)
+regenerates a stale copy. Skin gloss and flipbook compile only from the
+generated `build/shaders` sources.
 
 Counts are unique draw ranges, so repeated draws are counted once. The snap
 covers every palette PS above. Four families had at-risk triangles: plain rigid
@@ -248,8 +249,8 @@ chocolate opaque VS/PS pairs with seven triangle-constant palette coordinates,
 on the recorded and the immediate path, and requires one exact word on every
 pixel. `tests/test_skin_mesh.cpp` (`paletteInterpolation`) does the same for
 skin, skin dual, skin gloss, skin flipbook and skin dual UV (opaque and alpha).
-Its vertex colour stays clear of the `floor(color.x)` rim flag, whose exactness
-only plain skin restores (`renderer/skin_draw_input.hlsl`). With the snap
+Its vertex colour stays clear of the `floor(color.x)` rim flag, which has its
+own exactness fix and tests (see Skin rim flag below). With the snap
 tolerance set to 0, all 13 families fail on WARP, NVIDIA D3D11 and Vulkan for
 every grid case, recorded and immediate: plain rigid and skin pack green 1023
 where 44 is expected (v=0.5 an ulp low, upper bit lost) and every uv1 family
