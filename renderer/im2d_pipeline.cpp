@@ -351,7 +351,13 @@ void NativeBackend::drawIm2DImpl(const std::shared_ptr<RenderTarget>& target,con
     if(!selectedViewport) throw Error("Native Im2D requires one actual selected viewport");
     const auto logicalViewport=*selectedViewport;
     const auto originalVp=renderViewport(target,logicalViewport);
-    const auto vp=draw.preserveAspect?contentViewport(target,logicalViewport):originalVp;
+    const auto contentVp=draw.preserveAspect?contentViewport(target,logicalViewport):originalVp;
+    // Overscan widens only: the stage keeps its centered 16:9 scale and the
+    // full-width viewport reveals authored art past its sides (no stretching).
+    // Narrower outputs keep their bars.
+    const bool expandUi=draw.overscan&&draw.preserveAspect&&contentVp.Width<originalVp.Width;
+    auto vp=contentVp;
+    if(expandUi){vp.TopLeftX=originalVp.TopLeftX;vp.Width=originalVp.Width;}
     if(draw.depthTest && (vp.MinDepth!=0 || vp.MaxDepth!=1))
         throw Error("Native Im2D enabled depth requires the qualified native viewport depth range 0..1");
     // No viewport substitution. Native clipping handles overhanging geometry;
@@ -403,7 +409,7 @@ void NativeBackend::drawIm2DImpl(const std::shared_ptr<RenderTarget>& target,con
        triangles<=3120 && pipeline.prepareBatchState(device.Get(),context.Get())) {
         const std::array<uint32_t,14> key={draw.rasterWidth,draw.rasterHeight,draw.blendWord,draw.expandedBlend,
             draw.alphaTest,std::bit_cast<uint32_t>(draw.alphaReference),draw.alphaCompare,draw.cullBits,
-            draw.pixelCenterHalf,draw.colorWriteMask,draw.depthTest,uint32_t(draw.depthWrite)|(uint32_t(draw.reverseDepth)<<1),draw.depthCompare,draw.preserveAspect};
+            draw.pixelCenterHalf,draw.colorWriteMask,draw.depthTest,uint32_t(draw.depthWrite)|(uint32_t(draw.reverseDepth)<<1),draw.depthCompare,uint32_t(draw.preserveAspect)|(uint32_t(draw.overscan)<<1)};
         const bool compatible=pendingIm2D && pendingIm2D->target->texture.Get()==target->texture.Get() &&
             (pendingIm2D->depth?pendingIm2D->depth->texture.Get():nullptr)==(depth?depth->texture.Get():nullptr) &&
             (pendingIm2D->draw.texture?pendingIm2D->draw.texture->texture.Get():nullptr)==(draw.texture?draw.texture->texture.Get():nullptr) &&
@@ -439,10 +445,20 @@ void NativeBackend::drawIm2DImpl(const std::shared_ptr<RenderTarget>& target,con
         ++batch.packets;requireOwner();return;
     }
     if(allowBatch)flushIm2D();
+    std::vector<Im2DVertex> expandedVertices;
+    if(expandUi) {
+        expandedVertices=draw.vertices;
+        // Same pixels as the centered stage viewport: x' maps through the wide
+        // viewport onto exactly the position x had in the 16:9 viewport.
+        const double scale=double(contentVp.Width)/vp.Width;
+        const double offset=double(contentVp.TopLeftX-vp.TopLeftX)*draw.rasterWidth/vp.Width;
+        for(auto& v:expandedVertices)v.position[0]=float(0.5+offset+(double(v.position[0])-0.5)*scale);
+    }
+    const auto& drawVertices=expandUi?expandedVertices:draw.vertices;
     const PositionConstants position{2.0f/float(draw.rasterWidth),2.0f/float(draw.rasterHeight)};
     const DrawConstants values{uint32_t(draw.reverseDepth),0,draw.alphaTest?draw.alphaReference:0.0f,
         uint32_t(draw.alphaTest),draw.alphaTest?draw.alphaCompare:7u,draw.blendWord};
-    const UINT indexCount=draw.primitiveType==3?UINT(draw.vertices.size()):UINT((draw.vertices.size()-2)*3);
+    const UINT indexCount=draw.primitiveType==3?UINT(drawVertices.size()):UINT((drawVertices.size()-2)*3);
     const auto& indexBuffer=draw.primitiveType==3?pipeline.listIndices:pipeline.stripIndices;
     auto positionBuffer=pipeline.constants(device.Get(),position,pipeline.positions);
     auto drawBuffer=pipeline.constants(device.Get(),values,pipeline.draws);
@@ -479,14 +495,14 @@ void NativeBackend::drawIm2DImpl(const std::shared_ptr<RenderTarget>& target,con
     } finishPreparation{preparation.active};
     preparation.active=true;preparation.beginPacket();
     D3D11_BOX packetBounds{};auto& triangleBounds=preparation.triangles;
-    if(!depthOnly)packetBounds=colorBounds(draw.vertices);
+    if(!depthOnly)packetBounds=colorBounds(drawVertices);
     if(readsDestination) {
         triangleBounds.reserve(indexCount/3);
         for(UINT first=0;first<indexCount;first+=3) {
             const UINT i=first/3+2;
             const std::array vertices=draw.primitiveType==3?
-                std::array{draw.vertices[first],draw.vertices[first+1],draw.vertices[first+2]}:
-                std::array{draw.vertices[i-(i&1?1:2)],draw.vertices[i-(i&1?2:1)],draw.vertices[i]};
+                std::array{drawVertices[first],drawVertices[first+1],drawVertices[first+2]}:
+                std::array{drawVertices[i-(i&1?1:2)],drawVertices[i-(i&1?2:1)],drawVertices[i]};
             triangleBounds.push_back(colorBounds(vertices));
         }
     }
@@ -515,7 +531,7 @@ void NativeBackend::drawIm2DImpl(const std::shared_ptr<RenderTarget>& target,con
     context->PSGetShaderResources(0,1,&savedTextures[0]);context->PSGetShaderResources(1,1,&savedTextures[1]);
     ComPtr<ID3D11SamplerState> savedSampler;context->PSGetSamplers(0,1,&savedSampler);
     requireOwner();
-    const UINT vertexOffset=pipeline.writeVertices(context.Get(),draw.vertices,
+    const UINT vertexOffset=pipeline.writeVertices(context.Get(),drawVertices,
         compactColor?std::span<const UINT>(colorOrder):std::span<const UINT>{});
     // All validation and fallible preparation precede any rendering/context
     // mutation. Ring writes use previously unused bytes, or WRITE_DISCARD to

@@ -39,13 +39,47 @@ struct Im2DDraw {
     bool reverseDepth{}; // Qualified original viewport: PS applies 1-Z before 20e4 conversion.
     D3D11_SAMPLER_DESC sampler{};
     bool preserveAspect=false; // Frozen at the original Apt/UI draw boundary.
+    // Wide outputs on frontend and full-screen menu frames: keep the 16:9 stage
+    // scale and position but show the authored art beyond it instead of bars.
+    bool overscan=false;
 };
 
-// A flat, uniform canvas rectangle is a backdrop, rather than authored UI
-// content. Only complete rectangles qualify: a bounding box alone would also
-// match two overlapping triangles or a partial panel. Keep the original
-// vertices, color, depth and blend state; select the full scene viewport only.
-inline bool isFullCanvasUiFill(const Im2DDraw& draw) {
+// Apt clears its depth clip masks with depth-only primitives spanning the
+// canvas corners (two triangles over the stage). Like full-canvas fills they
+// stand for the whole screen, so overscan art past the stage stays masked.
+inline bool isCanvasDepthClear(const Im2DDraw& draw) {
+    if((draw.blendWord!=0x01000100 && draw.colorWriteMask) || !draw.depthWrite ||
+       !draw.rasterWidth || !draw.rasterHeight || draw.vertices.size()<3)return false;
+    const float width=float(draw.rasterWidth),height=float(draw.rasterHeight);
+    bool left=false,right=false,top=false,bottom=false;
+    for(const auto& v:draw.vertices) {
+        const float x=v.position[0],y=v.position[1];
+        const bool l=std::abs(x)<=0.5f,r=std::abs(x-width)<=0.5f,t=std::abs(y)<=0.5f,b=std::abs(y-height)<=0.5f;
+        if(!(l||r) || !(t||b))return false;
+        left|=l;right|=r;top|=t;bottom|=b;
+    }
+    return left && right && top && bottom;
+}
+
+// One textured quad covering the whole canvas is a full-screen menu backdrop,
+// such as the TV cabinet behind the frontend and pause menus.
+inline bool isFullCanvasUiBackdrop(const Im2DDraw& draw) {
+    const auto count=draw.vertices.size();
+    if(!draw.texture || !draw.rasterWidth || !draw.rasterHeight ||
+       !((draw.primitiveType==4 && count==4) || (draw.primitiveType==3 && count==6)))return false;
+    float left=draw.vertices.front().position[0],right=left,top=draw.vertices.front().position[1],bottom=top;
+    for(const auto& v:draw.vertices) {
+        if(!std::isfinite(v.position[0]) || !std::isfinite(v.position[1]))return false;
+        left=std::min(left,v.position[0]);right=std::max(right,v.position[0]);
+        top=std::min(top,v.position[1]);bottom=std::max(bottom,v.position[1]);
+    }
+    return left<=0.5f && top<=0.5f && right>=float(draw.rasterWidth)-0.5f && bottom>=float(draw.rasterHeight)-0.5f;
+}
+
+// A flat, uniform rectangle spanning the canvas width, and with fullHeight its
+// height too. Only complete rectangles qualify: a bounding box alone would also
+// match two overlapping triangles or a partial panel.
+inline bool isUniformCanvasRectangle(const Im2DDraw& draw,bool fullHeight) {
     const auto count=draw.vertices.size();
     if(draw.texture || !draw.rasterWidth || !draw.rasterHeight ||
        !((draw.primitiveType==4 && count==4) || (draw.primitiveType==3 && count==6)))return false;
@@ -61,7 +95,7 @@ inline bool isFullCanvasUiFill(const Im2DDraw& draw) {
     // GrayOut is deliberately wider than its Apt stage. Preserve that authored
     // overhang; half-pixel conventions can put an edge at dimension +/- 0.5.
     const float width=float(draw.rasterWidth),height=float(draw.rasterHeight);
-    if(left>0.5f || top>0.5f || right<width-0.5f || bottom<height-0.5f ||
+    if(left>0.5f || right<width-0.5f || (fullHeight && (top>0.5f || bottom<height-0.5f)) ||
        left>=right || top>=bottom)return false;
     std::array<unsigned,6> corners{};
     for(size_t i=0;i<count;++i) {
@@ -79,6 +113,16 @@ inline bool isFullCanvasUiFill(const Im2DDraw& draw) {
     const auto shared=a&b;
     return shared==((1u<<0)|(1u<<3)) || shared==((1u<<1)|(1u<<2));
 }
+
+// A flat, uniform canvas rectangle is a backdrop, rather than authored UI
+// content. Keep the original vertices, color, depth and blend state; select the
+// full scene viewport only.
+inline bool isFullCanvasUiFill(const Im2DDraw& draw) {return isUniformCanvasRectangle(draw,true);}
+
+// A flat band across the whole canvas width, such as the pause menu's closing
+// shutters. On outputs wider than 16:9 it may span the full width like a fill:
+// its vertical mapping is the same in either viewport.
+inline bool isFullWidthUiBand(const Im2DDraw& draw) {return isUniformCanvasRectangle(draw,false);}
 
 // Native raster coverage/float filtering and round-to-even target packing are
 // explicit policies, not proof of console subpixel, blend or filtering precision.

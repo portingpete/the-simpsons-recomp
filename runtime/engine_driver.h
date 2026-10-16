@@ -152,6 +152,9 @@ public:
     void applyNativeAmbientOcclusion();
     // Photo mode: stash the main scene before the HUD render, restore after.
     void photoHud(bool begin);
+    // The original gameplay update found the game paused (the pause menu and
+    // its transitions are full-screen UI).
+    void noteGameplayPaused();
     // Whether this graphics device qualifies the coverage of an AA choice.
     void setUiDrawing(bool);
     uint64_t cameraClearCount() const;

@@ -66,7 +66,7 @@ set(NATIVE_VIDEO_PACKAGE "${CMAKE_SOURCE_DIR}/build/native-assets/frontend/front
 set(NATIVE_VIDEO_GAME_PACKAGE "${CMAKE_SOURCE_DIR}/build/native-assets/simpsons_chars/simpsons_chars_global.str")
 add_custom_command(OUTPUT "${NATIVE_VIDEO_PACKAGE}" "${NATIVE_VIDEO_GAME_PACKAGE}"
   COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/build_native_video_menu.py" --output-root "${CMAKE_SOURCE_DIR}/build/native-assets"
-  DEPENDS tools/build_native_video_menu.py tools/build_native_control_menu.py tools/build_native_audio_menu.py tools/build_native_main_menu.py tools/build_native_mouse_menu.py tools/inspect_assets.py "Simpsons Game, The (USA)/frontend/frontend.str" "Simpsons Game, The (USA)/simpsons_chars/simpsons_chars_global.str"
+  DEPENDS tools/build_native_video_menu.py tools/build_native_control_menu.py tools/build_native_audio_menu.py tools/build_native_main_menu.py tools/build_native_mouse_menu.py tools/build_native_ultrawide_art.py tools/inspect_assets.py "Simpsons Game, The (USA)/frontend/frontend.str" "Simpsons Game, The (USA)/simpsons_chars/simpsons_chars_global.str"
   VERBATIM)
 add_custom_target(NativeVideoMenu
   COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/native-assets/frontend"
@@ -2534,6 +2534,7 @@ if(BUILD_TESTING)
   set_tests_properties(NativeVideoSettings PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
   add_test(NAME NativeVideoMenuAssets COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/test_native_video_menu.py")
   add_test(NAME NativeMainMenuAssets COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/test_native_main_menu.py")
+  add_test(NAME NativeUltrawideArt COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tools/test_native_ultrawide_art.py")
   add_executable(NativeChainTraversalTests tests/test_guest_chain.cpp)
   target_include_directories(NativeChainTraversalTests PRIVATE "${CMAKE_SOURCE_DIR}")
   target_compile_options(NativeChainTraversalTests PRIVATE /W4 /WX)

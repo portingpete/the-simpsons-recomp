@@ -137,6 +137,82 @@ struct NativeUltrawideProbe {
         need(!isFullCanvasUiFill(crossed),"Crossed strip was treated as a complete rectangle");
         std::puts("Verified full-screen UI dimming and centered artwork at 16:9/ultrawide extents, both topologies/pixel centers, immediate/queued ordering and panel rejection");
     }
+    static void overscan() {
+        // Frontend art authored past the 16:9 stage shows on wide outputs at
+        // the stage's scale; the stage itself renders exactly as before.
+        for(const auto extent:{std::array<uint32_t,2>{1280,720},{2560,1080},{5120,1440}}) {
+            NativeBackend backend(true,false);backend.configureRendering(extent[0],extent[1],1);
+            auto color=backend.createTarget(128,72,TargetFormat::RGB10A2,TargetScale::Scene);
+            auto depth=backend.createDepthTarget(128,72,TargetScale::Scene);
+            backend.bindTargets({color,nullptr,nullptr,nullptr},depth);backend.setViewport({0,0,128,72,0,1});
+            const auto original=viewport(backend);const auto stage=backend.contentViewport(color,{0,0,128,72,0,1});
+            const bool wide=extent[0]*9>extent[1]*16;
+            for(bool half:{false,true})for(bool batch:{false,true}) {
+                auto render=[&](bool overscan,float x0,float x1) {
+                    auto draw=quad(true,half);draw.overscan=overscan;
+                    for(auto& v:draw.vertices)v.position[0]=v.position[0]<64?x0:x1;
+                    backend.clearTarget(color,{1,0,0,1});
+                    if(batch){backend.queueIm2D(color,depth,draw);backend.flushIm2D();}else backend.drawIm2D(color,depth,draw);
+                    need(same(viewport(backend),original),"Overscan Im2D did not restore the viewport");
+                    return backend.readbackTarget(color);
+                };
+                need(render(true,.5f,128.5f)==render(false,.5f,128.5f),"Overscan moved or rescaled the 16:9 stage");
+                const auto width=color->pixelWidth(),height=color->pixelHeight();
+                const uint32_t left=uint32_t(stage.TopLeftX),right=uint32_t(stage.TopLeftX+stage.Width);
+                for(const auto [x0,x1,probe]:{std::array<float,3>{-40.5f,.5f,float(left)-8},{128.5f,168.5f,float(right)+7}}) {
+                    const auto shown=render(true,x0,x1),clipped=render(false,x0,x1);
+                    need(pixel(clipped,width,uint32_t(std::max(0.f,probe)),height/2)==0xc00003ff,"Offstage art leaked without overscan");
+                    if(wide)need(pixel(shown,width,uint32_t(probe),height/2)==0xc00ffc00,"Overscan hid authored art past the stage");
+                    else need(shown==clipped,"Overscan changed a 16:9 output");
+                }
+            }
+            std::printf("Verified UI overscan %ux%u: stage unchanged, authored side art shown only on wide outputs\n",extent[0],extent[1]);
+        }
+        NativeBackend backend(true,false);
+        const auto white=backend.createTexture(1,1,TextureFormat::RGBA8,std::array<uint8_t,4>{255,255,255,255});
+        auto cabinet=quad(true,true);cabinet.texture=white;
+        for(auto& v:cabinet.vertices){v.position[0]=v.position[0]<64?-40.5f:168.5f;v.position[1]=v.position[1]<36?-15.5f:87.5f;}
+        need(isFullCanvasUiBackdrop(cabinet),"Full-screen textured menu backdrop was not recognized");
+        auto flat=cabinet;flat.texture=nullptr;need(!isFullCanvasUiBackdrop(flat),"Untextured fill was treated as a menu backdrop");
+        auto panel=cabinet;panel.vertices[1].position[0]=panel.vertices[3].position[0]=96.5f;
+        need(!isFullCanvasUiBackdrop(panel),"Partial panel was treated as a full-screen menu backdrop");
+        // Apt resets its depth clip masks with depth-only triangles on the canvas corners.
+        auto reset=quad(true,true);reset.blendWord=0x01000100;reset.depthWrite=true;reset.primitiveType=3;
+        reset.vertices={reset.vertices[0],reset.vertices[1],reset.vertices[2]};
+        need(isCanvasDepthClear(reset),"Canvas depth-mask reset was not recognized");
+        auto painted=reset;painted.blendWord=0x00010001;need(!isCanvasDepthClear(painted),"Color triangle was treated as a depth reset");
+        auto partial=reset;partial.vertices[1].position[0]=64.5f;need(!isCanvasDepthClear(partial),"Partial depth triangle was treated as a canvas reset");
+        auto readonly=reset;readonly.depthWrite=false;need(!isCanvasDepthClear(readonly),"Depth test without writes was treated as a reset");
+        // Flat bands across the canvas (the pause shutters overhang it) span
+        // wide outputs like fills: outside the stage viewport their rows match.
+        auto band=quad(true,true);
+        for(auto& v:band.vertices){v.position[0]=v.position[0]<64?-6.5f:134.5f;v.position[1]=v.position[1]<36?18.5f:40.5f;}
+        need(isFullWidthUiBand(band)&&!isFullCanvasUiFill(band),"Full-width UI band was not recognized");
+        auto stub=band;stub.vertices[1].position[0]=stub.vertices[3].position[0]=96.5f;
+        need(!isFullWidthUiBand(stub),"Partial-width bar was treated as a band");
+        auto shaded=band;shaded.vertices[3].color[1]=.5f;need(!isFullWidthUiBand(shaded),"Shaded bar was treated as a flat band");
+        auto image=band;image.texture=white;need(!isFullWidthUiBand(image),"Textured bar was treated as a flat band");
+        for(const auto extent:{std::array<uint32_t,2>{1280,720},{2560,1080},{5120,1440}}) {
+            NativeBackend output(true,false);output.configureRendering(extent[0],extent[1],1);
+            auto color=output.createTarget(128,72,TargetFormat::RGB10A2,TargetScale::Scene);
+            auto depth=output.createDepthTarget(128,72,TargetScale::Scene);
+            output.bindTargets({color,nullptr,nullptr,nullptr},depth);output.setViewport({0,0,128,72,0,1});
+            auto render=[&](bool stage) {
+                auto draw=band;draw.preserveAspect=draw.overscan=stage;
+                output.clearTarget(color,{1,0,0,1});output.drawIm2D(color,depth,draw);
+                return output.readbackTarget(color);
+            };
+            const auto staged=render(true),spanned=render(false);
+            const auto width=color->pixelWidth(),height=color->pixelHeight();
+            for(uint32_t y=0;y<height;++y) {
+                const auto row=pixel(staged,width,width/2,y);
+                need(pixel(spanned,width,width/2,y)==row,"Spanning a UI band moved its rows");
+                need(pixel(spanned,width,0,y)==row&&pixel(spanned,width,width-1,y)==row,"Spanned UI band left an ultrawide edge");
+            }
+            if(extent[0]*9==extent[1]*16)need(spanned==staged,"Spanning a UI band changed a 16:9 output");
+        }
+        std::puts("Verified full-screen menu backdrop, canvas depth-reset and full-width band detection; bands span wide outputs row for row");
+    }
     static void movie() {
         NativeBackend backend(true,false);backend.configureRendering(2560,1080,1);
         auto color=backend.createTarget(128,72,TargetFormat::RGB10A2,TargetScale::Scene);
@@ -199,6 +275,6 @@ struct NativeUltrawideProbe {
 };
 }
 int main() {
-    try {NativeUltrawideProbe::sceneExtents();NativeUltrawideProbe::im2d();NativeUltrawideProbe::uiBackdrop();NativeUltrawideProbe::movie();NativeUltrawideProbe::presentation();return 0;}
+    try {NativeUltrawideProbe::sceneExtents();NativeUltrawideProbe::im2d();NativeUltrawideProbe::uiBackdrop();NativeUltrawideProbe::overscan();NativeUltrawideProbe::movie();NativeUltrawideProbe::presentation();return 0;}
     catch(const std::exception& error){std::fprintf(stderr,"%s\n",error.what());return 1;}
 }
