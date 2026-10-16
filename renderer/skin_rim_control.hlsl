@@ -7,9 +7,12 @@
 // interpolation keeps constant 1 exact and the floor decision unchanged, while
 // the original color, normals and positions keep perspective sampling.
 // Include after shadow_mesh.hlsl, whose b1 carries the option bit.
+#ifndef SKIN_RIM_CONTROL
+#define SKIN_RIM_CONTROL
 float skinRimControl(float control) {
     // Video menu "Character eyes: Clean" (b1 reserved bit 0): the flag counts
     // from 0.5 instead of only at exactly 1, so partially flagged eye-white
     // triangles do not speckle with rim shadow.
     return (reserved&1u)!=0&&control>=0.5?1.0:control;
 }
+#endif

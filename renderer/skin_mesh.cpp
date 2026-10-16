@@ -227,9 +227,10 @@ struct NativeSkinMesh::State {
         return &entry;
     }
     void validate(const NativeBackend* backend,ID3D11Device* expected) const {
+        const auto profile=meshProfile(vertexAddress);
         need(owner==backend&&thread==GetCurrentThreadId()&&device.Get()==expected&&vertices&&indices&&layout&&pixel&&
-             alphaPixel&&((vertexAddress==0x82007C1C||vertexAddress==0x8201E6DC)==bool(drawVertex))&&
-             alphaDrawVertex.Get()==(vertexAddress==0x82007C1C?drawVertex.Get():nullptr),
+             alphaPixel&&profile.rimVertex.empty()!=bool(drawVertex)&&
+             alphaDrawVertex.Get()==(profile.alphaRim?drawVertex.Get():nullptr),
              "Native skin mesh is missing, stale or belongs to another backend");
     }
     void requireBindings(ID3D11DeviceContext* context) const {
