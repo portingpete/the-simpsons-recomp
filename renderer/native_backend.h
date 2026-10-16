@@ -506,9 +506,9 @@ public:
     void configureCharacterDetail(uint32_t level) {characterDetail_=level<=3?level:0;}
     uint32_t characterDetail() const noexcept {return characterDetail_;}
     uint64_t skinDetailDrawCount() const noexcept {return skinDetailDraws;}
-    // Video menu "Character eyes": Clean lets the base skin family's rim flag
-    // count from 0.5. Live; re-records sealed skin draws. False while a
-    // recording session is active (retry at a later boundary).
+    // Video menu "Character eyes": Clean lets the base and dual-textured skin
+    // families' rim flag count from 0.5. Live; re-records sealed skin draws.
+    // False while a recording session is active (retry at a later boundary).
     bool configureCleanEyes(bool clean);
     bool cleanEyes() const noexcept {return cleanEyes_;}
     // Depth-only screen-space ambient occlusion over the finished world image.

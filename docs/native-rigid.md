@@ -257,3 +257,55 @@ packs red 875 where 379 is expected. The cell-centre case passes. `tests/test_ri
 `pixelExpected` and the gloss oracle and checks inputs at half and twice the
 tolerance around grid lines for plain and dual-textured; the multitone probe
 does the same.
+
+## Skin rim flag (2026-10-15)
+
+The skin vertex colour is UNORM8 (decoded as k/255 in `runtime/skin_vertices.cpp`),
+and the skin PSs read it from the colour varying the VS passes through
+unchanged. The same exactness problem as the palette coordinates applies where a
+PS turns a component into an integer decision that changes exactly at a value a
+whole triangle can share. Reading the generated HLSL in `build/shaders`:
+
+| PS | colour use |
+| --- | --- |
+| skin 8200A02C | `floor(color.x)` rim flag (slot5), `color.z>=.9` |
+| skin dual 82020B9C | `floor(color.x)` rim flag (slot36), `color.z>=.9` |
+| textured 82013900, gloss 82027C18, flipbook 82040118, dual UV 8204E2DC and its alpha pass 8204E75C | `color.z>=.9` only; the other lanes are overwritten before any read |
+| alpha passes 8200A4A4, 82021344, 82013F8C, 82028258, 82040510 | `color.w` as an opacity factor only |
+
+`floor(color.x)` is one only at exactly 1, so a flag of 1 on every vertex of a
+triangle sits on the boundary: Xenos (P0+i*(P1-P0)+j*(P2-P0)) returns it exactly,
+while host perspective interpolation can return an ulp below 1, where floor is 0
+and rim shadow switches on for that pixel. No k/255 value lies within .0019 of
+.9 (229.5/255), so the `>=.9` tests are not at risk, and no PS uses `frac` or
+`trunc` on a colour lane.
+
+The base family already passed the flag as a separate `noperspective` varying.
+The dual-textured wrapper did not: on a 256x144 quad with clip W 1..9 and colour
+(1,1,1,1), blue (.2*base.b + .25*(1-floor(color.x)) + .5*(color.z>=.9)) alternated
+between 666 and 921 from pixel to pixel on WARP, NVIDIA D3D11 and Vulkan. The
+fix follows the base family:
+
+- `renderer/skin_rim_control.hlsl` holds `skinRimControl`, the Character eyes
+  Clean rule (b1 reserved bit 0: the flag counts from 0.5). The base family's
+  `skin_draw_input.hlsl` now calls it; its DXBC is byte-identical.
+- `renderer/skin_dualtextured_draw.hlsl` adds `VSSkinDualDraw`, which copies
+  `color.x` into a `noperspective` `rimControl` varying, and `PSSkinDualDraw`
+  replaces `color.x` with `skinRimControl(rimControl)` before the original PS.
+  The PS reads `color.x` only through that floor.
+- `renderer/skin_mesh.cpp` binds the dual draw VS for the opaque pass only. The
+  dual alpha pass has its own VS (8201F984) and reads only `color.w`. The base
+  family keeps using its draw VS for both passes.
+- The temporal (TAA) export calls `VSSkinDualDraw` for 8201E6DC
+  (`tools/build_temporal_geometry_shaders.py`).
+
+Uniform flags keep the original result: affine interpolation returns a shared 0
+or 1 exactly. Character eyes Clean now also applies to dual-textured skin, which
+carries the same flag; the option already re-recorded every sealed skin draw.
+
+`tests/test_skin_mesh.cpp` (`dualRimControl`, WARP and hardware, both renderers)
+draws that quad with uniform 1, uniform 0 and mixed flags, recorded and immediate,
+in Original and Clean. Uniform flags must give one exact word (blue 666 or 921);
+the mixed flag keeps rim shadow inside its triangles and Clean splits it at the
+affine .5 line. Without the fix the uniform-1 case failed on the second pixel
+(blue 921, expected 666) on WARP, NVIDIA D3D11 and Vulkan.

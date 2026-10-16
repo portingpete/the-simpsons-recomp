@@ -797,7 +797,8 @@ foreach(ENTRY VSSkin VSSkinDraw PSSkin PSSkinDraw GSSkinProbe VSSkinPixelProbe)
   add_custom_command(OUTPUT "${HEADER}"
     COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /WX /O3 /T ${PROFILE} /E ${ENTRY}
       /I "${SIMPSONS_SHADER_DIR}" /Fh "${HEADER}" /Vn "k${ENTRY}" "${SOURCE}"
-    DEPENDS "${SIMPSONS_SKIN_SOURCE}" renderer/skin_draw.hlsl renderer/skin_draw_input.hlsl renderer/shadow_mesh.hlsl VERBATIM)
+    DEPENDS "${SIMPSONS_SKIN_SOURCE}" renderer/skin_draw.hlsl renderer/skin_draw_input.hlsl renderer/skin_rim_control.hlsl
+      renderer/shadow_mesh.hlsl VERBATIM)
   list(APPEND SIMPSONS_RIGID_HEADERS "${HEADER}")
 endforeach()
 set(SIMPSONS_SKIN_ALPHA_SOURCE "${SIMPSONS_SHADER_DIR}/skin_alpha_shader.hlsl")
@@ -817,7 +818,8 @@ foreach(ENTRY PSSkinAlpha PSSkinAlphaDraw)
   add_custom_command(OUTPUT "${HEADER}"
     COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /WX /O3 /T ps_5_0 /E ${ENTRY}
       /I "${SIMPSONS_SHADER_DIR}" /Fh "${HEADER}" /Vn "k${ENTRY}" "${SOURCE}"
-    DEPENDS "${SIMPSONS_SKIN_ALPHA_SOURCE}" renderer/skin_alpha_draw.hlsl renderer/skin_draw_input.hlsl renderer/shadow_mesh.hlsl VERBATIM)
+    DEPENDS "${SIMPSONS_SKIN_ALPHA_SOURCE}" renderer/skin_alpha_draw.hlsl renderer/skin_draw_input.hlsl renderer/skin_rim_control.hlsl
+      renderer/shadow_mesh.hlsl VERBATIM)
   list(APPEND SIMPSONS_RIGID_HEADERS "${HEADER}")
 endforeach()
 set(SIMPSONS_SKIN_DUAL_SOURCE "${SIMPSONS_SHADER_DIR}/skin_dualtextured_shader.hlsl")
@@ -826,7 +828,7 @@ add_custom_command(OUTPUT "${SIMPSONS_SKIN_DUAL_SOURCE}"
     --emit-hlsl "${SIMPSONS_SKIN_DUAL_SOURCE}"
   DEPENDS tools/analyze_skin_dualtextured_shader.py tools/skin_shader_emit.py tools/analyze_rigid_shader.py renderer/palette_coordinate.hlsl
     tools/analyze_screen_shaders.py tools/analyze_edge_shaders.py analysis/simpsons.pe VERBATIM)
-foreach(ENTRY VSSkinDual PSSkinDual PSSkinDualDraw GSSkinDualProbe VSSkinDualPixelProbe)
+foreach(ENTRY VSSkinDual VSSkinDualDraw PSSkinDual PSSkinDualDraw GSSkinDualProbe VSSkinDualPixelProbe)
   if(ENTRY MATCHES "^VS")
     set(PROFILE vs_5_0)
   elseif(ENTRY MATCHES "^GS")
@@ -835,7 +837,7 @@ foreach(ENTRY VSSkinDual PSSkinDual PSSkinDualDraw GSSkinDualProbe VSSkinDualPix
     set(PROFILE ps_5_0)
   endif()
   set(HEADER "${SIMPSONS_SHADER_DIR}/${ENTRY}.h")
-  if(ENTRY STREQUAL "PSSkinDualDraw")
+  if(ENTRY STREQUAL "PSSkinDualDraw" OR ENTRY STREQUAL "VSSkinDualDraw")
     set(SOURCE "${CMAKE_SOURCE_DIR}/renderer/skin_dualtextured_draw.hlsl")
   else()
     set(SOURCE "${SIMPSONS_SKIN_DUAL_SOURCE}")
@@ -843,7 +845,8 @@ foreach(ENTRY VSSkinDual PSSkinDual PSSkinDualDraw GSSkinDualProbe VSSkinDualPix
   add_custom_command(OUTPUT "${HEADER}"
     COMMAND "${SIMPSONS_FXC}" /nologo /Ges /Gis /WX /O3 /T ${PROFILE} /E ${ENTRY}
       /I "${SIMPSONS_SHADER_DIR}" /Fh "${HEADER}" /Vn "k${ENTRY}" "${SOURCE}"
-    DEPENDS "${SIMPSONS_SKIN_DUAL_SOURCE}" renderer/skin_dualtextured_draw.hlsl renderer/shadow_mesh.hlsl VERBATIM)
+    DEPENDS "${SIMPSONS_SKIN_DUAL_SOURCE}" renderer/skin_dualtextured_draw.hlsl renderer/skin_rim_control.hlsl
+      renderer/shadow_mesh.hlsl VERBATIM)
   list(APPEND SIMPSONS_RIGID_HEADERS "${HEADER}")
 endforeach()
 set(SIMPSONS_SKIN_DUAL_ALPHA_SOURCE "${SIMPSONS_SHADER_DIR}/skin_dualalpha_shader.hlsl")
@@ -1360,6 +1363,7 @@ add_custom_command(OUTPUT ${SIMPSONS_TEMPORAL_SOURCES} "${SIMPSONS_TEMPORAL_DIR}
     renderer/skin_alpha_draw.hlsl
     renderer/skin_draw.hlsl
     renderer/skin_draw_input.hlsl
+    renderer/skin_rim_control.hlsl
     renderer/skin_dualalpha_draw.hlsl
     renderer/skin_dualtextured_draw.hlsl
     renderer/skin_dualtextured_uv_alpha_draw.hlsl
@@ -1416,7 +1420,7 @@ set_property(SOURCE renderer/rigid_mesh.cpp APPEND PROPERTY OBJECT_DEPENDS
 set_property(SOURCE renderer/screen_pipeline.cpp APPEND PROPERTY OBJECT_DEPENDS
   "${SIMPSONS_RIGID_HEADERS}")
 set_property(SOURCE renderer/skin_mesh.cpp APPEND PROPERTY OBJECT_DEPENDS
-  "${SIMPSONS_SHADER_DIR}/VSSkin.h;${SIMPSONS_SHADER_DIR}/PSSkinDraw.h;${SIMPSONS_SHADER_DIR}/PSSkinAlphaDraw.h;${SIMPSONS_SHADER_DIR}/VSSkinDual.h;${SIMPSONS_SHADER_DIR}/PSSkinDualDraw.h")
+  "${SIMPSONS_SHADER_DIR}/VSSkin.h;${SIMPSONS_SHADER_DIR}/PSSkinDraw.h;${SIMPSONS_SHADER_DIR}/PSSkinAlphaDraw.h;${SIMPSONS_SHADER_DIR}/VSSkinDual.h;${SIMPSONS_SHADER_DIR}/VSSkinDualDraw.h;${SIMPSONS_SHADER_DIR}/PSSkinDualDraw.h")
 set(SIMPSONS_UI_COMPOSITE_HEADERS)
 foreach(ENTRY VSUiComposite PSUiCompositeDepth)
   if(ENTRY MATCHES "^VS")

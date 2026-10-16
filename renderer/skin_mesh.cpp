@@ -14,6 +14,7 @@
 #include "renderer/skin_input.h"
 #include "material_resources.h"
 #include "VSSkinDual.h"
+#include "VSSkinDualDraw.h"
 #include "PSSkinDualDraw.h"
 #include "PSSkinDualAlphaDraw.h"
 #include "VSSkinTextured.h"
@@ -58,12 +59,15 @@ struct SkinMeshProfile {
     uint32_t opaqueVertex,alphaVertex,opaquePixel,alphaPixel;
     std::span<const uint8_t> layout,opaqueDraw,alphaDraw;
     uint32_t cache;bool exactPass,uv1,shadowed,material,second;
+    // Draw VS that adds the noperspective rim flag (skin_rim_control.hlsl) for
+    // the opaque pass, and for the alpha pass when its PS takes it too.
+    std::span<const uint8_t> rimVertex{};bool alphaRim{};
 };
 SkinMeshProfile meshProfile(uint32_t address) {
     if(address==0x82007C1C||address==0x82008E20)
-        return {0x82007C1C,0x82008E20,0x8200A02C,0x8200A4A4,kVSSkin,kPSSkinDraw,kPSSkinAlphaDraw,0,false,false,false,false,false};
+        return {0x82007C1C,0x82008E20,0x8200A02C,0x8200A4A4,kVSSkin,kPSSkinDraw,kPSSkinAlphaDraw,0,false,false,false,false,false,kVSSkinDraw,true};
     if(address==0x8201E6DC||address==0x8201F984)
-        return {0x8201E6DC,0x8201F984,0x82020B9C,0x82021344,kVSSkinDual,kPSSkinDualDraw,kPSSkinDualAlphaDraw,1,false,true,true,true,false};
+        return {0x8201E6DC,0x8201F984,0x82020B9C,0x82021344,kVSSkinDual,kPSSkinDualDraw,kPSSkinDualAlphaDraw,1,false,true,true,true,false,kVSSkinDualDraw,false};
     if(address==0x8201146C||address==0x820126EC)
         return {0x8201146C,0x820126EC,0x82013900,0x82013F8C,kVSSkinTextured,kPSSkinTexturedDraw,kPSSkinTexturedAlphaDraw,2,false,false,true,true,false};
     if(address==0x8202579C||address==0x820269E8) {
@@ -166,7 +170,7 @@ void requireSkinDrawStages(ID3D11DeviceContext* context) {
 struct NativeSkinMesh::State {
     const NativeBackend* owner{};DWORD thread{};ComPtr<ID3D11Device> device;
     ComPtr<ID3D11Buffer> vertices,indices;ComPtr<ID3D11InputLayout> layout;ComPtr<ID3D11PixelShader> pixel,alphaPixel;
-    ComPtr<ID3D11VertexShader> drawVertex;
+    ComPtr<ID3D11VertexShader> drawVertex,alphaDrawVertex;
     uint32_t vertexCount{},vertexAddress{};R16Indices indexValues;
     DepthConstantsCache depthConstants;
     // Character detail (restart-only): each immediate draw range's smoothed
@@ -223,8 +227,10 @@ struct NativeSkinMesh::State {
         return &entry;
     }
     void validate(const NativeBackend* backend,ID3D11Device* expected) const {
+        const auto profile=meshProfile(vertexAddress);
         need(owner==backend&&thread==GetCurrentThreadId()&&device.Get()==expected&&vertices&&indices&&layout&&pixel&&
-             alphaPixel&&((vertexAddress==0x82007C1C)==bool(drawVertex)),
+             alphaPixel&&profile.rimVertex.empty()!=bool(drawVertex)&&
+             alphaDrawVertex.Get()==(profile.alphaRim?drawVertex.Get():nullptr),
              "Native skin mesh is missing, stale or belongs to another backend");
     }
     void requireBindings(ID3D11DeviceContext* context) const {
@@ -301,8 +307,10 @@ std::shared_ptr<NativeSkinMesh> NativeBackend::uploadSkinMesh(std::span<const Sk
         profile.layout.data(),profile.layout.size(),&result->layout),"skin input layout creation");
     check(device->CreatePixelShader(profile.opaqueDraw.data(),profile.opaqueDraw.size(),nullptr,&result->pixel),"skin depth/color adapter creation");
     check(device->CreatePixelShader(profile.alphaDraw.data(),profile.alphaDraw.size(),nullptr,&result->alphaPixel),"skin alpha depth/color adapter creation");
-    if(profile.cache==0)
-        check(device->CreateVertexShader(kVSSkinDraw,sizeof(kVSSkinDraw),nullptr,&result->drawVertex),"skin rim control adapter creation");
+    if(!profile.rimVertex.empty()) {
+        check(device->CreateVertexShader(profile.rimVertex.data(),profile.rimVertex.size(),nullptr,&result->drawVertex),"skin rim control adapter creation");
+        if(profile.alphaRim)result->alphaDrawVertex=result->drawVertex;
+    }
     result->validate(this,device.Get());requireOwner();
     auto shared = std::shared_ptr<NativeSkinMesh>(new NativeSkinMesh(std::move(result)));
     // Snapshot exact bytes so later caller mutation cannot corrupt the cache.
@@ -504,7 +512,7 @@ void NativeBackend::drawSkinMesh(const std::shared_ptr<RenderTarget>& target,con
     flushIm2D();bindings();
     {
         ScopedSkinDrawBindings restore(context.Get());
-        if(m.drawVertex)context->VSSetShader(m.drawVertex.Get(),nullptr,0);
+        if(auto* rim=(alpha?m.alphaDrawVertex:m.drawVertex).Get())context->VSSetShader(rim,nullptr,0);
         const auto viewport=renderViewport(target,{0,0,float(target->width),float(target->height),0,1});context->RSSetViewports(1,&viewport);
         const D3D11_RECT scissor=renderScissor(target,d.scissorEnable?D3D11_RECT{LONG(d.scissor[0]),LONG(d.scissor[1]),LONG(d.scissor[2]),LONG(d.scissor[3])}:
             D3D11_RECT{0,0,LONG(target->width),LONG(target->height)});
@@ -602,7 +610,7 @@ void NativeBackend::recordSkinMesh(const std::shared_ptr<NativeRecordingPayload>
                            "Native skin scissor exceeds the explicit target");
     auto draw=std::make_shared<RecordedSkinDraw>();draw->owner=this;draw->thread=owner;draw->device=device;
     skinShaderObjects(vertex,pixel,draw->vertex,draw->originalPixel);
-    if(m.drawVertex)draw->vertex=m.drawVertex;
+    if(const auto& rim=alpha?m.alphaDrawVertex:m.drawVertex)draw->vertex=rim;
     draw->mesh=mesh;draw->live=live;draw->colorOwner=target;draw->depthOwner=depth;
     if(shadowed) {
         draw->shadowOwner=d.characterShadow;draw->baseOwner=d.baseTexture;

@@ -78,6 +78,9 @@ def emit(root,profile,shader_dir):
     if varying_type=="SkinDrawVarying":
         current_call="TemporalSkinDraw("+input_name+")"
         text+="\nSkinDrawVarying TemporalSkinDraw(SkinInput input) {\nSkinOutput original=VSSkin(input);SkinDrawVarying result;\nresult.position=original.position;result.t0=original.t0;result.t1=original.t1;result.t2=original.t2;result.t3=original.t3;result.rimControl=original.t3.x;return result;\n}\n"
+    elif varying_type=="SkinDualDrawVarying":
+        # The dual-textured skin wrapper adds its rim flag in its own draw VS.
+        current_call="VSSkinDualDraw("+input_name+")"
     if re.search(r"TEXCOORD(?:14|15)\b",varying):raise ValueError("Temporal semantics collide with original exports")
     transfer="\n".join(f"    result.{field}=original.{field};" for field in fields)
     restore="\n".join(f"    original.{field}=input.{field};" for field in fields)

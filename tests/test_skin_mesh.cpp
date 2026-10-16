@@ -214,6 +214,110 @@ void opaqueEyeRimControl(const std::vector<uint8_t>& image,bool hardware) {
     std::printf("PASS opaque eye rim control %s: %zu pixels; varying clipW, uniform1 suppresses rim, uniform0/mixed0-1 retain rim, direct/recorded parity\n",
         hardware?"hardware":"WARP",checked);
 }
+// Dual-textured skin rim flag: PS82020B9C suppresses rim shadow where
+// floor(color.x) is 1, like the base PS. A flag every vertex shares arrives
+// exactly on Xenos; host perspective interpolation can land an ulp below 1,
+// where floor gives 0 and rim shadow speckles. The draw wrapper keeps the flag
+// noperspective. Over a steep perspective quad, on the recorded and immediate
+// paths, uniform 1 and uniform 0 must each give one exact word in Original and
+// Clean; a mixed flag keeps rim shadow inside its triangles, and Clean splits
+// it at the affine .5 line.
+void dualRimControl(const std::vector<uint8_t>& image,bool hardware) {
+    NativeBackend backend(!hardware);NativeMaterialCompiler compiler(backend);MaterialRegistry registry;
+    const CompiledMaterial *vs=nullptr,*ps=nullptr;
+    constexpr uint32_t vertexAddress=0x8201E6DC,pixelAddress=0x82020B9C,width=256,height=144,id=714;
+    for(const auto& r:originalMaterialIdentities())if(r.originalAddress==vertexAddress||r.originalAddress==pixelAddress) {
+        const auto shaderId=registry.create(r.originalAddress,std::span<const uint8_t>(image).subspan(r.originalAddress-0x82000000,r.recordBytes));
+        const auto& shader=registry.prepareForBind(shaderId,compiler);if(r.stage==MaterialStage::Vertex)vs=&shader;else ps=&shader;
+    }
+    require(vs&&ps,"Missing original dual skin shaders for rim control");
+    auto color=backend.createTarget(width,height,TargetFormat::RGB10A2);auto depth=backend.createDepthTarget(width,height);
+    auto shadow=backend.createDepthTarget(1024,1024);backend.clearDepthTarget(shadow,.25f,0x43);
+    const std::array<uint8_t,4> texel{64,128,192,255};auto base=backend.createTexture(1,1,TextureFormat::RGBA8,texel);
+    SkinMeshDraw d{};d.primitiveType=6;d.indexCount=4;d.viewport={0,0,width,height,0x3F800000,0};
+    d.depthEnable=d.depthWrite=1;d.depthCompare=7;d.colorMask=15;d.halfPixelOffset=1;
+    d.primitiveReset=d.viewportEnable=d.multisampleAntialias=1;d.primitiveResetIndex=0xFFFF;d.multisampleMask=0xFFFFFFFF;
+    d.depthPolicy=ShadowMeshDepthPolicy::Reference20e4Rne;d.blendWord=0x00010001;d.expandedBlend=1;
+    d.shadowSamplePolicy=RigidShadowSamplePolicy::ReferenceD24FS8DepthRRRR;d.characterShadow=shadow;d.baseTexture=base;
+    for(size_t i=0;i<2;++i){auto& s=d.samplers[i];s.Filter=i?D3D11_FILTER_MIN_MAG_MIP_LINEAR:D3D11_FILTER_MIN_MAG_MIP_POINT;
+        s.AddressU=s.AddressV=s.AddressW=i?D3D11_TEXTURE_ADDRESS_WRAP:D3D11_TEXTURE_ADDRESS_CLAMP;
+        s.MaxAnisotropy=1;s.ComparisonFunc=D3D11_COMPARISON_NEVER;s.MaxLOD=i?13.0f:0.0f;}
+    // clip=(x,y,z/2,z) through bone 1: position z carries W, so the screen
+    // quad keeps its corners while W differs per vertex (1..9).
+    SkinVertexConstants vc{};SkinPixelConstants pc{};
+    vc[0][0]=vc[1][1]=1;vc[2][2]=.5f;vc[3][2]=1;
+    for(size_t i=0;i<4;++i)vc[12+i][i]=1;
+    for(size_t i=0;i<3;++i)vc[55+i][i]=1;
+    pc[4]={0,0,3,1};pc[36]={0,0,1,0};pc[49]={0,0,float(id),1};pc[46][0]=pc[47][0]=pc[31][0]=1;pc[30][1]=.25f;
+    constexpr std::array<std::array<float,3>,4> corners={{{-1,1,1},{-1,-1,4},{1,1,6},{1,-1,9}}};
+    const std::array<uint16_t,4> indices{0,1,2,3};
+    // Blue is .2*base.b+.25*(1-floor(color.x))+.5*(color.z>=.9) with color.z 1:
+    // 666 where the flag suppresses rim shadow, 921 with rim shadow.
+    constexpr uint32_t flagged=666,rimmed=921;
+    auto* context=NativeRecordingProbe::context(backend);
+    auto recording=backend.createRecordingContext();auto live=backend.createSkinReplayConstants(vc,pc);NativeRecordingMask mask{};
+    size_t checked=0,lit=0,rim=0;
+    for(unsigned control=0;control<3;++control) {
+        std::array<SkinVertex,4> vertices{};
+        for(size_t i=0;i<4;++i) {
+            const float w=corners[i][2];auto& v=vertices[i];
+            v.position={corners[i][0]*w,corners[i][1]*w,w};v.normal={0,0,-1};v.indices={1,0,0,0};v.weights={1,0,0,0};
+            // Mixed flags the top-left and bottom-right corners: each strip
+            // triangle has one flagged vertex, whose affine weight is |ny-nx|/2.
+            const float flag=control==0?1.0f:control==1?0.0f:float(i==0||i==3);
+            // An off-grid palette coordinate keeps red exact under any interpolation.
+            v.color={flag,1,1,1};v.uv={.25f,.25f};v.uv1={.320299983f,.789099991f};
+        }
+        const auto mesh=backend.uploadSkinMesh(vertices,indices,vertexAddress);
+        backend.bindTargets({color,nullptr,nullptr,nullptr},depth);backend.bindSkinShaders(*vs,*ps);
+        backend.bindSkinMeshVertices(mesh);backend.bindSkinMeshDeclaration(mesh);backend.bindSkinMeshIndices(mesh);
+        backend.bindRigidShadowDepth(0,shadow);backend.bindEngineTexture(1,base);
+        const auto commit=backend.commitSkin(*vs,*ps,vc,pc);
+        // Recorded while Original; Clean reaches it through the live re-record.
+        auto payload=backend.allocateRecordingPayload(recording,0x3000);backend.beginRecordingPayload(payload,4,mask,mask);
+        backend.recordSkinMesh(payload,color,depth,mesh,*vs,*ps,vc,pc,live,d);backend.finishRecordingPayload(payload);
+        for(bool clean:{false,true}) {
+            require(backend.configureCleanEyes(clean)&&backend.cleanEyes()==clean,"Dual rim Clean eyes did not apply");
+            std::vector<uint8_t> direct;
+            for(bool deferred:{false,true}) {
+                backend.clearTarget(color,{1,0,1,1});backend.clearDepthTarget(depth,0,0x67);
+                const EngineBindingResetProbe::Snapshot before(context);
+                if(deferred)backend.executeRecordingPayload(payload);
+                else backend.drawSkinMesh(color,depth,mesh,*vs,*ps,commit,d);
+                backend.waitIdle();
+                require(EngineBindingResetProbe::Snapshot(context)==before,"Dual rim draw changed retained bindings");
+                const auto pixels=backend.readbackTarget(color);
+                const uint32_t first=word(pixels,0),blueMask=1023u<<20;
+                for(uint32_t y=0;y<height;++y)for(uint32_t x=0;x<width;++x) {
+                    const uint32_t packed=word(pixels,4*(size_t(y)*width+x)),blue=(packed>>20)&1023;
+                    uint32_t expected=control==0?flagged:rimmed;
+                    if(control==2) {
+                        // Skip the triangle edges and Clean's .5 line.
+                        const float nx=2*(float(x)+.5f)/width-1,ny=1-2*(float(y)+.5f)/height;
+                        const float flag=std::abs(ny-nx)/2;
+                        const float edge=std::min({flag,(1-nx)/2,(1+nx)/2,(1-ny)/2,(1+ny)/2});
+                        if(edge<=.05f||(clean&&std::abs(flag-.5f)<=.05f))continue;
+                        if(clean&&flag>.5f)expected=flagged;
+                        if(clean&&!deferred)++(expected==flagged?lit:rim);
+                    }
+                    if(blue!=expected||(packed&~blueMask)!=(first&~blueMask)||(control!=2&&packed!=first)) {
+                        char why[260];std::snprintf(why,sizeof(why),"Dual rim control%u %s %s pixel%u,%u: word%08X blue%u expected%u first%08X (vertex color.x is %s)",
+                            control,clean?"Clean":"Original",deferred?"recorded":"direct",x,y,packed,blue,expected,first,
+                            control==0?"uniform1":control==1?"uniform0":"mixed0/1");throw Error(why);
+                    }
+                    ++checked;
+                }
+                if(!deferred)direct=pixels;else require(pixels==direct,"Dual rim direct/recorded pixels differ");
+            }
+        }
+        require(backend.configureCleanEyes(false)&&!backend.cleanEyes(),"Dual rim Clean eyes did not switch back");
+        backend.releaseRecordingPayload(payload);
+    }
+    require(lit>4000&&rim>10000,"Dual rim fixture lacks both sides of the Clean flag midline");
+    backend.releaseSkinReplayConstants(live);backend.releaseRecordingContext(recording);
+    std::printf("PASS dual skin rim control %s: %zu pixels over a %ux%u quad with clip W 1..9; uniform1 suppresses rim, uniform0/mixed0-1 retain it, Clean splits mixed at .5 (%zu lit, %zu rim), direct/recorded parity\n",
+        hardware?"hardware":"WARP",checked,width,height,lit,rim);
+}
 void run(const std::vector<uint8_t>& image,bool hardware,bool textured=false) {
     NativeBackend backend(!hardware);NativeMaterialCompiler compiler(backend);MaterialRegistry registry;
     const CompiledMaterial *vs=nullptr,*ps=nullptr,*oldVS=nullptr;
@@ -882,5 +986,5 @@ int main(int argc,char** argv)try {
     SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);
     require(argc==2||(argc==3&&std::string(argv[2])=="--hardware"),"Supply original image and optional --hardware");
     std::ifstream input(argv[1],std::ios::binary);std::vector<uint8_t> image((std::istreambuf_iterator<char>(input)),{});
-    require(image.size()==15466496,"Original image size differs");opaqueEyeRimControl(image,argc==3);run(image,argc==3);run(image,argc==3,true);for(unsigned profile=0;profile<3;++profile)alphaBlend(image,argc==3,profile);uploadCacheReuse(argc==3);characterDetailParity(image,argc==3);cleanEyesControl(image,argc==3);paletteInterpolation(image,argc==3);requireMeshGpuRetirements([](bool value,const char* message){require(value,message);});return 0;
+    require(image.size()==15466496,"Original image size differs");opaqueEyeRimControl(image,argc==3);dualRimControl(image,argc==3);run(image,argc==3);run(image,argc==3,true);for(unsigned profile=0;profile<3;++profile)alphaBlend(image,argc==3,profile);uploadCacheReuse(argc==3);characterDetailParity(image,argc==3);cleanEyesControl(image,argc==3);paletteInterpolation(image,argc==3);requireMeshGpuRetirements([](bool value,const char* message){require(value,message);});return 0;
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL skin mesh: %s\n",e.what());return 1;}
