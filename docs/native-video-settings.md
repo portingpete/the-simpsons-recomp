@@ -249,7 +249,10 @@ the adjusted vertical view. The original camera setter updates the culling
 frustum. Original restores the authored view, and repeated camera begins do not
 accumulate the adjustment. HUD, menus, shadow, reflection, and split-screen
 camera profiles retain their original projections. Apt UI and movies retain
-their 16:9 proportions.
+their 16:9 proportions. On wider outputs the frontend (title, menus, loading
+screens) and full-screen in-game menus such as the pause menu and its
+transition draw their Apt art past the 16:9 stage at the stage's own scale
+instead of adding bars; the gameplay HUD keeps the 16:9 stage. See `docs/native-ultrawide-frontend.md`.
 
 The effect switches default to On. Each switch controls the corresponding
 original effect when a scene requests it. Lens flare is the original

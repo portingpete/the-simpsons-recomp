@@ -262,6 +262,7 @@ def build(source):
     from build_native_control_menu import patch_controls
     from build_native_audio_menu import patch_audio
     from build_native_main_menu import patch_main_menu
+    from build_native_ultrawide_art import ULTRAWIDE_RESOURCES, patch_ultrawide
     data=source.read_bytes(); entries=stoc_entries(data)['entries']; output=bytearray(data[:entries[0]['file_offset']])
     found=False
     for e in entries:
@@ -270,11 +271,11 @@ def build(source):
         # Several UIX resources can share one decoded entry. Patch from the
         # back so each original descriptor/payload offset stays valid.
         for c in reversed(list(resource_chunks(decoded))):
-            if c.get('name') in MENU_NAMES:
+            if c.get('name') in MENU_NAMES or c.get('name') in ULTRAWIDE_RESOURCES:
                 at=c['payload_decoded_offset']; size=c['payload_size']; original=decoded[at:at+size]
                 if c['name']=='options.swf':original=patch_audio(patch_controls(patch_options(original)))
                 elif c['name']=='frontend.swf':original=patch_main_menu(original)
-                patch=patch_mouse(original)
+                patch=patch_ultrawide(c['name'],patch_mouse(original) if c['name'] in MENU_NAMES else original)
                 end=at+size; new=bytearray(decoded[:at]+patch+b'\0'*(-len(patch)%4)+decoded[align(end,4):])
                 desc=c['decoded_offset']+16
                 _,pos=padded_string(decoded,desc)

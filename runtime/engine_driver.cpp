@@ -328,6 +328,10 @@ struct EngineDriver::State {
     uint64_t presentedDepthCopies{};
     bool presenting{};
     bool uiDrawing{};
+    bool uiOverscan{}; // This UI pass shows authored art past the 16:9 stage.
+    bool uiBackdropDrawn{},uiBackdropShown{}; // Full-screen menu backdrop this/last frame.
+    bool uiBandDrawn{},uiBandShown{}; // A flat full-width UI band spanned the output this/last frame.
+    bool pausedThisFrame{},pausedLastFrame{}; // Original gameplay pause query this/last frame.
     uint32_t contextId{};
     std::optional<NativeCameraBinding> camera;
     std::unordered_map<uint32_t,NativeCameraLifetime> cameraLifetimes;
@@ -3915,6 +3919,15 @@ void EngineDriver::present(PPCContext& incoming,uint8_t* base,uint32_t raster) {
         // Menus/movies, depth-only draws, and previous frames cannot supply
         // the positive scene-geometry receipt for this frame.
         s.presentedSceneGeometryDraws=sceneDraws;
+        if(s.uiBackdropDrawn!=s.uiBackdropShown)
+            std::fprintf(stderr,"[NATIVE UI OVERSCAN] full-screen menu backdrop %s\n",s.uiBackdropDrawn?"shown":"hidden");
+        s.uiBackdropShown=s.uiBackdropDrawn;s.uiBackdropDrawn=false;
+        if(s.uiBandDrawn!=s.uiBandShown)
+            std::fprintf(stderr,"[NATIVE UI OVERSCAN] full-width UI band %s\n",s.uiBandDrawn?"spans the output":"ended");
+        s.uiBandShown=s.uiBandDrawn;s.uiBandDrawn=false;
+        if(s.pausedThisFrame!=s.pausedLastFrame)
+            std::fprintf(stderr,"[NATIVE UI OVERSCAN] gameplay %s\n",s.pausedThisFrame?"paused":"resumed");
+        s.pausedLastFrame=s.pausedThisFrame;s.pausedThisFrame=false;
         // Compare the original full-size viewport's post-scene depth-copy
         // receipt on every presentation. An uncaptured intervening frame must
         // never make an older depth snapshot look fresh at the next capture.
@@ -4117,6 +4130,7 @@ std::array<uint32_t,2> EngineDriver::nativeTemporalJitterExtent() const {
     return s.backend.sceneExtent();
 }
 uint64_t EngineDriver::presentationSerial() const {state->requireCaller(state->runtime.base);return state->frontCopies;}
+void EngineDriver::noteGameplayPaused() {state->requireCaller(state->runtime.base);state->pausedThisFrame=true;}
 void EngineDriver::photoHud(bool begin) {
     auto& s=*state;s.requireCaller(s.runtime.base);
     const auto color=s.backend.routeColor(s.resources.resources().defaultColor);
@@ -4191,6 +4205,14 @@ void EngineDriver::setUiDrawing(bool drawing) {
         s.cameraOriginalColor(*s.camera)==s.resources.resources().defaultColor&&s.cameraOriginalDepth(*s.camera)==s.resources.resources().defaultDepth) {
         s.prepareTemporalUiOnlyOutput();
         s.applyWorldLook(s.cameraColor(*s.camera));
+    }
+    if(drawing&&!s.uiDrawing) {
+        // Frontend screens draw no world, a full-screen menu (a TV cabinet seen
+        // last frame) covers it, and the pause menu's transitions play over a
+        // paused game: their wide authored art may show past the stage. The
+        // gameplay HUD keeps the 16:9 stage.
+        const auto sceneDraws=s.backend.rigidMeshDrawCount()+s.backend.skinMeshDrawCount()+s.backend.skyMeshDrawCount();
+        s.uiOverscan=sceneDraws==s.presentedSceneGeometryDraws||s.uiBackdropShown||s.pausedThisFrame||s.pausedLastFrame;
     }
     s.uiDrawing=drawing;
 }
@@ -4808,7 +4830,17 @@ void EngineDriver::drawIm2D(PPCContext& c,uint8_t* base) {
     if(draw.depthTest && (!depth || PPC_LOAD_U32(0x82E3DD08)!=0x1A220197))
         throw Failure("Original Im2D enabled depth requires the qualified D24FS8 working surface");
     draw.stencil=effective.scalar(S::StencilEnable)!=0;
-    draw.preserveAspect=s.uiDrawing && !Graphics::isFullCanvasUiFill(draw);
+    // Flat bands across the canvas (pause shutters, which start closing before
+    // the game reports paused) span a wide output like the fills. On outputs
+    // at least as wide as the canvas both viewports map y identically, so only
+    // their flat color reaches the sides.
+    const bool fill=Graphics::isFullCanvasUiFill(draw);
+    const bool wideBand=s.uiDrawing && !fill && s.backend.renderAspect()*draw.rasterHeight>=double(draw.rasterWidth) &&
+        Graphics::isFullWidthUiBand(draw);
+    draw.preserveAspect=s.uiDrawing && !fill && !Graphics::isCanvasDepthClear(draw) && !wideBand;
+    draw.overscan=draw.preserveAspect && s.uiOverscan;
+    if(s.uiDrawing && Graphics::isFullCanvasUiBackdrop(draw))s.uiBackdropDrawn=true;
+    if(wideBand)s.uiBandDrawn=true;
     if(raster) {
         draw.sampler.Filter=D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
         draw.sampler.AddressU=checked.sampler->addressU==2?D3D11_TEXTURE_ADDRESS_CLAMP:D3D11_TEXTURE_ADDRESS_WRAP;

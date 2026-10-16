@@ -6,6 +6,7 @@ from build_native_mouse_menu import MENU_NAMES, patch_mouse, constant_references
 from build_native_control_menu import patch_controls
 from build_native_audio_menu import patch_audio
 from build_native_main_menu import patch_main_menu
+from build_native_ultrawide_art import ULTRAWIDE_RESOURCES, patch_ultrawide
 
 def resources(data):
     result={}
@@ -105,16 +106,19 @@ class NativeActions:
 
 class NativeMenuTests(unittest.TestCase):
     def test_only_video_options_change(self):
+        patched=set()
         for package in PACKAGES:
-            with self.subTest(package=package): self.check_package(package)
+            with self.subTest(package=package): patched|=self.check_package(package)
+        self.assertEqual(patched,ULTRAWIDE_RESOURCES) # Every ultrawide art patch lands in a built package.
     def check_package(self,package):
         source=ROOT/'Simpsons Game, The (USA)'/package
         before=source.read_bytes(); original=resources(before); native=resources(build(source))
         self.assertEqual(original.keys(),native.keys())
         for name in original:
-            if name not in MENU_NAMES:self.assertEqual(original[name],native[name],name)
-            elif name=='frontend.swf':self.assertEqual(native[name],patch_mouse(patch_main_menu(original[name])),name)
-            elif name!='options.swf':self.assertEqual(native[name],patch_mouse(original[name]),name)
+            # Ultrawide art patches follow the menu patches (identity elsewhere).
+            if name not in MENU_NAMES:self.assertEqual(native[name],patch_ultrawide(name,original[name]),name)
+            elif name=='frontend.swf':self.assertEqual(native[name],patch_ultrawide(name,patch_mouse(patch_main_menu(original[name]))),name)
+            elif name!='options.swf':self.assertEqual(native[name],patch_ultrawide(name,patch_mouse(original[name])),name)
         self.assertEqual(source.read_bytes(),before)
         self.assertEqual(native['options.swf'],patch_mouse(patch_audio(patch_controls(patch_options(original['options.swf'])))))
         for entry in stoc_entries(build(source))['entries']:
@@ -181,6 +185,7 @@ class NativeMenuTests(unittest.TestCase):
         # opcode bytes, geometry and all timeline structures remain pinned.
         for slot in constant_references(apt,0x5f8):changed.update(range(slot,slot+4))
         self.assertTrue(all(x==apt[i] or i in changed for i,x in enumerate(old)))
+        return ULTRAWIDE_RESOURCES&original.keys()
     def test_packaged_video_actions(self):
         for package in PACKAGES:
             with self.subTest(package=package):

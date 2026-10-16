@@ -466,6 +466,8 @@ void updateNativeFreeCamera(const PPCContext& ctx,uint8_t* base,uint32_t camera)
 void SimpsonsNativePhotoPause(PPCContext& ctx,uint8_t* base) {
     auto* rt=Simpsons::active;
     if(!rt||base!=rt->base)return;
+    // r3 is the original pause query (nonzero while the pause menu runs).
+    if((ctx.r3.u32&0xff)&&rt->engineDriver)rt->engineDriver->noteGameplayPaused();
     // Same skip as the pause menu's paused state; rendering continues.
     if(!rt->freeCamera.photo)return;
     ctx.r3.u64=1;
