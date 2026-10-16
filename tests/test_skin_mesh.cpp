@@ -26,6 +26,7 @@ template<class F>void rejects(F action){bool failed=false;try{action();}catch(co
 #include "header/test_engine_binding_reset.h"
 #include "header/test_mesh_gpu_retirement.h"
 #include "header/test_r16_strip_boundary.h"
+#include "header/test_palette_interpolation.h"
 namespace Simpsons::Graphics {
 struct NativeRecordingProbe {
     static ID3D11DeviceContext* context(NativeBackend& b){return b.context.Get();}
@@ -874,9 +875,112 @@ void characterDetailParity(const std::vector<uint8_t>& image,bool hardware) {
     }
     std::printf("PASS character detail parity %s: Off/Low/High flat quad direct and recorded pixels, depth and retained streams\n",hardware?"hardware":"WARP");
 }
+// Palette coordinates, skin side of RigidMeshTests paletteInterpolation. The
+// opaque skin PS packs uv0 as 32*floor(32*frac(2v))+floor(64*frac(u)) into
+// green; dual-textured, gloss, flipbook and dual-textured UV (opaque and
+// alpha) pack uv1 plus the object id into red. A palette value every vertex
+// shares arrives exactly on Xenos; host perspective interpolation can land an
+// ulp below it and change the code on alternate rows. Every pixel of a steep
+// perspective quad must keep one exact word on the recorded and immediate draw.
+void paletteInterpolation(const std::vector<uint8_t>& image,bool hardware) {
+    struct Family {const char* name;uint32_t vertex,pixel;bool red,shadowed,base,second;};
+    const std::array<Family,6> families={{
+        {"skin",0x82007C1C,0x8200A02C,false,false,false,false},
+        {"dualtextured",0x8201E6DC,0x82020B9C,true,true,true,false},
+        {"gloss",0x8202579C,0x82027C18,true,false,true,false},
+        {"flipbook",0x8203D93C,0x82040118,true,false,true,false},
+        {"dualtextured-uv",0x8204BA4C,0x8204E2DC,true,false,true,true},
+        {"dualtextured-uv-alpha",0x8204CE90,0x8204E75C,true,false,true,true}}};
+    constexpr uint32_t width=Test::paletteWidth,height=Test::paletteHeight,id=Test::paletteId;
+    const auto& cases=Test::paletteCases;const auto& corners=Test::paletteCorners;
+    size_t draws=0;
+    for(const auto& family:families) {
+        NativeBackend backend(!hardware);NativeMaterialCompiler compiler(backend);MaterialRegistry registry;
+        const CompiledMaterial *vs=nullptr,*ps=nullptr;
+        for(const auto& r:originalMaterialIdentities())if(r.originalAddress==family.vertex||r.originalAddress==family.pixel) {
+            const auto shaderId=registry.create(r.originalAddress,std::span<const uint8_t>(image).subspan(r.originalAddress-0x82000000,r.recordBytes));
+            const auto& shader=registry.prepareForBind(shaderId,compiler);if(r.stage==MaterialStage::Vertex)vs=&shader;else ps=&shader;
+        }
+        require(vs&&ps,"Missing original skin palette shaders");
+        auto color=backend.createTarget(width,height,TargetFormat::RGB10A2);auto depth=backend.createDepthTarget(width,height);
+        auto shadow=backend.createDepthTarget(1024,1024);backend.clearDepthTarget(shadow,.25f,0x43);
+        SkinMeshDraw d{};d.primitiveType=6;d.indexCount=4;d.viewport={0,0,width,height,0x3F800000,0};
+        d.depthEnable=d.depthWrite=1;d.depthCompare=7;d.colorMask=15;d.halfPixelOffset=1;
+        d.primitiveReset=d.viewportEnable=d.multisampleAntialias=1;d.primitiveResetIndex=0xFFFF;d.multisampleMask=0xFFFFFFFF;
+        d.depthPolicy=ShadowMeshDepthPolicy::Reference20e4Rne;d.blendWord=0x00010001;d.expandedBlend=1;
+        D3D11_SAMPLER_DESC point{},wrap{};
+        point.Filter=D3D11_FILTER_MIN_MAG_MIP_POINT;point.AddressU=point.AddressV=point.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;
+        point.MaxAnisotropy=1;point.ComparisonFunc=D3D11_COMPARISON_NEVER;
+        wrap.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;wrap.AddressU=wrap.AddressV=wrap.AddressW=D3D11_TEXTURE_ADDRESS_WRAP;
+        wrap.MaxAnisotropy=1;wrap.ComparisonFunc=D3D11_COMPARISON_NEVER;wrap.MaxLOD=13;
+        const std::array<uint8_t,4> baseTexel{64,128,192,255},secondTexel{32,160,224,192};
+        if(family.base)d.baseTexture=backend.createTexture(1,1,TextureFormat::RGBA8,baseTexel);
+        if(family.second)d.secondTexture=backend.createTexture(1,1,TextureFormat::RGBA8,secondTexel);
+        if(family.shadowed) {
+            // Character depth t0 (point/clamp), base t1.
+            d.shadowSamplePolicy=RigidShadowSamplePolicy::ReferenceD24FS8DepthRRRR;d.characterShadow=shadow;d.samplers={point,wrap};
+        } else d.samplers={wrap,wrap};
+        // clip=(x,y,z/2,z) through bone 1: position z carries w, so the screen
+        // quad keeps its corners while w differs per vertex (1..9).
+        SkinVertexConstants vc{};SkinPixelConstants pc{};
+        vc[0][0]=vc[1][1]=1;vc[2][2]=.5f;vc[3][2]=1;
+        for(size_t i=0;i<4;++i)vc[12+i][i]=1;
+        for(size_t i=0;i<3;++i)vc[55+i][i]=1;
+        // c49.z is the object id.
+        pc[4]={0,0,3,1};pc[36]={0,0,1,0};pc[49]={0,0,float(id),1};pc[46][0]=pc[47][0]=pc[31][0]=1;pc[30][1]=.25f;
+        const auto commit=[&]{return backend.commitSkin(*vs,*ps,vc,pc);};
+        auto recording=backend.createRecordingContext();auto live=backend.createSkinReplayConstants(vc,pc);NativeRecordingMask mask{};
+        for(const auto& coordinate:cases) {
+            std::array<SkinVertex,4> vertices{};
+            for(size_t i=0;i<4;++i) {
+                const float w=corners[i][2];auto& v=vertices[i];
+                v.position={corners[i][0]*w,corners[i][1]*w,w};v.normal={0,0,-1};v.indices={1,0,0,0};v.weights={1,0,0,0};
+                // Colour clear of the floor(color.x) rim flag and other
+                // thresholds; opaqueEyeRimControl and dualRimControl cover those.
+                v.color={.5f,.5f,.5f,.6f};v.uv={.25f,.25f};v.uv1={.25f,.25f};
+                (family.red?v.uv1:v.uv)=coordinate;
+            }
+            const std::array<uint16_t,4> indices{0,1,2,3};
+            const auto mesh=backend.uploadSkinMesh(vertices,indices,family.vertex);
+            const uint32_t palette=Test::paletteCode(coordinate[0],coordinate[1]);
+            const uint32_t expected=Test::paletteChannel(family.red,palette);
+            require(Test::paletteChannelExact(family.red,palette),"Skin palette fixture code must be even");
+            const auto check=[&](const char* path) {
+                const auto colors=backend.readbackTarget(color);
+                const uint32_t first=word(colors,0);
+                for(uint32_t y=0;y<height;++y)for(uint32_t x=0;x<width;++x) {
+                    const uint32_t value=word(colors,4*(size_t(y)*width+x));
+                    const uint32_t channel=family.red?value&1023:(value>>10)&1023;
+                    if(channel!=expected||value!=first) {
+                        char text[240];std::snprintf(text,sizeof(text),"Skin %s %s palette (%.9g,%.9g) pixel(%u,%u) channel=%u expected=%u word=%08X first=%08X",
+                            family.name,path,coordinate[0],coordinate[1],x,y,channel,expected,value,first);throw Error(text);
+                    }
+                }
+            };
+            auto payload=backend.allocateRecordingPayload(recording,0x3000);backend.beginRecordingPayload(payload,4,mask,mask);
+            backend.recordSkinMesh(payload,color,depth,mesh,*vs,*ps,vc,pc,live,d);backend.finishRecordingPayload(payload);
+            backend.clearTarget(color,{1,0,1,1});backend.clearDepthTarget(depth,0,0x67);
+            backend.executeRecordingPayload(payload);backend.waitIdle();check("recorded");
+            backend.releaseRecordingPayload(payload);
+            backend.bindTargets({color,nullptr,nullptr,nullptr},depth);backend.bindSkinShaders(*vs,*ps);
+            backend.bindSkinMeshVertices(mesh);backend.bindSkinMeshDeclaration(mesh);backend.bindSkinMeshIndices(mesh);
+            if(family.shadowed){backend.bindRigidShadowDepth(0,shadow);backend.bindEngineTexture(1,d.baseTexture);}
+            else if(family.base) {
+                backend.bindEngineTexture(0,d.baseTexture);
+                if(family.second)backend.bindEngineTexture(1,d.secondTexture);
+            }
+            backend.clearTarget(color,{1,0,1,1});backend.clearDepthTarget(depth,0,0x67);
+            backend.drawSkinMesh(color,depth,mesh,*vs,*ps,commit(),d);backend.waitIdle();check("immediate");
+            draws+=2;
+        }
+        backend.releaseSkinReplayConstants(live);backend.releaseRecordingContext(recording);
+    }
+    std::printf("PASS skin palette interpolation %s: skin/dual-textured/gloss/flipbook/dual-textured UV opaque and alpha keep one exact code for %zu grid-aligned triangle-constant palette coordinates over a %ux%u perspective quad (%zu recorded and immediate draws)\n",
+        hardware?"hardware":"WARP",cases.size(),width,height,draws);
+}
 int main(int argc,char** argv)try {
     SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);
     require(argc==2||(argc==3&&std::string(argv[2])=="--hardware"),"Supply original image and optional --hardware");
     std::ifstream input(argv[1],std::ios::binary);std::vector<uint8_t> image((std::istreambuf_iterator<char>(input)),{});
-    require(image.size()==15466496,"Original image size differs");opaqueEyeRimControl(image,argc==3);dualRimControl(image,argc==3);run(image,argc==3);run(image,argc==3,true);for(unsigned profile=0;profile<3;++profile)alphaBlend(image,argc==3,profile);uploadCacheReuse(argc==3);characterDetailParity(image,argc==3);cleanEyesControl(image,argc==3);requireMeshGpuRetirements([](bool value,const char* message){require(value,message);});return 0;
+    require(image.size()==15466496,"Original image size differs");opaqueEyeRimControl(image,argc==3);dualRimControl(image,argc==3);run(image,argc==3);run(image,argc==3,true);for(unsigned profile=0;profile<3;++profile)alphaBlend(image,argc==3,profile);uploadCacheReuse(argc==3);characterDetailParity(image,argc==3);cleanEyesControl(image,argc==3);paletteInterpolation(image,argc==3);requireMeshGpuRetirements([](bool value,const char* message){require(value,message);});return 0;
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL skin mesh: %s\n",e.what());return 1;}

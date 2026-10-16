@@ -202,11 +202,12 @@ def shader_source(image):
     lines += emit_control(rows['VS'], 'VS')
     lines += ['    SkinDualOutput o; o.position=output62; o.uv=output0.xy; o.uv1=output1.xy;',
               '    o.normal=output2.xyz; o.world=output3; o.shadow=output4; o.color=output5; return o;', '}',
-              'float4 PSSkinDual(SkinDualOutput input):SV_Target0 {']
+              rigid.PALETTE_COORDINATE, 'float4 PSSkinDual(SkinDualOutput input):SV_Target0 {']
     for i in range(5):
         lines.append('    const float4 k%d=asfloat(uint4(%s));' %
                      (251+i, ','.join('0x%08Xu' % v for v in PS_LITERALS[12+4*i:16+4*i])))
-    lines += ['    precise float4 r0=float4(input.uv,0,0),r1=float4(input.uv1,0,0);',
+    # uv1 is the palette coordinate, read only through frac().
+    lines += ['    precise float4 r0=float4(input.uv,0,0),r1=float4(rigidPaletteCoordinate(input.uv1),0,0);',
               '    precise float4 r2=float4(input.normal,0),r3=input.world,r4=input.shadow,r5=input.color;',
               '    precise float4 r6=0,r7=0,r8=0,output0=0; precise float ps=0; bool p0=false;']
     lines += emit_control(rows['PS'], 'PS')

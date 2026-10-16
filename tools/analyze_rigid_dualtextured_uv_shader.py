@@ -283,12 +283,12 @@ def shader_source(image):
         lines.extend(issue(slot,row,'VS') for slot,row in inventory[stage]['rows'].items() if not row['fetch'])
         lines += [f'    {output} result; result.position=output62; result.t0=output0; result.t1='+('output1;' if alpha else 'output1.xy;')]
         if not alpha:lines += ['    result.t2=output2; result.t3=output3.xyz; result.t4=output4;']
-        lines += ['    return result;','}',f'float4 PS{name}({output} input):SV_Target0 {{']
+        lines += ['    return result;','}']+([] if alpha else [rigid.PALETTE_COORDINATE])+[f'float4 PS{name}({output} input):SV_Target0 {{']
         stage='APS' if alpha else 'PS';literals=LITERALS[stage];first=256-len(literals)//4
         for i in range(len(literals)//4):
             lines.append(f'    const float4 k{first+i}=asfloat(uint4('+','.join('0x%08Xu'%v for v in literals[4*i:4*i+4])+'));')
         lines += (['    precise float4 r0=input.t0,r1=input.t1,r2=0,r3=0,r4=0;'] if alpha else
-                  ['    precise float4 r0=input.t0,r1=float4(input.t1,0,0),r2=input.t2,r3=float4(input.t3,0);',
+                  ['    precise float4 r0=input.t0,r1=float4(rigidPaletteCoordinate(input.t1),0,0),r2=input.t2,r3=float4(input.t3,0);',
                    '    precise float4 r4=input.t4,r5=0,r6=0,r7=0;'])
         lines += ['    precise float4 output0=0; precise float ps=0; bool p0=false;']
         lines += emit_ps_control(inventory[stage]['rows'],alpha)

@@ -209,13 +209,14 @@ def shader_source(image):
     lines += ['    SkinOutput result; result.position=output62;',
               '    result.t0=output0.xy; result.t1=output1.xyz;',
               '    result.t2=output2; result.t3=output3; return result;', '}']
-    lines += ['float4 PSSkin(SkinOutput input):SV_Target0 {']
+    lines += [rigid.PALETTE_COORDINATE, 'float4 PSSkin(SkinOutput input):SV_Target0 {']
     plits = struct.unpack_from('>16I', image, PROFILES[1][1] - screen.BASE + 604)
     screen.require(tuple(plits) == PS_LITERALS, 'Skin PS literal bank changed')
     for i in range(4):
         lines.append('    const float4 k%d=asfloat(uint4(%s));' %
                      (252 + i, ','.join('0x%08Xu' % v for v in plits[i * 4:i * 4 + 4])))
-    lines += ['    precise float4 r0=float4(input.t0,0,0),r1=float4(input.t1,0),r2=input.t2,r3=input.t3;',
+    # t0 is the palette coordinate (uv0), read only through frac().
+    lines += ['    precise float4 r0=float4(rigidPaletteCoordinate(input.t0),0,0),r1=float4(input.t1,0),r2=input.t2,r3=input.t3;',
               '    precise float4 r4=0,r5=0,r6=0,r7=0,output0=0;',
               '    precise float ps=0; bool p0=false;']
     lines += emit_ps_control(inventory['PS']['rows'])
