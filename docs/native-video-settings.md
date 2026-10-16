@@ -112,13 +112,14 @@ composite. Original keeps it exact (the extra parameters are zero). Soft fades
 the lines to the chosen strength, Off removes them, and Outline color tints
 them (black is the original).
 
-Character eyes **Clean** affects the base character shader family, whose
-vertex color carries the artists' "no rim shadow" flag (eye whites). The
-original rim test only accepts a fully set flag; Clean accepts it from 0.5, so
-triangles where the flag is partly set no longer show speckled rim shadow on
-eye whites. The native port already interpolates this flag without
-perspective, which removes most of the console's speckles even in Original.
-Changing it re-records sealed skin draws.
+Character eyes **Clean** affects the base and dual-textured character shader
+families, whose vertex color carries the artists' "no rim shadow" flag (eye
+whites). The original rim test only accepts a fully set flag; Clean accepts it
+from 0.5, so triangles where the flag is partly set no longer show speckled rim
+shadow on eye whites. The native port already interpolates this flag without
+perspective, which removes most of the console's speckles even in Original
+(see "Skin rim flag" in native-rigid.md). Changing it re-records sealed skin
+draws.
 
 ## Character detail
 
