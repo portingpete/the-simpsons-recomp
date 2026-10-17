@@ -58,15 +58,39 @@ swap chain). When DXGI reports a late flip, the next frame aims one interval
 after the vblank that the newest queued frame will really reach. The display
 still shows a new frame on every refresh while the queue drains.
 
+**Display latency.** Some presentation paths show every frame a fixed number
+of refreshes after the vblank it aimed for (a DWM-composed window; on
+2026-10-16 both renderers' background benchmark windows flipped exactly one
+refresh late: release to flip 15.6 ms with a 7.3 ms lead). That is latency,
+not a miss: each refresh still shows a new frame. Treating it as a miss made
+the drain move every other frame's target one refresh later, so a 120 FPS
+workload alternated one and two refreshes (~80 FPS) and a 60 FPS one two and
+three (~48 FPS). The pacer now keeps the refreshes between each on-slot
+frame's target and its flip for the last 32 frames; their minimum is the
+path's constant latency. Once the path lead has reached its maximum (no lead
+could have kept those vblanks, which also rules out a lead that is merely
+short), lateness and the drain are measured past that latency. A frame later
+than the latency is still a miss, and a single direct flip in the window
+drops the latency to zero again.
+
 **Whole refreshes on fixed displays.** Once at least 58 of the last 64 flips
 land within 1/32 of a refresh of the DWM grid, the display is treated as fixed
 refresh. A rate the machine cannot sustain then steps to the next whole number
 of refreshes (an even 59.9 FPS instead of alternating one and two refreshes).
 The decision replays the last 64 frame costs against the interval with a
 half-refresh buffer. It steps up when more than one frame in eight would
-miss, and back when at most one in 32 would miss the shorter interval. On
-variable-refresh or unconfirmed displays the existing percentile hold applies
-instead.
+miss, and back when at most one in 32 would miss the shorter interval. Steps
+above one extra refresh (a burst of slow frames, typically just after a
+stall) are judged on about the last 64 refreshes of frames instead, and the
+step drops the older frames from the history: the full 64-frame history held
+four refreshes (22 FPS) for 2.3 s after a single 60 ms hitch, long after the
+frames fit two refreshes again. The last step back to the requested rate keeps
+the full rule and needs at least 32 frames of history. On variable-refresh or
+unconfirmed displays the existing percentile hold applies instead. Held frames'
+flips count toward the confirmation too; only locked frames' flips used to, so a
+workload that was heavy from its first frame stayed held at an uneven cadence
+(10 ms releases, one and two refreshes) on a fixed display until a light stretch
+let it lock.
 
 **Waiting.** A wait of at most 2.5 ms (nearly every wait in busy scenes) spins
 without a timer. A longer wait sleeps on a high-resolution waitable timer until
@@ -117,7 +141,8 @@ sample.
 
 `NativeFramePacerTests` covers the locked cadence, cap/refresh matching, grid
 arithmetic, late frames, lead growth and relaxation, spike misses, queue
-drain, fixed-refresh steps and clock prediction. `NativeFrameRateTests` checks
+drain, a constant one-refresh display latency, recovery after a burst,
+fixed-refresh steps and clock prediction. `NativeFrameRateTests` checks
 the live limiter against the machine's real DWM grid when one is available.
 
 ## Other stalls found on the way

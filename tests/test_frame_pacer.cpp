@@ -9,6 +9,6 @@ int main() {try {
     FramePacerTests::run(need);
     FramePacerLockedTests::run(need);
     std::printf("PASS native frame pacer: %zu checks; cap drift, actual wake cadence, stalls, presentation blocking, reset, clock wrap, "
-                "foreground/background policy, refresh locking, lead feedback, fixed-refresh steps and gameplay clock prediction\n",checks);
+                "foreground/background policy, refresh locking, lead feedback, display latency, fixed-refresh steps, burst recovery and gameplay clock prediction\n",checks);
     return 0;
 } catch(const std::exception& error) {std::fprintf(stderr,"FAIL: %s\n",error.what());return 1;}}

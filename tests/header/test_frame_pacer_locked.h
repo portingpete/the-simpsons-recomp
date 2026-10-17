@@ -190,6 +190,68 @@ template<class Check> void run(Check&& need) {
         need(pacer.misses()==0 && pacer.lead()==lead,"A long frame or its queued successor raised the lead");
     }
     {
+        // A composed window: every frame flips one refresh after the vblank it aimed for.
+        // The lead grows to its maximum first (a short lead also looks like this); once
+        // no lead helps, the constant latency is not a miss: each refresh still shows a
+        // new frame and no frame waits an extra refresh to "drain".
+        // (The compositor queues the frame, so Present does not wait for the flip.)
+        FramePacer pacer;const RefreshGrid grid{0,period};uint64_t clock=1000*ms;uint32_t present=0;
+        const auto composedRun=[&](unsigned frames,uint64_t composition,unsigned spike,unsigned& repeats) {
+            uint64_t lastVblank=0,pendingFlip=0;uint32_t pendingPresent=0;
+            for(unsigned i=0;i<frames;++i) {
+                clock+=6*ms;clock=pacer.releaseLocked(clock,grid,1,lead,ceiling);pacer.complete(clock);
+                const uint32_t id=++present;pacer.submitted(id);
+                if(pendingPresent)pacer.displayed(pendingPresent,pendingFlip);
+                uint64_t vblank=grid.next(clock+(i==spike?8*ms:1400*us))+composition; // 8 ms: past even the longest lead.
+                if(lastVblank && vblank<=lastVblank)vblank=lastVblank+period;
+                if(lastVblank && vblank-lastVblank>period)repeats+=unsigned((vblank-lastVblank)/period-1);
+                lastVblank=pendingFlip=vblank;pendingPresent=id;
+            }
+        };
+        unsigned repeats=0;
+        composedRun(100,period,~0u,repeats);
+        need(pacer.displayLatency()==1,"A constant one-refresh display latency was not learned");
+        repeats=0;const uint32_t missesBefore=pacer.misses();
+        composedRun(2000,period,~0u,repeats);
+        need(repeats==0,"A constant display latency repeated refreshes");
+        need(pacer.misses()==missesBefore && pacer.lead()<=period*7/8,"A constant display latency counted as lead misses");
+        // A real spike on top of it is still a miss, and the latency drops with the window.
+        repeats=0;
+        composedRun(1000,period,500,repeats);
+        need(repeats==1 && pacer.misses()==missesBefore+1,"A spike past the display latency was not a single miss");
+        composedRun(100,0,~0u,repeats);
+        need(pacer.displayLatency()==0,"The display latency did not drop when flips became direct");
+    }
+    {
+        // A burst of slow frames (as after a stall) steps up to four refreshes; once frames
+        // fit again the extra refreshes go within about half a second, not a full history.
+        FramePacer pacer;const RefreshGrid grid{0,period};uint64_t clock=1000*ms;uint32_t present=0;
+        run(pacer,grid,clock,present,[](unsigned){return 6*ms;},[](unsigned){return 1400*us;},200);
+        run(pacer,grid,clock,present,[](unsigned){return 30*ms;},[](unsigned){return 1400*us;},12);
+        need(pacer.extraRefreshes()>=2,"A burst of 30 ms frames did not step up");
+        unsigned toOne=0,toZero=0;uint32_t extra=pacer.extraRefreshes();
+        for(unsigned i=1;i<=200 && !toZero;++i) {
+            run(pacer,grid,clock,present,[](unsigned){return 6*ms;},[](unsigned){return 1400*us;},1);
+            need(pacer.extraRefreshes()<=extra,"Recovery after a burst stepped back up");
+            extra=pacer.extraRefreshes();
+            if(!toOne && extra<=1)toOne=i;
+            if(!extra)toZero=i;
+        }
+        need(toOne && toOne<=24,"Extra refreshes after a burst outlived half a second");
+        need(toZero && toZero<=64,"Recovery after a burst did not reach every refresh");
+    }
+    {
+        // A workload too heavy for every refresh from the very first frame is held (the
+        // display is not confirmed yet); its flips still land on the grid, which confirms
+        // the fixed refresh and replaces the uneven held cadence with two refreshes.
+        FramePacer pacer;const RefreshGrid grid{0,period};uint64_t clock=1000*ms;uint32_t present=0;
+        run(pacer,grid,clock,present,[](unsigned){return 10*ms;},[](unsigned){return 1400*us;},40);
+        need(pacer.held(),"A heavy start on an unconfirmed display was not held");
+        run(pacer,grid,clock,present,[](unsigned){return 10*ms;},[](unsigned){return 1400*us;},200);
+        need(pacer.fixedRefresh() && pacer.extraRefreshes()==1 && pacer.latestInterval()==2*period,
+             "Held flips on the grid did not confirm a fixed refresh");
+    }
+    {
         // Flips off the grid (variable refresh) never confirm a fixed refresh.
         FramePacer pacer;const RefreshGrid grid{0,period};uint64_t clock=1000*ms;uint32_t present=0;
         for(unsigned i=0;i<500;++i) {
