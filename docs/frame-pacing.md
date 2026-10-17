@@ -172,6 +172,50 @@ the live limiter against the machine's real DWM grid when one is available.
   instead of scanning every raster. Medal uncapped went from ~124 to ~148 FPS
   (main thread 7.9 -> 6.6 ms per frame); at 120 FPS late frames dropped from
   ~1,000 to ~20 per minute.
+- **Level-section swap in the first mission (one 54-77 ms frame).** On the
+  wander route (`config/audit-routes/extended-wander-v1.json` sent as PAD
+  commands), an ability press at some points swaps a level section: one guest
+  worker thread exits and is recreated, and in a single frame the game releases
+  258 textures, 100-180 recorded draw payloads and its resident sounds, freeing
+  about 17,400 and allocating about 6,500 blocks through the original allocator
+  that `EngineAudioOwners::observeHeap` checks (about 90,000 observation hooks).
+  Whether and where a run reaches it depends on how the route drifts (most, not
+  all, 250-second runs). `tools/heavy_frame_profile.py --gap-ms 40` finds the gap;
+  stack samples of two hitches put the observer at ~19%, guest-mutant system
+  calls at ~15% and host heap frees at ~11%, the rest in original code. Temporary
+  QPC totals of that frame (instrumentation overhead included) gave the observer
+  42 ms, 15,000-17,000 acquire/release pairs of the game's one guest mutant
+  9-10 ms, texture record retirement 1.7-3.3 ms (the D3D texture release),
+  recorded payload release 0.8 ms and physical protection 0.6 ms.
+  The observer keeps every check; only its bookkeeping changed. The containment
+  index (`runtime/heap_page_index.h`) is a two-level page table whose pages keep
+  their lists, so re-registering pages allocates nothing. "A live source still
+  decodes from this allocation" is a count per allocation generation
+  (`runtime/audio_source_allocations.h`, maintained wherever sources are
+  published or retired) instead of a visit to every live source on every free;
+  `OriginalAudioSourceAllocations` compares it with the old scan over random
+  publish/retire sequences. Each thread's open-call stack stays allocated, and
+  the allocation hooks read the published owner pointer
+  (`Runtime::engineAudioView`) instead of locking `audioMutex` and copying a
+  `shared_ptr` 90,000 times. The observer's share of that frame went from 42 to
+  24 ms with the instrumentation (roughly 28 to 14 ms once its ~20 ns QPC calls
+  are subtracted).
+  Uninstrumented A/B on D3D11 (frozen pre-change exe against the change,
+  interleaved 250-second runs; hitches with more than 40% outside CPU load
+  dropped): median gap 66.8 ms (54.1-76.8, 12 hitches) -> 55.4 ms (45.5-69.7,
+  8 hitches). The length depends on where the route triggers the swap: at
+  100-123 s it went 61.3 -> 49.4 ms (5 hitches each), at 166-244 s
+  67.3 -> 63.7 ms (7 and 3 hitches).
+  Not changed, with the reason: the mutant time is original code.
+  `8280FE00` requests a voice removal and then spins (`8233BDA0`: acquire the
+  audio-core mutant, search its voice list, release) until the audio DAC thread
+  has processed the request on its next 256-frame (5.33 ms) tick. A user-mode
+  mutant with the kernel mutant's exact statuses, handoff order and abandonment
+  (checked against a real kernel mutant script by script) made each pair three
+  times cheaper, but the loop then ran 33,000-52,000 times in the same 6-10 ms,
+  so it was not kept. The same waits absorb part of any saving made before them.
+  Freeing the records' 64 KiB pixel copies on a worker thread made no
+  measurable difference; the record retirement cost is the D3D texture release.
 
 ## Measurements (2026-10-14)
 

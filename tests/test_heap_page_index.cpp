@@ -121,6 +121,27 @@ int main() {
                 for(const uint32_t bytes:{0u,1u,2u,16u,17u,0x100u,0x10000u,0xFFFFFFFFu})
                     for(const bool exact:{false,true}) agreeSpan(index,live,closing,address,bytes,exact);
         }
+        // Level-section swaps free and reallocate the same pages many times in one frame. Pages keep their
+        // lists when they empty; lookups and the live-page count must not see those emptied lists, including
+        // across the two-level table's 4 MiB chunk boundaries and in its last chunk.
+        {
+            HeapPageIndex index;std::map<uint32_t,uint32_t> live;
+            const std::initializer_list<std::pair<uint32_t,uint32_t>> blocks{
+                {0x003FF000u,0x2000},{0x003FFFF0u,0x20},{0x00400000u,1},{0x10000000u,0x10008},{0x10010008u,0x40},
+                {0x13FFFFF8u,0x10},{0xFFC00000u,0x1000},{0xFFFFFFF0u,0x10}};
+            for(unsigned round=0;round<50;++round) {
+                for(const auto& [start,extent]:blocks){index.add(start,extent);live[start]=extent;}
+                for(const auto& [start,extent]:blocks)
+                    for(const uint32_t address:{start-1,start,start+extent-1,start+extent})
+                        agree(index,live,address,"reused page lists differ from a scan");
+                need(index.pageCount()==23,"live page count is wrong after re-registration");
+                for(const auto& [start,extent]:blocks){index.remove(start,extent);live.erase(start);}
+                need(index.pageCount()==0,"emptied page lists still counted as live pages");
+                for(const auto& [start,extent]:blocks)
+                    need(!indexSmallest(index,start).has_value()&&!indexSmallest(index,start+extent-1).has_value(),
+                         "an emptied page list still answered a lookup");
+            }
+        }
         // Scale: a real hub level tracks hundreds of thousands of live allocations; lookups must not scan them.
         {
             HeapPageIndex index;std::map<uint32_t,uint32_t> live;std::mt19937 random(7);

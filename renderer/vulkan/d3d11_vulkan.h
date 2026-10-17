@@ -395,24 +395,26 @@ struct StageBindings {
     std::array<ComPtr<D3D11ShaderResourceView>,D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT> resources;
     std::array<ComPtr<D3D11SamplerState>,D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT> samplers;
     uint32_t resourceEnd=0; // One past the highest bound resource slot.
+    uint32_t bufferEnd=0,samplerEnd=0; // One past the highest slot set since the last clear.
+    void clear() {
+        for(uint32_t i=0;i<bufferEnd;++i) {constantBuffers[i].Reset();firstConstant[i]=constantCount[i]=0;}
+        for(uint32_t i=0;i<resourceEnd;++i) resources[i].Reset();
+        for(uint32_t i=0;i<samplerEnd;++i) samplers[i].Reset();
+        bufferEnd=resourceEnd=samplerEnd=0;
+    }
 };
-struct ContextState {
+// Everything except the large binding arrays, which ContextState resets only
+// up to their highest written slot.
+struct ContextScalars {
     ComPtr<D3D11VertexShader> vertexShader;
     ComPtr<D3D11PixelShader> pixelShader;
-    StageBindings vertex,pixel;
-    // Geometry/hull/domain/compute bindings: retained D3D11 state with no
-    // shader to read it (those shader types are never created here).
-    std::array<StageBindings,4> auxiliary;
     ComPtr<D3D11InputLayout> inputLayout;
     D3D11_PRIMITIVE_TOPOLOGY topology=D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
-    std::array<ComPtr<D3D11Buffer>,D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> vertexBuffers;
-    std::array<UINT,D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> strides{},offsets{};
     ComPtr<D3D11Buffer> indexBuffer;
     DXGI_FORMAT indexFormat=DXGI_FORMAT_UNKNOWN;
     UINT indexOffset=0;
     std::array<ComPtr<D3D11RenderTargetView>,D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> renderTargets;
     ComPtr<D3D11DepthStencilView> depthStencil;
-    std::array<ComPtr<D3D11UnorderedAccessView>,D3D11_1_UAV_SLOT_COUNT> outputUavs,computeUavs;
     bool uavsBound=false; // Any UAV in either array: skips per-view hazard scans.
     // Stream-output targets: retained D3D11 state; draws with one bound are rejected.
     std::array<ComPtr<D3D11Buffer>,D3D11_SO_BUFFER_SLOT_COUNT> streamOutputs;
@@ -429,9 +431,26 @@ struct ContextState {
     UINT viewportCount=0;
     std::array<D3D11_RECT,D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE> scissors{};
     UINT scissorCount=0;
-    // Default state without materializing a temporary: element-wise move
-    // assignment of ~1100 references costs microseconds per command list.
-    void clear() {this->~ContextState();new(this) ContextState();}
+};
+struct ContextState : ContextScalars {
+    StageBindings vertex,pixel;
+    // Geometry/hull/domain/compute bindings: retained D3D11 state with no
+    // shader to read it (those shader types are never created here).
+    std::array<StageBindings,4> auxiliary;
+    std::array<ComPtr<D3D11Buffer>,D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> vertexBuffers;
+    std::array<UINT,D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> strides{},offsets{};
+    uint32_t vertexBufferEnd=0; // One past the highest slot set since the last clear.
+    std::array<ComPtr<D3D11UnorderedAccessView>,D3D11_1_UAV_SLOT_COUNT> outputUavs,computeUavs;
+    // Default state. Command lists start and end with a clear, so the ~1100
+    // references are reset only where something was bound.
+    void clear() {
+        const bool uavs=uavsBound;
+        static_cast<ContextScalars&>(*this)=ContextScalars{};
+        vertex.clear();pixel.clear();for(auto& stage:auxiliary) stage.clear();
+        for(uint32_t i=0;i<vertexBufferEnd;++i) {vertexBuffers[i].Reset();strides[i]=offsets[i]=0;}
+        vertexBufferEnd=0;
+        if(uavs) {for(auto& uav:outputUavs) uav.Reset();for(auto& uav:computeUavs) uav.Reset();}
+    }
 };
 class __declspec(uuid("2fb11400-69e0-59fa-8b9e-210f58ed1959")) D3D11DeviceContextState final : public DeviceChild<ID3DDeviceContextState,D3D11DeviceContextState> {
 public:
@@ -585,6 +604,13 @@ public:
     void afterSubmit();            // New batch: every Vulkan binding must be re-emitted.
     void releaseState();           // Device teardown: drop every binding reference.
     bool deferred() const {return deferred_;}
+    // Owner-thread recording counts. SIMPSONS_VULKAN_STATS=1 makes Present log
+    // their per-frame averages every 600 frames (then they restart).
+    struct Stats {
+        uint64_t frames=0,draws=0,scopes=0,attachmentBreaks=0,clears=0,transfers=0,barriers=0,pipelineBinds=0,
+            pushes=0,pushSkips=0,vertexBinds=0,submits=0,lists=0,listCommands=0;
+    } stats;
+    void frameStats();
 private:
     friend DeviceChild; // Calls supports() non-virtually.
     bool supports(REFIID riid) const;
@@ -602,8 +628,11 @@ private:
     void unbindConflictingResources();
     void resetState();
     void markAllDirty();
-    // Vulkan recording (immediate context only).
-    VkCommandBuffer commands();
+    // Vulkan recording (immediate context only). Calls run on the device's
+    // recording thread; every argument is resolved here.
+    VulkanDevice& vulkan();
+    template<class F> void emit(F&& call) {vulkan().record(std::forward<F>(call));}
+    template<class T,class F> void emit(std::span<const T> data,F&& call) {vulkan().record(data,std::forward<F>(call));}
     void barrier();
     void beginRendering();
     bool prepareDraw(bool indexed,INT vertexBase,UINT instanceBase);

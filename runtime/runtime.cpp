@@ -143,7 +143,7 @@ Runtime::~Runtime() {
     stopThreads();
     guestWatchArmedTable=nullptr;guestWatchVersionTable=nullptr;
     if(vectoredHandler) {RemoveVectoredExceptionHandler(vectoredHandler);vectoredHandler=nullptr;}
-    engineAudioOutput.reset(); engineAudio.reset();
+    engineAudioOutput.reset(); engineAudioView.store(nullptr,std::memory_order_release); engineAudio.reset();
     {std::lock_guard lifetime(engineDriverMutex);engineDriver.reset();}
     window.reset(); objectReferences.clear(); handles.clear(); threads.clear();mainThreadHandle.reset();
     currentContext=nullptr; active=nullptr;

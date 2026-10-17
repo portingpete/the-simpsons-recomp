@@ -153,6 +153,10 @@ public:
     // outlive the native driver; defaults are mutable and never recopied.
     uint32_t effectPoolBacking{};
     std::shared_ptr<EngineAudioOwners> engineAudio;
+    // engineAudio's object, published once it exists. The allocation hooks (tens of
+    // thousands per level-section swap) read it without audioMutex or a shared_ptr copy;
+    // the owner lives until ~Runtime, after every guest thread has stopped.
+    std::atomic<EngineAudioOwners*> engineAudioView{nullptr};
     std::shared_ptr<EngineAudioReader> engineAudioReader;
     std::shared_ptr<EngineAudioOutput> engineAudioOutput;
     // Standalone runtime fixtures stay silent; the game entry point enables
