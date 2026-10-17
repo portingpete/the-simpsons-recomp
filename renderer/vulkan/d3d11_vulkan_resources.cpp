@@ -619,9 +619,9 @@ VkShaderModule D3D11PixelShader::moduleFor(const D3D11VertexShader& vertex) {
     }
     if(identical) return module_;
     std::lock_guard lock(mutex_);
-    if(auto found=linked_.find(vertex.id());found!=linked_.end()) return found->second;
+    if(auto found=linked_.find(vertex.contentId());found!=linked_.end()) return found->second;
     const VkShaderModule module=createModule(device_->vulkan(),spirv_->withInputLocations(remap,pixelBindingBase));
-    linked_.emplace(vertex.id(),module);
+    linked_.emplace(vertex.contentId(),module);
     return module;
 }
 

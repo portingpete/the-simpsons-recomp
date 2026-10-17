@@ -781,9 +781,12 @@ bool D3D11Context::prepareDraw(bool indexed,INT vertexBase,UINT instanceBase) {
     }
     if(!rendering_) {beginRendering();dirty_|=DirtyScissor;}
     const auto& raster=state_->rasterizer?state_->rasterizer->desc():defaultRaster;
+    // Shaders and layouts are keyed by content: meshes create their own
+    // objects, and a pipeline per object made every new mesh create more.
+    // Object changes still mark descriptors and vertex buffers in the setters.
     PipelineKey key;
-    key.vertex=state_->vertexShader->id();key.pixel=state_->pixelShader?state_->pixelShader->id():0;
-    key.layout=state_->inputLayout?state_->inputLayout->id():0;key.blend=state_->blend?state_->blend->id():0;
+    key.vertex=state_->vertexShader->contentId();key.pixel=state_->pixelShader?state_->pixelShader->contentId():0;
+    key.layout=state_->inputLayout?state_->inputLayout->contentId():0;key.blend=state_->blend?state_->blend->id():0;
     key.sampleMask=state_->sampleMask;key.topologyClass=topology;
     key.wireframe=raster.FillMode==D3D11_FILL_WIREFRAME;key.depthClip=raster.DepthClipEnable?1:0;
     key.colors=colorFormats_;key.depth=depthFormat_;

@@ -53,7 +53,7 @@ Key mappings:
 
 | D3D11 | Vulkan |
 | --- | --- |
-| Draw-time state | One pipeline per shader pair, layout, blend, topology class and attachment formats (textures are single-sample); everything else is dynamic state, re-emitted only when it changes |
+| Draw-time state | One pipeline per shader pair, layout, blend, topology class and attachment formats (textures are single-sample), keyed by shader code and layout elements rather than object identity; everything else is dynamic state, re-emitted only when it changes |
 | Shader resources | One push-descriptor set per draw; vertex bindings at their register numbers, pixel bindings offset by 256 (b# → #, s# → 16+#, t# → 32+#) |
 | `DYNAMIC` and constant buffers | Host-visible slots renamed on `WRITE_DISCARD` or whole updates; earlier draws keep their storage |
 | Resource state | Every image stays in `GENERAL`; one full memory barrier separates rendering, copy and present phases |
@@ -66,8 +66,19 @@ Device-child objects' COM methods make no virtual calls beyond their
 interface's slots, so hooks and test observers that clone a vtable to its SDK
 slot count keep working.
 
+Skin, mono, shadow and sky meshes create their own input layout and adapter
+shader objects. Pipelines were keyed by those objects, so every new mesh
+created new pipelines during play: 291 in the first 150 s of a first-mission
+wander route. They are now keyed by the shader's SPIR-V twin (parsed once per
+DXBC) and an interned copy of the layout's elements: 70 on the same route. Each
+came from the driver cache (0.1-0.3 ms on average); the 4-8 ms stalls were the cache
+file rewrites (below), which ran inside pipeline creation on the render thread.
+
 Compiled pipelines persist across launches in `vulkan-pipeline-cache.bin`
-beside the executable (written atomically when the device closes). A cache
+beside the executable. The file is rewritten when the pipeline count doubles,
+on a below-normal worker thread (pipeline caches are internally synchronized,
+so rendering keeps creating pipelines meanwhile), and once more, atomically,
+when the device closes. A cache
 from another GPU, driver or cache UUID is ignored. `SIMPSONS_VULKAN_PIPELINE_CACHE=0`
 disables it; another value names the file. Character detail draws its smoothed
 meshes as R32 triangle lists, which the index-buffer path already supports.
@@ -129,6 +140,7 @@ something different:
 | `SIMPSONS_VULKAN_VALIDATION=1` | Enables `VK_LAYER_KHRONOS_validation` when it is installed |
 | `SIMPSONS_VULKAN_DEVICE=<text>` | Uses the first suitable adapter whose name contains the text |
 | `SIMPSONS_VULKAN_TRACE=1` | Logs each draw's state and constant-buffer contents (fixture diagnosis; very slow) |
+| `SIMPSONS_VULKAN_PIPELINE_LOG=1` | Logs each created pipeline: running count, creation time, whether the driver cache supplied it (pipeline creation feedback), and its shaders |
 
 Pipeline creation is reported to the stall profiler.
 

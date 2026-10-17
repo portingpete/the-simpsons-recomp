@@ -1,7 +1,9 @@
 #pragma once
 #include <filesystem>
 #include "d3d11_vulkan.h"
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 namespace Simpsons::Graphics::Vulkan {
@@ -18,11 +20,13 @@ public:
     ~PipelineCache();
     PipelineCache(const PipelineCache&)=delete;
     PipelineCache& operator=(const PipelineCache&)=delete;
-    struct Entry {VkPipeline pipeline=VK_NULL_HANDLE;VkPipelineLayout layout=VK_NULL_HANDLE;};
+    struct Entry {VkPipeline pipeline=VK_NULL_HANDLE;VkPipelineLayout layout=VK_NULL_HANDLE;int8_t cacheHit=-1;};
     Entry get(const PipelineKey& key,const ContextState& state);
     size_t size() const {return pipelines_.size();}
     // Writes the driver cache to its file (also done on destruction).
     void save() noexcept;
+    // The same on a worker thread; a request during a save runs it again after.
+    void saveInBackground();
 private:
     VkDescriptorSetLayout setLayout(const SpirvModule& vertex,const SpirvModule* pixel);
     VkPipelineLayout layoutFor(const SpirvModule& vertex,const SpirvModule* pixel);
@@ -34,5 +38,8 @@ private:
     std::unordered_map<std::string,VkPipelineLayout> layouts_;
     std::filesystem::path path_;
     size_t savedAt_=16;
+    std::mutex saveMutex_;
+    std::thread saver_;
+    bool saving_=false,savePending_=false; // Guarded by saveMutex_.
 };
 }
