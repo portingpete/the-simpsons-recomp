@@ -202,8 +202,14 @@ void D3D11Texture2D::createImage() {
         for(uint32_t mip=0;mip<desc_.MipLevels;++mip)
             bytes+=VkDeviceSize((mipWidth(mip)+format_.blockWidth-1)/format_.blockWidth)*
                 ((mipHeight(mip)+format_.blockHeight-1)/format_.blockHeight)*format_.blockBytes;
-        if(bytes*desc_.ArraySize<=(1u<<20)) allocation.pool=vulkan.smallImagePool(info);
-        else allocation.flags|=VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+        if(bytes*desc_.ArraySize<=(1u<<20)) {
+            allocation.pool=vulkan.smallImagePool(info);
+            // VMA refuses a pool for an image whose driver requires dedicated
+            // memory; such an image keeps its dedicated allocation.
+            if(vmaCreateImage(vulkan.allocator(),&info,&allocation,&image_,&allocation_,nullptr)==VK_SUCCESS) return;
+            image_=VK_NULL_HANDLE;allocation_=VK_NULL_HANDLE;allocation.pool=VK_NULL_HANDLE;
+        }
+        allocation.flags|=VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
     }
     check(vmaCreateImage(vulkan.allocator(),&info,&allocation,&image_,&allocation_,nullptr),"texture creation");
 }

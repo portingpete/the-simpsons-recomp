@@ -116,6 +116,16 @@ struct EngineAudioOwners::State {
     HeapPageIndex heapIndex;
     std::unordered_map<PPCContext*,std::vector<HeapCall>> heapCalls;
     std::unordered_map<PPCContext*,std::vector<HeapFree>> heapFrees;
+    // A thread's open-call stack stays allocated between calls. A thread that exits
+    // leaves its (empty) stack behind, so once more stacks exist than guest threads
+    // plausibly run, a new thread's first call drops every other empty stack.
+    static constexpr size_t retainedHeapStacks=64;
+    template<class Stack> static Stack& heapStack(std::unordered_map<PPCContext*,Stack>& stacks,PPCContext& ctx) {
+        const auto [it,inserted]=stacks.try_emplace(&ctx);
+        if(inserted && stacks.size()>retainedHeapStacks)
+            std::erase_if(stacks,[&ctx](const auto& entry){return entry.first!=&ctx && entry.second.empty();});
+        return it->second;
+    }
     struct BankLoad {
         uint32_t sp,request,plugin,stream,origin,flags;
         std::shared_ptr<ResidentBank> bank;
@@ -895,7 +905,7 @@ void EngineAudioOwners::observeHeap(uint32_t pc,PPCContext& ctx,uint8_t* base) {
         s.region(ctx.r3.u32,0x20);
         require(PPC_LOAD_U32(ctx.r3.u32)==0x820B60B8 && PPC_LOAD_U32(0x820B60B8)==pc &&
                 PPC_LOAD_U32(0x820B60BC)==0x8268DF90,"Original bank allocator vtable changed");
-        s.heapCalls[&ctx].push_back({ctx.r1.u32,0,ctx.r4.u32,0,uint32_t(ctx.lr),ctx.r3.u32,pc,0x8268DF90});return;
+        State::heapStack(s.heapCalls,ctx).push_back({ctx.r1.u32,0,ctx.r4.u32,0,uint32_t(ctx.lr),ctx.r3.u32,pc,0x8268DF90});return;
     }
     if(pc==0x8268DED0 || pc==0x8268DEF0 || pc==0x8268DF34 || pc==0x8268DF50 || pc==0x8268DF84) {
         const auto it=s.heapCalls.find(&ctx);
@@ -924,8 +934,8 @@ void EngineAudioOwners::observeHeap(uint32_t pc,PPCContext& ctx,uint8_t* base) {
                 call.allocate,call.release,call.caller,allocationGeneration});
             s.heapIndex.add(address,call.bytes);
         }
-        // Each thread's call stack stays allocated between calls (no map node or vector
-        // churn per allocation); an empty stack means no observed call is open.
+        // The thread's call stack stays allocated (see heapStack); an empty stack
+        // means no observed call is open.
         it->second.pop_back();return;
     }
     if(pc==0x8268DF90) {
@@ -935,7 +945,7 @@ void EngineAudioOwners::observeHeap(uint32_t pc,PPCContext& ctx,uint8_t* base) {
                 PPC_LOAD_U32(ctx.r3.u32)==0x820B60B8,"Original allocation free kind/lifetime changed");
         require(!s.sourceAllocations.decodesFrom(allocation.generation),
                 "Original audio allocation free preceded resident source retirement");
-        s.heapFrees[&ctx].push_back({ctx.r1.u32,allocation.address,ctx.r3.u32,allocation.generation});
+        State::heapStack(s.heapFrees,ctx).push_back({ctx.r1.u32,allocation.address,ctx.r3.u32,allocation.generation});
         std::unique_lock heapLock(s.heapMutex);
         allocation.closing=true;return;
     }

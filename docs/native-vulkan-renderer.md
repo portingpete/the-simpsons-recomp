@@ -95,8 +95,10 @@ the `vkCmd*` calls into the batch's command buffer in order. `Flush`, `Present`
 and every other submission wait for it before ending the command buffer, so
 submission order, serials and resource retirement are unchanged; objects are
 destroyed only after the GPU finishes their batch, which the recording thread
-has always completed by then. NVIDIA's D3D11 driver does the equivalent on its
-own thread. Calls travel through a single-producer stream of 1 MiB chunks; the
+has always completed by then. The device also drains the thread before it
+checks for a lost device and before teardown, so a lost device's failed final
+submission never leaves calls running into a destroyed command pool. NVIDIA's
+D3D11 driver does the equivalent on its own thread. Calls travel through a single-producer stream of 1 MiB chunks; the
 thread spins briefly between bursts and otherwise sleeps in `WaitOnAddress`.
 `SIMPSONS_VULKAN_RECORD_THREAD=0` issues every call immediately on the game
 thread instead (same output; for A/B runs and debugging).
@@ -106,7 +108,8 @@ Other game-thread savings:
 - Render and depth targets of up to 1 MiB are placed in pooled 16 MiB blocks
   instead of dedicated allocations. The corona query pass creates a 64 x 8
   target every frame, and its `vkAllocateMemory`/`vkFreeMemory` pair cost
-  about 3% of the game thread's busy time.
+  about 3% of the game thread's busy time. A target whose driver requires
+  dedicated memory (VMA refuses a pool for it) keeps a dedicated allocation.
 - Command lists start and end with a cleared context state. A clear now resets
   only the binding slots written since the previous clear instead of all ~1100
   references (twice per list, about 70 lists per frame).
@@ -196,7 +199,8 @@ D3D11 debug-layer probes and the geometry-shader stream-output observer in
 `VulkanDeviceConformance` also records a 20,000-draw batch (recorded calls cross
 the recording thread's chunks and must keep their order and constants) and
 checks that `ClearState` and `ExecuteCommandList` clear bindings in the highest
-slots; it passes with and without the recording thread. On 2026-10-17 the 92
+slots, and tears down a device marked lost with 20,000 recorded but unsubmitted
+draws; it passes with and without the recording thread. On 2026-10-17 the 92
 renderer test cases that link only the graphics library (64 executables; most
 of the remaining suite needs fixtures removed in the 2026-10-16 cleanup) passed
 on Vulkan with the recording thread, on Vulkan without it and on D3D11, apart

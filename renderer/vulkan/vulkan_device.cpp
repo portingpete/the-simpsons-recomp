@@ -71,6 +71,9 @@ VulkanDevice::VulkanDevice() {
 }
 VulkanDevice::~VulkanDevice() {
     if(device_) {
+        // The recording thread may still be issuing calls into current_.command;
+        // the submission below can fail first (a lost device), so drain it here.
+        recorder_.finish();
         if(current_.command) {
             try {submit();} catch(...) {}
         }
@@ -386,6 +389,8 @@ bool VulkanDevice::wait(uint64_t serial,uint64_t timeoutNanoseconds) {
     return true;
 }
 uint64_t VulkanDevice::submit(std::span<const Wait> waits,std::span<const VkSemaphore> signals) {
+    // Every recorded call has run before the batch ends or fails to submit.
+    recorder_.finish();
     if(lost()) fail(VK_ERROR_DEVICE_LOST,"submission");
     const uint64_t serial=recordingSerial();
     InitBatch initSubmit;
@@ -403,7 +408,6 @@ uint64_t VulkanDevice::submit(std::span<const Wait> waits,std::span<const VkSema
             initSubmit=std::move(init_);init_={};
         }
     }
-    recorder_.finish();
     if(current_.command) check(vkEndCommandBuffer(current_.command),"command buffer end");
     VkCommandBufferSubmitInfo buffers[2]{};uint32_t bufferCount=0;
     if(initSubmit.command) {buffers[bufferCount].sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;buffers[bufferCount++].commandBuffer=initSubmit.command;}

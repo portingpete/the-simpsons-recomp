@@ -2,9 +2,11 @@
 // depth/stencil clear and readback, vertex- and pixel-shader depth writes,
 // color output, indexed strips with strip cuts, negative base vertices,
 // dynamic-buffer renaming, deferred command lists, texture sampling, state
-// clears and long batches recorded on the command-recording thread.
+// clears, long batches recorded on the command-recording thread, and teardown
+// of a lost device with recorded calls that were never submitted.
 // Pixels are read back and compared exactly; no window is created.
 #include "renderer/vulkan/vulkan_device_factory.h"
+#include "renderer/vulkan/d3d11_vulkan.h"
 #include <d3d11_1.h>
 #include <wrl/client.h>
 #include "VSVkFixtureFullscreen.h"
@@ -417,6 +419,26 @@ void stateClear(Fixture& f) {
     for(bool b:bound()) need(b,"ExecuteCommandList(TRUE) lost a highest-slot binding");
     f.context->ClearState();
 }
+// A lost device whose last batch was recorded but never submitted: the
+// destructor's submission fails, and the recording thread must still be
+// drained before the command pool and device are destroyed.
+void lostDeviceTeardown() {
+    Fixture f;
+    f.bindCommon(f.context.Get(),true);
+    f.context->IASetInputLayout(nullptr);f.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    f.context->VSSetShader(f.fullscreen.Get(),nullptr,0);f.context->PSSetShader(f.colorShader.Get(),nullptr,0);
+    for(UINT i=0;i<20000;++i) {
+        const D3D11_RECT rect{LONG(i%side),0,LONG(i%side+1),LONG(side)};f.context->RSSetScissorRects(1,&rect);
+        f.context->Draw(3,0);
+    }
+    void* object=nullptr;
+    hr(f.device->QueryInterface(__uuidof(Simpsons::Graphics::Vulkan::D3D11Device),&object),"Vulkan device interface");
+    auto* device=static_cast<Simpsons::Graphics::Vulkan::D3D11Device*>(object);
+    device->vulkan().markLost();
+    need(device->GetDeviceRemovedReason()!=S_OK,"Marked device does not report removal");
+    device->Release();
+    // The fixture's references are the last ones: the device is destroyed here.
+}
 }
 
 int main() {
@@ -435,6 +457,7 @@ int main() {
         hazards(fixture);
         longBatch(fixture);
         stateClear(fixture);
+        lostDeviceTeardown();
         std::printf("PASS Vulkan device conformance: %zu checks\n",checks);
         return 0;
     } catch(const std::exception& error) {
