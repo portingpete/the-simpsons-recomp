@@ -292,12 +292,17 @@ struct InputElement {
 };
 class __declspec(uuid("109084b9-fe66-5730-82b8-e10e650a0d31")) D3D11InputLayout final : public DeviceChild<ID3D11InputLayout,D3D11InputLayout> {
 public:
-    D3D11InputLayout(D3D11Device* device,std::vector<InputElement> elements):DeviceChild(device),elements_(std::move(elements)){}
+    D3D11InputLayout(D3D11Device* device,std::vector<InputElement> elements,uint64_t contentId)
+        :DeviceChild(device),elements_(std::move(elements)),contentId_(contentId){}
     const std::vector<InputElement>& elements() const {return elements_;}
+    // Equal for every layout of this device with the same elements; pipelines
+    // are keyed by it, so per-mesh layout objects share their pipelines.
+    uint64_t contentId() const {return contentId_;}
 private:
     friend DeviceChild; // Calls supports() non-virtually.
     bool supports(REFIID riid) const;
     std::vector<InputElement> elements_;
+    const uint64_t contentId_;
 };
 
 class __declspec(uuid("99b8d84b-7e8d-5b79-90f5-2155b5611d59")) D3D11VertexShader final : public DeviceChild<ID3D11VertexShader,D3D11VertexShader> {
@@ -305,6 +310,9 @@ public:
     D3D11VertexShader(D3D11Device* device,std::shared_ptr<const SpirvModule> spirv);
     ~D3D11VertexShader() override;
     const SpirvModule& spirv() const {return *spirv_;}
+    // SPIR-V twins are parsed once per DXBC and never freed, so the module
+    // address identifies the shader code for the life of the process.
+    uint64_t contentId() const {return reinterpret_cast<uintptr_t>(spirv_.get());}
     VkShaderModule module() const {return module_;}
 private:
     friend DeviceChild; // Calls supports() non-virtually.
@@ -317,6 +325,7 @@ public:
     D3D11PixelShader(D3D11Device* device,std::shared_ptr<const SpirvModule> spirv);
     ~D3D11PixelShader() override;
     const SpirvModule& spirv() const {return *spirv_;}
+    uint64_t contentId() const {return reinterpret_cast<uintptr_t>(spirv_.get());}
     // Module whose stage inputs use the locations the vertex shader writes,
     // matched by semantic (D3D links stages by semantic, SPIR-V by location).
     VkShaderModule moduleFor(const D3D11VertexShader& vertex);
@@ -783,6 +792,7 @@ private:
     std::vector<std::pair<D3D11_DEPTH_STENCIL_DESC,D3D11DepthStencilState*>> depthStates_;
     std::vector<std::pair<D3D11_RASTERIZER_DESC,D3D11RasterizerState*>> rasterStates_;
     std::vector<std::pair<D3D11_SAMPLER_DESC,D3D11SamplerState*>> samplerStates_;
+    std::unordered_map<std::string,uint64_t> layoutContentIds_; // Guarded by stateMutex_.
 };
 
 

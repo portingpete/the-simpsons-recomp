@@ -107,9 +107,18 @@ class FramePacer {
     std::array<uint64_t,kDebtBuckets> debtBuckets_{};
     uint32_t debtBucket_=0;uint64_t debtBucketStart_=0;bool debtClock_=false;
     uint32_t misses_=0,onTimeSinceMiss_=0;
+    // Whole refreshes between the vblank an on-slot frame aimed for and its flip, for the
+    // most recent frames. Their minimum is the display path's constant latency: a
+    // composed window flips every frame one refresh after its vblank without missing.
+    // It is trusted only once the path lead has reached its maximum (no lead could have
+    // kept those vblanks), and stays trusted while every recent frame still shows it.
+    static constexpr uint32_t kLatencyWindow=32,kLatencyMinimum=8;
+    std::array<uint8_t,kLatencyWindow> delays_{};
+    uint32_t delayNext_=0,delayCount_=0,latency_=0;
+    bool latencyTrusted_=false;
     uint64_t onGrid_=0;uint32_t gridSamples_=0;
     uint32_t lastFlipPresent_=0,latestPresent_=0;uint64_t lastFlipSync_=0;
-    struct Pending {uint32_t present=0;uint64_t vblank=0,arrival=0;RefreshGrid grid{};bool onSlot=false,steady=false;};
+    struct Pending {uint32_t present=0;uint64_t vblank=0,arrival=0;RefreshGrid grid{};bool onSlot=false,steady=false,locked=false;};
     std::array<Pending,kPending> pending_{};
     size_t pendingNext_=0;
     // Gameplay clock prediction.
@@ -123,18 +132,39 @@ class FramePacer {
     void record(uint64_t work) noexcept {
         natural_[next_]=work;next_=(next_+1)%kWindow;count_=std::min(count_+1,kWindow);
     }
-    // Replays the recent frames, in order, against a locked `interval`: a frame may run
-    // late by up to `slack` (the lead's buffer) and the next frame inherits that lateness.
-    // Returns how many would have missed their vblank; a miss re-anchors the schedule.
-    size_t missesAt(uint64_t interval,uint64_t slack) const noexcept {
-        const size_t oldest=count_<kWindow?0:next_;
+    // Replays the newest `frames` (default all) recorded frames, in order, against a locked
+    // `interval`: a frame may run late by up to `slack` (the lead's buffer) and the next
+    // frame inherits that lateness. Returns how many would have missed their vblank; a
+    // miss re-anchors the schedule.
+    size_t missesAt(uint64_t interval,uint64_t slack,size_t frames=kWindow) const noexcept {
+        frames=std::min(frames,count_);
+        const size_t oldest=(count_<kWindow?0:next_)+(count_-frames);
         uint64_t debt=0;size_t misses=0;
-        for(size_t i=0;i<count_;++i) {
+        for(size_t i=0;i<frames;++i) {
             const uint64_t work=natural_[(oldest+i)%kWindow];
             debt=debt+work>interval?debt+work-interval:0;
             if(debt>slack){++misses;debt=0;}
         }
         return misses;
+    }
+    // How many of the newest frames fit in `span` of time (at least kMinimum), each taking
+    // its own work or the current `interval`, whichever is longer.
+    static constexpr uint32_t kRecentRefreshes=64;
+    size_t recentFrames(uint64_t span,uint64_t interval) const noexcept {
+        size_t frames=0;uint64_t total=0;
+        while(frames<count_) {
+            const uint64_t time=std::max(natural_[(next_+kWindow-1-frames)%kWindow],interval);
+            if(frames>=kMinimum && total+time>span)break;
+            total+=time;++frames;
+        }
+        return frames;
+    }
+    // Drops all but the newest `frames` from the history, oldest first at index 0.
+    void keepRecent(size_t frames) noexcept {
+        frames=std::min(frames,count_);
+        std::array<uint64_t,kWindow> kept{};
+        for(size_t i=0;i<frames;++i)kept[i]=natural_[(next_+kWindow-frames+i)%kWindow];
+        natural_=kept;count_=frames;next_=frames%kWindow;
     }
 public:
     void reset() noexcept {
@@ -218,7 +248,15 @@ public:
             if(count_>=kMinimum) {
                 const uint64_t slack=grid.period/2;
                 if(refreshes_<refreshes+kMaximumExtraRefreshes && missesAt(grid.period*refreshes_,slack)*8>count_)++refreshes_;
-                else if(refreshes_>refreshes && missesAt(grid.period*(refreshes_-1),slack)*32<=count_)--refreshes_;
+                else if(refreshes_>refreshes+1) {
+                    // Above one extra refresh (a burst, typically right after a stall), judge
+                    // only the last ~half second: a 64-frame history at four refreshes held
+                    // 22 FPS for 2.3 s after the burst had ended. The step drops the burst
+                    // from the history, so it cannot step straight back up.
+                    const size_t recent=recentFrames(grid.period*kRecentRefreshes,grid.period*refreshes_);
+                    if(missesAt(grid.period*(refreshes_-1),slack,recent)*32<=recent){--refreshes_;keepRecent(recent);}
+                }
+                else if(refreshes_>refreshes && count_>=kWindow/2 && missesAt(grid.period*(refreshes_-1),slack)*32<=count_)--refreshes_;
             }
         } else {
             refreshes_=refreshes;
@@ -262,10 +300,13 @@ public:
         if(initialized_ && actual-previous_<(uint64_t(1)<<63))previous_=actual;
     }
     // After Present: DXGI's count for the present just submitted.
+    // Held frames (refresh locking on a display not yet confirmed fixed) are recorded too:
+    // only their flips can confirm the grid, and a workload that started heavy otherwise
+    // stayed held at an uneven cadence (one and two refreshes) on a fixed display.
     void submitted(uint32_t present) noexcept {
-        if(mode_!=Mode::Locked)return;
+        if(mode_==Mode::Free)return;
         latestPresent_=present;
-        pending_[pendingNext_]={present,intended_,arrival_,grid_,onSlot_,steadySlots_>16};
+        pending_[pendingNext_]={present,intended_,arrival_,grid_,onSlot_,steadySlots_>16,mode_==Mode::Locked};
         pendingNext_=(pendingNext_+1)%kPending;
     }
     // DXGI frame statistics: `present` reached the display at the vblank `sync`.
@@ -277,22 +318,35 @@ public:
             const Pending found=entry;entry={};
             onGrid_=(onGrid_<<1)|(found.grid.distance(sync)<=found.grid.period/32?1u:0u);
             gridSamples_=std::min(gridSamples_+1,kGridWindow);
-            const bool late=before(found.vblank+found.grid.period/2,sync);
+            if(!found.locked)break; // A held frame aimed for no vblank: grid evidence only.
+            if(found.onSlot && found.grid.period) {
+                const uint64_t delay=before(found.vblank,sync)?(sync-found.vblank+found.grid.period/2)/found.grid.period:0;
+                delays_[delayNext_]=uint8_t(std::min<uint64_t>(delay,8));delayNext_=(delayNext_+1)%kLatencyWindow;
+                delayCount_=std::min(delayCount_+1,kLatencyWindow);
+                latency_=delayCount_<kLatencyMinimum?0:*std::min_element(delays_.begin(),delays_.begin()+delayCount_);
+                latencyTrusted_=latency_ && (latencyTrusted_ || pathLead_>=maximumLead(found.grid.period));
+            }
+            // Lateness is measured past the path's constant latency. Treating that latency
+            // as a miss on every frame made the drain below add a refresh to every other
+            // frame (two- and three-refresh alternation at 60 FPS, one and two at 120).
+            const uint64_t shift=uint64_t(displayLatency())*found.grid.period;
+            const bool late=before(found.vblank+shift+found.grid.period/2,sync);
             if(late && mode_==Mode::Locked) {
                 // Every frame submitted after a late one queues behind it and Present
                 // blocks for each. Aim the next frame one interval after the vblank the
                 // newest queued frame will really reach; the display still shows a new
                 // frame on every refresh while the queue drains.
                 const uint32_t queued=latestPresent_-present;
+                const uint64_t latency=uint64_t(displayLatency())*grid_.period;
                 if(queued<kPending) {
                     const uint64_t expected=sync+uint64_t(queued)*grid_.period*refreshes_;
-                    if(before(target_+grid_.period/2,expected))target_=grid_.next(expected-grid_.period/2);
+                    if(before(target_+latency+grid_.period/2,expected))target_=grid_.next(expected-latency-grid_.period/2);
                 }
             }
             // A frame queued behind a previous frame that was itself shown late could
             // not have reached its vblank with any lead; neither could one that arrived
             // after the vblank had already passed.
-            const bool clear=lastFlipPresent_+1==present && before(lastFlipSync_,found.vblank-found.grid.period/2);
+            const bool clear=lastFlipPresent_+1==present && before(lastFlipSync_,found.vblank+shift-found.grid.period/2);
             // A longer lead moves the whole cadence earlier, so it also saves a frame that
             // finished up to the remaining lead headroom after its vblank.
             const bool savable=before(found.arrival,found.vblank+(maximumLead(found.grid.period)-lead_));
@@ -339,6 +393,8 @@ public:
     bool onSlot() const noexcept {return onSlot_;}
     uint64_t lead() const noexcept {return lead_;}
     uint32_t misses() const noexcept {return misses_;}
+    // Refreshes every on-slot frame recently took past its vblank (the path's constant latency).
+    uint32_t displayLatency() const noexcept {return latencyTrusted_?latency_:0;}
     uint32_t extraRefreshes() const noexcept {return stepped_;}
     // Target display time (locked) or release (free) of the latest release.
     uint64_t latestTarget() const noexcept {return target_;}

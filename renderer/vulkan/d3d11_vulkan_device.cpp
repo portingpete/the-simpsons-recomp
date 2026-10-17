@@ -201,7 +201,16 @@ HRESULT D3D11Device::CreateInputLayout(const D3D11_INPUT_ELEMENT_DESC* descs,UIN
             if(!found) throw Error("Native Vulkan input layout lacks shader input "+input.semantic+std::to_string(input.index+k)+" of "+spirv->name());
         }
         if(!layout) return S_FALSE;
-        *layout=new D3D11InputLayout(this,std::move(elements));
+        std::string content;
+        for(const auto& element:elements)
+            content+=element.semantic+"/"+std::to_string(element.index)+"/"+std::to_string(element.slot)+"/"+std::to_string(element.offset)+"/"+
+                std::to_string(element.step)+"/"+std::to_string(int(element.format))+"/"+(element.instance?"i":"v")+";";
+        uint64_t contentId;
+        {
+            std::lock_guard lock(stateMutex_);
+            contentId=layoutContentIds_.try_emplace(std::move(content),layoutContentIds_.size()+1).first->second;
+        }
+        *layout=new D3D11InputLayout(this,std::move(elements),contentId);
         return S_OK;
     });
 }

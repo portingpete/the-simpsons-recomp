@@ -78,6 +78,12 @@ bool integerFormat(VkFormat format) {
     }
 }
 bool hasStencil(VkFormat format) {return format==VK_FORMAT_D32_SFLOAT_S8_UINT || format==VK_FORMAT_D24_UNORM_S8_UINT;}
+// SIMPSONS_VULKAN_PIPELINE_LOG=1 logs each created pipeline: duration and
+// whether the driver cache supplied it (pipeline creation feedback).
+bool logPipelines() {
+    static const bool enabled=[]{const char* v=std::getenv("SIMPSONS_VULKAN_PIPELINE_LOG");return v && *v=='1';}();
+    return enabled;
+}
 std::string layoutKey(const SpirvModule* module,VkShaderStageFlags stage) {
     std::string key=std::to_string(stage)+":";
     if(module) for(const auto& binding:module->bindings()) key+=std::to_string(binding.binding)+"/"+std::to_string(int(binding.type))+",";
@@ -143,7 +149,25 @@ void PipelineCache::save() noexcept {
         std::error_code error;std::filesystem::rename(temporary,path_,error);
     } catch(...) {}
 }
+void PipelineCache::saveInBackground() {
+    if(path_.empty()||!cache_)return;
+    std::lock_guard lock(saveMutex_);
+    savePending_=true;
+    if(saving_)return;
+    if(saver_.joinable())saver_.join(); // Already finished: it cleared saving_ before returning.
+    saving_=true;
+    saver_=std::thread([this]{
+        SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_BELOW_NORMAL);
+        for(;;) {
+            {std::lock_guard lock(saveMutex_);if(!savePending_){saving_=false;return;}savePending_=false;}
+            // Pipeline caches are internally synchronized (no EXTERNALLY_SYNCHRONIZED
+            // flag), so the render thread keeps creating pipelines meanwhile.
+            save();
+        }
+    });
+}
 PipelineCache::~PipelineCache() {
+    if(saver_.joinable())saver_.join();
     save();
     const VkDevice device=device_.vulkan().device();
     for(auto& [key,entry]:pipelines_) vkDestroyPipeline(device,entry.pipeline,nullptr);
@@ -186,10 +210,20 @@ VkPipelineLayout PipelineCache::layoutFor(const SpirvModule& vertex,const SpirvM
 PipelineCache::Entry PipelineCache::get(const PipelineKey& key,const ContextState& state) {
     if(auto found=pipelines_.find(key);found!=pipelines_.end()) return found->second;
     StallProfiler::Scope profile(StallProfiler::Section::Rendering,"Vulkan.CreateGraphicsPipeline",nullptr,key.vertex);
+    LARGE_INTEGER start{},end{},frequency{};
+    if(logPipelines()) QueryPerformanceCounter(&start);
     const Entry entry=create(key,state);
     pipelines_.emplace(key,entry);
-    // Keep the file current as new pipelines appear (doubling intervals).
-    if(pipelines_.size()>=savedAt_*2){savedAt_=pipelines_.size();save();}
+    if(logPipelines()) {
+        QueryPerformanceCounter(&end);QueryPerformanceFrequency(&frequency);
+        std::fprintf(stderr,"[NATIVE VULKAN PIPELINE] count=%zu ms=%.3f cache=%s vs=%s ps=%s\n",pipelines_.size(),
+            1000.0*double(end.QuadPart-start.QuadPart)/double(frequency.QuadPart),
+            entry.cacheHit<0?"unknown":entry.cacheHit?"hit":"miss",state.vertexShader->spirv().name().c_str(),
+            state.pixelShader?state.pixelShader->spirv().name().c_str():"-");
+    }
+    // Keep the file current as new pipelines appear (doubling intervals). Reading
+    // and writing the multi-megabyte cache took milliseconds on the render thread.
+    if(pipelines_.size()>=savedAt_*2){savedAt_=pipelines_.size();saveInBackground();}
     return entry;
 }
 PipelineCache::Entry PipelineCache::create(const PipelineKey& key,const ContextState& state) {
@@ -291,7 +325,12 @@ PipelineCache::Entry PipelineCache::create(const PipelineKey& key,const ContextS
     info.pVertexInputState=&vertexInput;info.pInputAssemblyState=&assembly;info.pViewportState=&viewport;
     info.pRasterizationState=&raster;info.pMultisampleState=&multisample;info.pDepthStencilState=&depth;
     info.pColorBlendState=&colorBlend;info.pDynamicState=&dynamics;info.layout=entry.layout;
+    VkPipelineCreationFeedback feedback{};
+    VkPipelineCreationFeedbackCreateInfo feedbackInfo{VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO};
+    if(logPipelines()) {feedbackInfo.pPipelineCreationFeedback=&feedback;feedbackInfo.pNext=info.pNext;info.pNext=&feedbackInfo;}
     const VkResult result=vkCreateGraphicsPipelines(device_.vulkan().device(),cache_,1,&info,nullptr,&entry.pipeline);
+    if(feedback.flags&VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT)
+        entry.cacheHit=(feedback.flags&VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT)?1:0;
     if(result<0) {
         std::fprintf(stderr,"[NATIVE VULKAN] pipeline creation failed for VS %s PS %s\n",vs.name().c_str(),pixel?pixel->spirv().name().c_str():"(none)");
         fail(result,"graphics pipeline creation");
