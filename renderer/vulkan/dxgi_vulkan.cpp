@@ -396,38 +396,39 @@ HRESULT DxgiSwapChain::Present(UINT interval,UINT flags) {
         }
         // Backbuffer (always GENERAL) -> swap image, stretched like DXGI_SCALING_STRETCH.
         context.endRendering();context.barrier();
-        const VkCommandBuffer command=vulkan.commands();
-        const VkImage image=images_[index];
-        VkImageMemoryBarrier2 toTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
-        toTransfer.srcStageMask=VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;toTransfer.dstStageMask=VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
-        toTransfer.dstAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;toTransfer.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED;
-        toTransfer.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;toTransfer.srcQueueFamilyIndex=toTransfer.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
-        toTransfer.image=image;toTransfer.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
-        VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};dependency.imageMemoryBarrierCount=1;dependency.pImageMemoryBarriers=&toTransfer;
-        vkCmdPipelineBarrier2(command,&dependency);
         const auto& source=backbuffer_->desc();
-        if(source.Width==extent_.width && source.Height==extent_.height && backbuffer_->format().format==format_) {
-            VkImageCopy region{};
-            region.srcSubresource=region.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};region.extent={extent_.width,extent_.height,1};
-            vkCmdCopyImage(command,backbuffer_->image(),VK_IMAGE_LAYOUT_GENERAL,image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&region);
-        } else {
-            VkImageBlit region{};
-            region.srcSubresource=region.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
-            region.srcOffsets[1]={int32_t(source.Width),int32_t(source.Height),1};
-            region.dstOffsets[1]={int32_t(extent_.width),int32_t(extent_.height),1};
-            vkCmdBlitImage(command,backbuffer_->image(),VK_IMAGE_LAYOUT_GENERAL,image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&region,VK_FILTER_LINEAR);
-        }
-        VkImageMemoryBarrier2 toPresent=toTransfer;
-        toPresent.srcStageMask=VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;toPresent.srcAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        toPresent.dstStageMask=VK_PIPELINE_STAGE_2_NONE;toPresent.dstAccessMask=0;
-        toPresent.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;toPresent.newLayout=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        dependency.pImageMemoryBarriers=&toPresent;
-        vkCmdPipelineBarrier2(command,&dependency);
+        const bool copy=source.Width==extent_.width && source.Height==extent_.height && backbuffer_->format().format==format_;
+        vulkan.record([image=images_[index],backbuffer=backbuffer_->image(),copy,width=source.Width,height=source.Height,extent=extent_](VkCommandBuffer command) {
+            VkImageMemoryBarrier2 toTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+            toTransfer.srcStageMask=VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;toTransfer.dstStageMask=VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+            toTransfer.dstAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;toTransfer.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED;
+            toTransfer.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;toTransfer.srcQueueFamilyIndex=toTransfer.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
+            toTransfer.image=image;toTransfer.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+            VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};dependency.imageMemoryBarrierCount=1;dependency.pImageMemoryBarriers=&toTransfer;
+            vkCmdPipelineBarrier2(command,&dependency);
+            if(copy) {
+                VkImageCopy region{};
+                region.srcSubresource=region.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};region.extent={extent.width,extent.height,1};
+                vkCmdCopyImage(command,backbuffer,VK_IMAGE_LAYOUT_GENERAL,image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&region);
+            } else {
+                VkImageBlit region{};
+                region.srcSubresource=region.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
+                region.srcOffsets[1]={int32_t(width),int32_t(height),1};
+                region.dstOffsets[1]={int32_t(extent.width),int32_t(extent.height),1};
+                vkCmdBlitImage(command,backbuffer,VK_IMAGE_LAYOUT_GENERAL,image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&region,VK_FILTER_LINEAR);
+            }
+            VkImageMemoryBarrier2 toPresent=toTransfer;
+            toPresent.srcStageMask=VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;toPresent.srcAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            toPresent.dstStageMask=VK_PIPELINE_STAGE_2_NONE;toPresent.dstAccessMask=0;
+            toPresent.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;toPresent.newLayout=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            dependency.pImageMemoryBarriers=&toPresent;
+            vkCmdPipelineBarrier2(command,&dependency);
+        });
         const VulkanDevice::Wait wait{acquire->semaphore,VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT};
         const VkSemaphore rendered=rendered_[index];
         context.prepareSubmit();
         const uint64_t serial=vulkan.submit({&wait,1},{&rendered,1});
-        context.afterSubmit();
+        context.afterSubmit();context.frameStats();
         acquire->serial=serial;
         const uint64_t id=presents_+1;
         VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};

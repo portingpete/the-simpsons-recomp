@@ -1,9 +1,12 @@
 #include "vulkan_device.h"
 #include "renderer/native_backend.h"
+#include "runtime/stall_profiler.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <intrin.h>
+#pragma comment(lib,"synchronization.lib")
 
 namespace Simpsons::Graphics::Vulkan {
 const char* resultName(VkResult result) noexcept {
@@ -94,6 +97,7 @@ VulkanDevice::~VulkanDevice() {
         };
         destroyRing(dynamic_);destroyRing(upload_);
         for(auto& page:slotPages_) vmaDestroyBuffer(allocator_,page.buffer,page.allocation);
+        for(auto pool:imagePools_) if(pool) vmaDestroyPool(allocator_,pool);
         for(auto& batch:inFlight_) vkDestroyCommandPool(device_,batch.pool,nullptr);
         for(auto& batch:freeBatches_) vkDestroyCommandPool(device_,batch.pool,nullptr);
         if(current_.pool) vkDestroyCommandPool(device_,current_.pool,nullptr);
@@ -351,16 +355,14 @@ VulkanDevice::Batch VulkanDevice::acquireBatch() {
     check(vkAllocateCommandBuffers(device_,&allocate,&batch.command),"command buffer allocation");
     return batch;
 }
-VkCommandBuffer VulkanDevice::commands() {
-    if(!current_.command) {
-        if(lost()) fail(VK_ERROR_DEVICE_LOST,"command recording");
-        const Batch batch=acquireBatch();
-        VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        check(vkBeginCommandBuffer(batch.command,&begin),"command buffer begin");
-        current_=batch;
-    }
-    return current_.command;
+void VulkanDevice::beginBatch() {
+    if(lost()) fail(VK_ERROR_DEVICE_LOST,"command recording");
+    const Batch batch=acquireBatch();
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    check(vkBeginCommandBuffer(batch.command,&begin),"command buffer begin");
+    current_=batch;
+    recorder_.target(batch.command);
 }
 uint64_t VulkanDevice::completedSerial() {
     uint64_t value=0;
@@ -401,6 +403,7 @@ uint64_t VulkanDevice::submit(std::span<const Wait> waits,std::span<const VkSema
             initSubmit=std::move(init_);init_={};
         }
     }
+    recorder_.finish();
     if(current_.command) check(vkEndCommandBuffer(current_.command),"command buffer end");
     VkCommandBufferSubmitInfo buffers[2]{};uint32_t bufferCount=0;
     if(initSubmit.command) {buffers[bufferCount].sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;buffers[bufferCount++].commandBuffer=initSubmit.command;}
@@ -432,6 +435,96 @@ uint64_t VulkanDevice::submit(std::span<const Wait> waits,std::span<const VkSema
     collect();
     return serial;
 }
+// ---------------------------------------------------------------- command recorder
+struct CommandRecorder::Chunk {
+    static constexpr size_t capacity=size_t(1)<<20;
+    Chunk* next=nullptr;
+    alignas(16) std::byte data[capacity];
+};
+CommandRecorder::CommandRecorder():threaded_([]{const char* v=std::getenv("SIMPSONS_VULKAN_RECORD_THREAD");return !v || *v!='0';}()) {
+    if(!threaded_) return;
+    writeChunk_=readChunk_=takeChunk();
+    const int priority=GetThreadPriority(GetCurrentThread());
+    worker_=std::thread([this]{run();});
+    SetThreadPriority(worker_.native_handle(),priority);
+    SetThreadDescription(worker_.native_handle(),L"Vulkan command recording");
+}
+CommandRecorder::~CommandRecorder() {
+    if(!threaded_) return;
+    record([this](VkCommandBuffer){stopped_=true;});
+    finish();
+    worker_.join();
+    giveChunk(readChunk_);
+    for(Chunk* chunk:spare_) delete chunk;
+}
+CommandRecorder::Chunk* CommandRecorder::takeChunk() {
+    {
+        std::lock_guard lock(chunkMutex_);
+        if(!spare_.empty()) {Chunk* chunk=spare_.back();spare_.pop_back();chunk->next=nullptr;return chunk;}
+    }
+    return new Chunk;
+}
+void CommandRecorder::giveChunk(Chunk* chunk) {
+    std::lock_guard lock(chunkMutex_);
+    spare_.push_back(chunk);
+}
+void* CommandRecorder::reserve(size_t bytes,void (*call)(void*,VkCommandBuffer)) {
+    const size_t need=sizeof(Header)+((bytes+15)&~size_t(15));
+    // A chunk always keeps room for the header that links to the next one.
+    if(need+sizeof(Header)>Chunk::capacity) throw Error("Native Vulkan recorded call is too large");
+    if(writeOffset_+need+sizeof(Header)>Chunk::capacity) {
+        Chunk* next=takeChunk();
+        auto* link=reinterpret_cast<Header*>(writeChunk_->data+writeOffset_);
+        link->invoke=nullptr;link->bytes=0;writeChunk_->next=next;
+        writeChunk_=next;writeOffset_=0;
+    }
+    auto* header=reinterpret_cast<Header*>(writeChunk_->data+writeOffset_);
+    header->invoke=call;header->bytes=need;
+    writeOffset_+=need;
+    return header+1;
+}
+// A plain release store: a fenced store per call stalled the game thread on
+// the cache line the spinning worker reads. Without the fence a call published
+// just as the worker falls asleep can miss its wake; the worker then wakes at
+// the next call or at finish(), which always wakes it.
+void CommandRecorder::publish() {
+    published_.store(++produced_,std::memory_order_release);
+    if(sleeping_.load(std::memory_order_relaxed)) WakeByAddressSingle(&published_);
+}
+void CommandRecorder::run() {
+    uint64_t done=0;
+    while(!stopped_) {
+        uint64_t available=published_.load(std::memory_order_acquire);
+        // Spin briefly across the short gaps between a frame's draws.
+        for(int spin=0;spin<4096 && available==done;++spin) {_mm_pause();available=published_.load(std::memory_order_acquire);}
+        if(available==done) {
+            sleeping_.store(true,std::memory_order_seq_cst);
+            while((available=published_.load(std::memory_order_seq_cst))==done) WaitOnAddress(&published_,&done,sizeof(done),INFINITE);
+            sleeping_.store(false,std::memory_order_relaxed);
+        }
+        while(done<available) {
+            auto* header=reinterpret_cast<Header*>(readChunk_->data+readOffset_);
+            if(!header->invoke) {Chunk* used=readChunk_;readChunk_=used->next;readOffset_=0;giveChunk(used);continue;}
+            header->invoke(header+1,target_);
+            readOffset_+=header->bytes;++done;
+        }
+        consumed_.store(done,std::memory_order_seq_cst);
+        if(draining_.load(std::memory_order_seq_cst)) WakeByAddressAll(&consumed_);
+    }
+}
+void CommandRecorder::finish() {
+    if(!threaded_) return;
+    uint64_t seen=consumed_.load(std::memory_order_acquire);
+    for(int spin=0;spin<16384 && seen!=produced_;++spin) {_mm_pause();seen=consumed_.load(std::memory_order_acquire);}
+    if(seen==produced_) return;
+    // A submission waiting for the recording thread to catch up.
+    StallProfiler::Scope profile(StallProfiler::Section::Rendering,"Vulkan.recordingDrain",nullptr,produced_-seen);
+    draining_.store(true,std::memory_order_seq_cst);
+    WakeByAddressSingle(&published_);
+    while((seen=consumed_.load(std::memory_order_seq_cst))!=produced_) WaitOnAddress(&consumed_,&seen,sizeof(seen),INFINITE);
+    draining_.store(false,std::memory_order_relaxed);
+}
+
 void VulkanDevice::retire(std::function<void()> destroy) {
     std::lock_guard lock(retireMutex_);
     retirements_.emplace_back(recordingSerial(),std::move(destroy));
@@ -568,6 +661,25 @@ void VulkanDevice::freeSlot(const HostSlot& slot) {
     if(slot.dedicated) {vmaDestroyBuffer(allocator_,slot.buffer,slot.dedicated);return;}
     std::lock_guard lock(slotMutex_);
     freeSlots_[slot.sizeClass].push_back(slot);
+}
+VmaPool VulkanDevice::smallImagePool(const VkImageCreateInfo& image) {
+    std::lock_guard lock(imagePoolMutex_);
+    // Images with the same format, usage and flags share memory type bits.
+    const auto key=std::make_tuple(image.format,image.usage,image.flags);
+    auto found=imagePoolTypes_.find(key);
+    if(found==imagePoolTypes_.end()) {
+        VmaAllocationCreateInfo allocation{};allocation.usage=VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        uint32_t type=0;
+        check(vmaFindMemoryTypeIndexForImageInfo(allocator_,&image,&allocation,&type),"small image memory type");
+        found=imagePoolTypes_.emplace(key,type).first;
+    }
+    VmaPool& pool=imagePools_[found->second];
+    if(!pool) {
+        // An explicit block size keeps every allocation in the pool's blocks.
+        VmaPoolCreateInfo info{};info.memoryTypeIndex=found->second;info.blockSize=16u<<20;
+        check(vmaCreatePool(allocator_,&info,&pool),"small image pool creation");
+    }
+    return pool;
 }
 HostBuffer VulkanDevice::createHostBuffer(VkDeviceSize size,VkBufferUsageFlags usage,bool readback) {
     VkBufferCreateInfo buffer{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};buffer.size=std::max<VkDeviceSize>(size,4);buffer.usage=usage;

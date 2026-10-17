@@ -1,7 +1,8 @@
 // Conformance of the native Vulkan device behind the D3D11 interface subset:
 // depth/stencil clear and readback, vertex- and pixel-shader depth writes,
 // color output, indexed strips with strip cuts, negative base vertices,
-// dynamic-buffer renaming, deferred command lists and texture sampling.
+// dynamic-buffer renaming, deferred command lists, texture sampling, state
+// clears and long batches recorded on the command-recording thread.
 // Pixels are read back and compared exactly; no window is created.
 #include "renderer/vulkan/vulkan_device_factory.h"
 #include <d3d11_1.h>
@@ -18,6 +19,8 @@
 #include "PSShadowMeshDepth.h"
 #include <array>
 #include <bit>
+#include <cfloat>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
@@ -348,6 +351,72 @@ void hazards(Fixture& f) {
     need(bound.Get()==view.Get(),"Shader view did not bind after the output was released");
     ID3D11ShaderResourceView* none=nullptr;f.context->PSSetShaderResources(3,1,&none);
 }
+// Thousands of draws in one batch: recorded calls cross the recording
+// thread's storage chunks and still run in order with their own constants.
+void longBatch(Fixture& f) {
+    const float clear[4]{0,0,0,0};f.context->ClearRenderTargetView(f.colorView.Get(),clear);
+    f.bindCommon(f.context.Get(),true);
+    f.context->IASetInputLayout(nullptr);f.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    f.context->VSSetShader(f.fullscreen.Get(),nullptr,0);f.context->PSSetShader(f.colorShader.Get(),nullptr,0);
+    ComPtr<ID3D11RasterizerState> scissor;D3D11_RASTERIZER_DESC rs{};rs.FillMode=D3D11_FILL_SOLID;rs.CullMode=D3D11_CULL_NONE;
+    rs.DepthClipEnable=TRUE;rs.ScissorEnable=TRUE;hr(f.device->CreateRasterizerState(&rs,&scissor),"scissor state");
+    f.context->RSSetState(scissor.Get());
+    constexpr UINT draws=20000;
+    for(UINT i=0;i<draws;++i) {
+        // Column i%8 gets red (i/8)%256 and green 32*column.
+        const UINT column=i%side;
+        f.upload({{float((i/side)%256)/255.0f,float(column*32)/255.0f,0,1},0.5f,0,{}});
+        const D3D11_RECT rect{LONG(column),0,LONG(column+1),LONG(side)};f.context->RSSetScissorRects(1,&rect);
+        f.context->Draw(3,0);
+    }
+    const auto pixels=f.readColor();
+    for(UINT y=0;y<side;++y) for(UINT x=0;x<side;++x) {
+        const uint8_t* p=pixels.data()+(y*side+x)*4;
+        const UINT last=draws-side+x;
+        need(p[0]==(last/side)%256 && p[1]==x*32 && p[2]==0,"Long batch draw order or constants differ");
+    }
+    f.context->RSSetState(f.noCull.Get());
+}
+// ClearState and ExecuteCommandList(FALSE) reset bindings in every slot,
+// including the highest ones; restoring replay keeps the caller's.
+void stateClear(Fixture& f) {
+    f.context->OMSetRenderTargets(0,nullptr,nullptr);
+    ComPtr<ID3D11ShaderResourceView> view;hr(f.device->CreateShaderResourceView(f.color.Get(),nullptr,&view),"color SRV");
+    D3D11_SAMPLER_DESC sd{};sd.Filter=D3D11_FILTER_MIN_MAG_MIP_POINT;
+    sd.AddressU=sd.AddressV=sd.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;sd.ComparisonFunc=D3D11_COMPARISON_NEVER;sd.MaxLOD=FLT_MAX;
+    ComPtr<ID3D11SamplerState> sampler;hr(f.device->CreateSamplerState(&sd,&sampler),"point sampler");
+    D3D11_BUFFER_DESC vd{};vd.ByteWidth=64;vd.Usage=D3D11_USAGE_DEFAULT;vd.BindFlags=D3D11_BIND_VERTEX_BUFFER;
+    ComPtr<ID3D11Buffer> vertices;hr(f.device->CreateBuffer(&vd,nullptr,&vertices),"vertex buffer");
+    constexpr UINT lastView=D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT-1,lastSampler=D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT-1,
+        lastBuffer=D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT-1,lastStream=D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT-1;
+    auto bind=[&](ID3D11DeviceContext* c) {
+        auto* srv=view.Get();c->PSSetShaderResources(lastView,1,&srv);c->VSSetShaderResources(lastView,1,&srv);
+        auto* s=sampler.Get();c->PSSetSamplers(lastSampler,1,&s);c->GSSetSamplers(lastSampler,1,&s);
+        auto* cb=f.constants.Get();c->VSSetConstantBuffers(lastBuffer,1,&cb);c->CSSetConstantBuffers(lastBuffer,1,&cb);
+        auto* vb=vertices.Get();const UINT stride=16,offset=0;c->IASetVertexBuffers(lastStream,1,&vb,&stride,&offset);
+    };
+    auto bound=[&]() {
+        ComPtr<ID3D11ShaderResourceView> ps,vs;ComPtr<ID3D11SamplerState> pss,gss;ComPtr<ID3D11Buffer> vcb,ccb,vb;UINT stride=0,offset=0;
+        f.context->PSGetShaderResources(lastView,1,&ps);f.context->VSGetShaderResources(lastView,1,&vs);
+        f.context->PSGetSamplers(lastSampler,1,&pss);f.context->GSGetSamplers(lastSampler,1,&gss);
+        f.context->VSGetConstantBuffers(lastBuffer,1,&vcb);f.context->CSGetConstantBuffers(lastBuffer,1,&ccb);
+        f.context->IAGetVertexBuffers(lastStream,1,&vb,&stride,&offset);
+        return std::array<bool,7>{bool(ps),bool(vs),bool(pss),bool(gss),bool(vcb),bool(ccb),bool(vb)};
+    };
+    bind(f.context.Get());
+    for(bool b:bound()) need(b,"Highest-slot binding did not take");
+    f.context->ClearState();
+    for(bool b:bound()) need(!b,"ClearState left a highest-slot binding");
+    ComPtr<ID3D11DeviceContext> deferred;hr(f.device->CreateDeferredContext(0,&deferred),"deferred context");
+    bind(deferred.Get());
+    ComPtr<ID3D11CommandList> list;hr(deferred->FinishCommandList(FALSE,&list),"finish command list");
+    f.context->ExecuteCommandList(list.Get(),FALSE);
+    for(bool b:bound()) need(!b,"ExecuteCommandList(FALSE) left a highest-slot binding");
+    bind(f.context.Get());
+    f.context->ExecuteCommandList(list.Get(),TRUE);
+    for(bool b:bound()) need(b,"ExecuteCommandList(TRUE) lost a highest-slot binding");
+    f.context->ClearState();
+}
 }
 
 int main() {
@@ -364,6 +433,8 @@ int main() {
         sampling(fixture);
         shadowAdapters(fixture);
         hazards(fixture);
+        longBatch(fixture);
+        stateClear(fixture);
         std::printf("PASS Vulkan device conformance: %zu checks\n",checks);
         return 0;
     } catch(const std::exception& error) {

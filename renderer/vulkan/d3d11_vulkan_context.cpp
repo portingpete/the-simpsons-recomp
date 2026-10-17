@@ -3,6 +3,7 @@
 #include "renderer/native_backend.h"
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -165,6 +166,7 @@ void D3D11Context::setConstantBuffers(StageBindings& stage,uint32_t dirty,UINT s
         stage.firstConstant[start+i]=first&&buffer?first[i]:0;
         stage.constantCount[start+i]=number&&buffer?number[i]:0;
     }
+    stage.bufferEnd=std::max<uint32_t>(stage.bufferEnd,start+count);
     dirty_|=dirty;
 }
 void D3D11Context::setResources(StageBindings& stage,uint32_t dirty,UINT start,UINT count,ID3D11ShaderResourceView* const* views) {
@@ -183,6 +185,7 @@ void D3D11Context::setResources(StageBindings& stage,uint32_t dirty,UINT start,U
 void D3D11Context::setSamplers(StageBindings& stage,uint32_t dirty,UINT start,UINT count,ID3D11SamplerState* const* samplers) {
     if(start>=stageSamplerSlots || count>stageSamplerSlots-start) throw Error("Native Vulkan sampler slots are out of range");
     for(UINT i=0;i<count;++i) stage.samplers[start+i]=samplers?unwrap<D3D11SamplerState>(samplers[i]):nullptr;
+    stage.samplerEnd=std::max<uint32_t>(stage.samplerEnd,start+count);
     dirty_|=dirty;
 }
 void D3D11Context::getConstantBuffers(const StageBindings& stage,UINT start,UINT count,ID3D11Buffer** buffers,UINT* first,UINT* number) const {
@@ -291,6 +294,7 @@ void D3D11Context::IASetVertexBuffers(UINT start,UINT count,ID3D11Buffer* const*
         state_->vertexBuffers[start+i]=buffer;
         state_->strides[start+i]=buffer&&strides?strides[i]:0;state_->offsets[start+i]=buffer&&offsets?offsets[i]:0;
     }
+    state_->vertexBufferEnd=std::max<uint32_t>(state_->vertexBufferEnd,start+count);
     dirty_|=DirtyVertexBuffers;
     if(deferred_) {
         std::vector<UINT> s(strides?strides:nullptr,strides?strides+count:nullptr),o(offsets?offsets:nullptr,offsets?offsets+count:nullptr);
@@ -481,25 +485,45 @@ void D3D11Context::SwapDeviceContextState(ID3DDeviceContextState* next,ID3DDevic
 }
 
 // ---------------------------------------------------------------- Vulkan recording
-VkCommandBuffer D3D11Context::commands() {return device_->vulkan().commands();}
+// Every vkCmd call below is recorded with resolved arguments and runs on the
+// device's recording thread (CommandRecorder); the state tracking stays here.
+VulkanDevice& D3D11Context::vulkan() {return device_->vulkan();}
+namespace {
+// A rendering scope's attachments as a recorded call captures them.
+struct ScopeTargets {
+    std::array<VkImageView,D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> colors{};
+    uint32_t colorCount=0;
+    VkImageView depthStencil=VK_NULL_HANDLE;
+    bool depth=false,stencil=false;
+    VkExtent2D extent{};
+};
+struct VertexBinding {VkBuffer buffer;VkDeviceSize offset,stride;};
+constexpr size_t maxDescriptors=64;
+struct Descriptor {
+    uint32_t binding;VkDescriptorType type;
+    union {VkDescriptorBufferInfo buffer;VkDescriptorImageInfo image;};
+};
+}
 void D3D11Context::barrier() {
     if(!barrierPending_) return;
     // GENERAL layout throughout: one full memory dependency orders every
     // transfer/attachment write before every later read or write.
-    VkMemoryBarrier2 memory{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-    memory.srcStageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;memory.srcAccessMask=VK_ACCESS_2_MEMORY_WRITE_BIT;
-    memory.dstStageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;memory.dstAccessMask=VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT;
-    VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};dependency.memoryBarrierCount=1;dependency.pMemoryBarriers=&memory;
-    vkCmdPipelineBarrier2(commands(),&dependency);
-    barrierPending_=false;
+    emit([](VkCommandBuffer command) {
+        VkMemoryBarrier2 memory{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        memory.srcStageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;memory.srcAccessMask=VK_ACCESS_2_MEMORY_WRITE_BIT;
+        memory.dstStageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;memory.dstAccessMask=VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT;
+        VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};dependency.memoryBarrierCount=1;dependency.pMemoryBarriers=&memory;
+        vkCmdPipelineBarrier2(command,&dependency);
+    });
+    barrierPending_=false;++stats.barriers;
 }
 void D3D11Context::endRendering() {
     if(!rendering_) return;
-    vkCmdEndRendering(commands());
+    emit([](VkCommandBuffer command){vkCmdEndRendering(command);});
     rendering_=false;barrierPending_=true;
 }
 void D3D11Context::prepareSubmit() {
-    endRendering();
+    endRendering();++stats.submits;
     for(const auto& query:activeQueries_) endSegment(*query.Get());
 }
 void D3D11Context::afterSubmit() {
@@ -512,39 +536,44 @@ void D3D11Context::afterSubmit() {
 }
 void D3D11Context::beginRendering() {
     barrier();
-    std::array<VkRenderingAttachmentInfo,D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> colors{};
-    uint32_t colorCount=0;
+    ScopeTargets targets;
     VkExtent2D extent{~0u,~0u};bool any=false;
-    for(uint32_t i=0;i<colors.size();++i) {
+    for(uint32_t i=0;i<targets.colors.size();++i) {
         const auto& target=state_->renderTargets[i];
-        auto& info=colors[i];info.sType=VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        info.imageLayout=VK_IMAGE_LAYOUT_GENERAL;info.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD;info.storeOp=VK_ATTACHMENT_STORE_OP_STORE;
         renderingColors_[i]=target?target->view():VK_NULL_HANDLE;
         colorFormats_[i]=target?target->format():VK_FORMAT_UNDEFINED;
         if(!target) continue;
-        info.imageView=target->view();colorCount=i+1;any=true;
+        targets.colors[i]=target->view();targets.colorCount=i+1;any=true;
         extent.width=std::min(extent.width,target->extent().width);extent.height=std::min(extent.height,target->extent().height);
     }
-    VkRenderingAttachmentInfo depth{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO},stencil{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     const auto& dsv=state_->depthStencil;
     renderingDepth_=dsv?dsv->view():VK_NULL_HANDLE;
     depthFormat_=dsv?dsv->format():VK_FORMAT_UNDEFINED;
     if(dsv) {
-        for(auto* info:{&depth,&stencil}) {
-            info->imageView=dsv->view();info->imageLayout=VK_IMAGE_LAYOUT_GENERAL;
-            info->loadOp=VK_ATTACHMENT_LOAD_OP_LOAD;info->storeOp=VK_ATTACHMENT_STORE_OP_STORE;
-        }
+        targets.depthStencil=dsv->view();
+        targets.depth=(dsv->aspects()&VK_IMAGE_ASPECT_DEPTH_BIT)!=0;targets.stencil=(dsv->aspects()&VK_IMAGE_ASPECT_STENCIL_BIT)!=0;
         any=true;
         extent.width=std::min(extent.width,dsv->extent().width);extent.height=std::min(extent.height,dsv->extent().height);
     }
     if(!any) extent={8192,8192};
-    VkRenderingInfo info{VK_STRUCTURE_TYPE_RENDERING_INFO};
-    info.renderArea={{0,0},extent};info.layerCount=1;
-    info.colorAttachmentCount=colorCount;info.pColorAttachments=colors.data();
-    if(dsv && (dsv->aspects()&VK_IMAGE_ASPECT_DEPTH_BIT)) info.pDepthAttachment=&depth;
-    if(dsv && (dsv->aspects()&VK_IMAGE_ASPECT_STENCIL_BIT)) info.pStencilAttachment=&stencil;
-    vkCmdBeginRendering(commands(),&info);
-    rendering_=true;renderArea_=extent;
+    targets.extent=extent;
+    emit([targets](VkCommandBuffer command) {
+        std::array<VkRenderingAttachmentInfo,D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> colors{};
+        for(uint32_t i=0;i<targets.colorCount;++i) {
+            auto& info=colors[i];info.sType=VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;info.imageView=targets.colors[i];
+            info.imageLayout=VK_IMAGE_LAYOUT_GENERAL;info.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD;info.storeOp=VK_ATTACHMENT_STORE_OP_STORE;
+        }
+        VkRenderingAttachmentInfo depth{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+        depth.imageView=targets.depthStencil;depth.imageLayout=VK_IMAGE_LAYOUT_GENERAL;
+        depth.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD;depth.storeOp=VK_ATTACHMENT_STORE_OP_STORE;
+        VkRenderingInfo info{VK_STRUCTURE_TYPE_RENDERING_INFO};
+        info.renderArea={{0,0},targets.extent};info.layerCount=1;
+        info.colorAttachmentCount=targets.colorCount;info.pColorAttachments=colors.data();
+        if(targets.depth) info.pDepthAttachment=&depth;
+        if(targets.stencil) info.pStencilAttachment=&depth;
+        vkCmdBeginRendering(command,&info);
+    });
+    rendering_=true;renderArea_=extent;++stats.scopes;
 }
 namespace {
 // True (and remembered) when value differs from what the command buffer holds.
@@ -554,14 +583,13 @@ template<class T> bool changed(std::optional<T>& emitted,const T& value) {
 }
 }
 void D3D11Context::applyDynamicState() {
-    const VkCommandBuffer command=commands();
     const auto& raster=state_->rasterizer?state_->rasterizer->desc():defaultRaster;
     if(dirty_&DirtyViewport) {
         const auto& v=state_->viewports[0];
         // Negative height reproduces D3D's upward NDC y with the same
         // top-left framebuffer origin and winding (Vulkan 1.1 core).
         const VkViewport viewport{v.TopLeftX,v.TopLeftY+v.Height,v.Width,-v.Height,v.MinDepth,v.MaxDepth};
-        if(changed(emitted_.viewport,viewport)) vkCmdSetViewport(command,0,1,&viewport);
+        if(changed(emitted_.viewport,viewport)) emit([viewport](VkCommandBuffer command){vkCmdSetViewport(command,0,1,&viewport);});
     }
     if(dirty_&DirtyScissor) {
         VkRect2D rect{{0,0},renderArea_};
@@ -573,27 +601,27 @@ void D3D11Context::applyDynamicState() {
                 rect.extent={uint32_t(std::max<LONG>(s.right-left,0)),uint32_t(std::max<LONG>(s.bottom-top,0))};
             } else rect.extent={0,0};
         }
-        if(changed(emitted_.scissor,rect)) vkCmdSetScissor(command,0,1,&rect);
+        if(changed(emitted_.scissor,rect)) emit([rect](VkCommandBuffer command){vkCmdSetScissor(command,0,1,&rect);});
     }
     if(dirty_&DirtyRaster) {
         const bool bias=raster.DepthBias!=0 || raster.SlopeScaledDepthBias!=0.0f;
         const std::array<uint32_t,3> fixed{uint32_t(cullMode(raster.CullMode)),
             uint32_t(raster.FrontCounterClockwise?VK_FRONT_FACE_COUNTER_CLOCKWISE:VK_FRONT_FACE_CLOCKWISE),uint32_t(bias)};
-        if(changed(emitted_.raster,fixed)) {
-            vkCmdSetCullMode(command,fixed[0]);vkCmdSetFrontFace(command,VkFrontFace(fixed[1]));vkCmdSetDepthBiasEnable(command,bias);
-        }
+        if(changed(emitted_.raster,fixed)) emit([fixed](VkCommandBuffer command) {
+            vkCmdSetCullMode(command,fixed[0]);vkCmdSetFrontFace(command,VkFrontFace(fixed[1]));vkCmdSetDepthBiasEnable(command,fixed[2]);
+        });
         const std::array<float,3> values{float(raster.DepthBias),raster.DepthBiasClamp,raster.SlopeScaledDepthBias};
-        if(bias && changed(emitted_.bias,values)) vkCmdSetDepthBias(command,values[0],values[1],values[2]);
+        if(bias && changed(emitted_.bias,values)) emit([values](VkCommandBuffer command){vkCmdSetDepthBias(command,values[0],values[1],values[2]);});
     }
     if(dirty_&DirtyDepthStencil) {
         const auto& d=state_->depthStencilState?state_->depthStencilState->desc():defaultDepth;
         // Disabled tests may carry zero fields, which D3D11 ignores.
         const std::array<uint32_t,4> depth{uint32_t(d.DepthEnable!=0),uint32_t(d.DepthEnable && d.DepthWriteMask==D3D11_DEPTH_WRITE_MASK_ALL),
             uint32_t(d.DepthEnable?compareOp(d.DepthFunc):VK_COMPARE_OP_ALWAYS),0};
-        if(changed(emitted_.depth,depth)) {
+        if(changed(emitted_.depth,depth)) emit([depth](VkCommandBuffer command) {
             vkCmdSetDepthTestEnable(command,depth[0]);vkCmdSetDepthWriteEnable(command,depth[1]);
             vkCmdSetDepthCompareOp(command,VkCompareOp(depth[2]));vkCmdSetDepthBoundsTestEnable(command,VK_FALSE);
-        }
+        });
         std::array<uint32_t,11> stencil{uint32_t(d.StencilEnable!=0),VK_STENCIL_OP_KEEP,VK_STENCIL_OP_KEEP,VK_STENCIL_OP_KEEP,VK_COMPARE_OP_ALWAYS,
             VK_STENCIL_OP_KEEP,VK_STENCIL_OP_KEEP,VK_STENCIL_OP_KEEP,VK_COMPARE_OP_ALWAYS,d.StencilReadMask,d.StencilWriteMask};
         if(d.StencilEnable) {
@@ -603,20 +631,20 @@ void D3D11Context::applyDynamicState() {
                 stencil[at++]=stencilOp(face->StencilDepthFailOp);stencil[at++]=compareOp(face->StencilFunc);
             }
         }
-        if(changed(emitted_.stencil,stencil)) {
+        if(changed(emitted_.stencil,stencil)) emit([stencil](VkCommandBuffer command) {
             vkCmdSetStencilTestEnable(command,stencil[0]);
             vkCmdSetStencilOp(command,VK_STENCIL_FACE_FRONT_BIT,VkStencilOp(stencil[1]),VkStencilOp(stencil[2]),VkStencilOp(stencil[3]),VkCompareOp(stencil[4]));
             vkCmdSetStencilOp(command,VK_STENCIL_FACE_BACK_BIT,VkStencilOp(stencil[5]),VkStencilOp(stencil[6]),VkStencilOp(stencil[7]),VkCompareOp(stencil[8]));
             vkCmdSetStencilCompareMask(command,VK_STENCIL_FACE_FRONT_AND_BACK,stencil[9]);
             vkCmdSetStencilWriteMask(command,VK_STENCIL_FACE_FRONT_AND_BACK,stencil[10]);
-        }
+        });
     }
     if((dirty_&DirtyStencilRef) && changed(emitted_.stencilRef,uint32_t(state_->stencilRef&0xFF)))
-        vkCmdSetStencilReference(command,VK_STENCIL_FACE_FRONT_AND_BACK,*emitted_.stencilRef);
+        emit([reference=*emitted_.stencilRef](VkCommandBuffer command){vkCmdSetStencilReference(command,VK_STENCIL_FACE_FRONT_AND_BACK,reference);});
     if((dirty_&DirtyBlendConstants) && changed(emitted_.blendConstants,state_->blendFactor))
-        vkCmdSetBlendConstants(command,state_->blendFactor.data());
+        emit([factor=state_->blendFactor](VkCommandBuffer command){vkCmdSetBlendConstants(command,factor.data());});
     if((dirty_&DirtyTopology) && changed(emitted_.topology,uint32_t(primitiveTopology(state_->topology))))
-        vkCmdSetPrimitiveTopology(command,VkPrimitiveTopology(*emitted_.topology));
+        emit([topology=VkPrimitiveTopology(*emitted_.topology)](VkCommandBuffer command){vkCmdSetPrimitiveTopology(command,topology);});
     dirty_&=~(DirtyViewport|DirtyScissor|DirtyRaster|DirtyDepthStencil|DirtyStencilRef|DirtyBlendConstants|DirtyTopology);
 }
 // D3D excludes StartVertex/BaseVertex/StartInstance from SV_VertexID and
@@ -658,63 +686,78 @@ void D3D11Context::bindVertexBuffers(INT vertexBase,UINT instanceBase) {
         offset+=(instanceSlots&(1u<<slot))?int64_t(instanceBase)*int64_t(stride):foldedBase*int64_t(stride);
         buffers[slot]=range.buffer;offsets[slot]=VkDeviceSize(offset);strides[slot]=stride;
     }
-    const VkCommandBuffer command=commands();
-    for(uint32_t slot=0;slot<32;) {
-        if(!(slots&(1u<<slot))) {++slot;continue;}
-        uint32_t end=slot;
-        while(end<32 && (slots&(1u<<end))) ++end;
-        vkCmdBindVertexBuffers2(command,slot,end-slot,&buffers[slot],&offsets[slot],nullptr,&strides[slot]);
-        slot=end;
+    if(slots) {
+        // The used slot span; the call binds each run of consecutive slots.
+        const uint32_t first=uint32_t(std::countr_zero(slots)),end=32-uint32_t(std::countl_zero(slots));
+        std::array<VertexBinding,32> span;
+        for(uint32_t slot=first;slot<end;++slot) span[slot-first]={buffers[slot],offsets[slot],strides[slot]};
+        emit(std::span<const VertexBinding>(span.data(),end-first),[slots,first,end](VkCommandBuffer command,const VertexBinding* bound) {
+            std::array<VkBuffer,32> buffers;std::array<VkDeviceSize,32> offsets,strides;
+            for(uint32_t slot=first;slot<end;++slot) {buffers[slot]=bound[slot-first].buffer;offsets[slot]=bound[slot-first].offset;strides[slot]=bound[slot-first].stride;}
+            for(uint32_t slot=first;slot<end;) {
+                if(!(slots&(1u<<slot))) {++slot;continue;}
+                uint32_t run=slot;
+                while(run<end && (slots&(1u<<run))) ++run;
+                vkCmdBindVertexBuffers2(command,slot,run-slot,&buffers[slot],&offsets[slot],nullptr,&strides[slot]);
+                slot=run;
+            }
+        });
     }
+    ++stats.vertexBinds;
     boundVertexBuffers_=buffers;boundVertexOffsets_=offsets;boundVertexStrides_=strides;
     vertexBindingMask_=slots;boundVertexBase_=vertexBase;boundInstanceBase_=instanceBase;
     dirty_&=~DirtyVertexBuffers;
 }
 void D3D11Context::pushDescriptors(VkPipelineLayout layout) {
-    std::array<VkWriteDescriptorSet,64> writes{};
-    std::array<VkDescriptorBufferInfo,64> buffers{};
-    std::array<VkDescriptorImageInfo,64> images{};
-    const VkBufferView nullTexel=VK_NULL_HANDLE;
+    // Resolve every binding into its descriptor and the comparison key; the
+    // recorded call builds the write structures only for a push that happens.
+    Descriptor descriptors[maxDescriptors];
+    const VkDeviceSize maxRange=device_->vulkan().properties().limits.maxUniformBufferRange;
+    pushing_.clear();
     size_t i=0;
     for(int pass=0;pass<2;++pass) {
     const SpirvModule* module=pass?(state_->pixelShader?&state_->pixelShader->spirv():nullptr):&state_->vertexShader->spirv();
     if(!module) continue;
-    StageBindings& stage=pass?state_->pixel:state_->vertex;
+    const StageBindings& stage=pass?state_->pixel:state_->vertex;
     const uint32_t base=pass?pixelBindingBase:0;
     for(const auto& binding:module->bindings()) {
-        if(i==writes.size()) throw Error("Native Vulkan draw binds too many descriptors");
-        auto& write=writes[i];
-        write.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;write.dstBinding=base+binding.binding;write.descriptorCount=1;write.descriptorType=binding.type;
+        if(i==maxDescriptors) throw Error("Native Vulkan draw binds too many descriptors");
+        auto& descriptor=descriptors[i];
+        descriptor.binding=base+binding.binding;descriptor.type=binding.type;
+        pushing_.push_back(uint64_t(base+binding.binding)<<32|binding.type);
         switch(binding.type) {
         case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER: {
             const uint32_t slot=binding.binding-constantBufferBinding;
             const auto& buffer=stage.constantBuffers[slot];
-            auto& info=buffers[i];
+            auto& info=descriptor.buffer;
+            info={VK_NULL_HANDLE,0,VK_WHOLE_SIZE};
             if(buffer) {
-                const auto range=buffer->range();
                 const VkDeviceSize size=buffer->desc().ByteWidth,first=VkDeviceSize(stage.firstConstant[slot])*16;
-                if(first>=size) {info={VK_NULL_HANDLE,0,VK_WHOLE_SIZE};}
-                else {
+                if(first<size) {
+                    const auto range=buffer->range();
                     VkDeviceSize length=stage.constantCount[slot]?VkDeviceSize(stage.constantCount[slot])*16:size-first;
-                    length=std::min({length,size-first,VkDeviceSize(device_->vulkan().properties().limits.maxUniformBufferRange)});
+                    length=std::min(std::min(length,size-first),maxRange);
                     info={range.buffer,range.offset+first,length};
                 }
-            } else info={VK_NULL_HANDLE,0,VK_WHOLE_SIZE};
-            write.pBufferInfo=&info;break;
+            }
+            pushing_.push_back(uint64_t(info.buffer));pushing_.push_back(info.offset);pushing_.push_back(info.range);
+            break;
         }
         case VK_DESCRIPTOR_TYPE_SAMPLER: {
             const auto& sampler=stage.samplers[binding.binding-samplerBinding];
-            images[i].sampler=sampler?sampler->sampler():device_->defaultSampler();
-            write.pImageInfo=&images[i];break;
+            descriptor.image={sampler?sampler->sampler():device_->defaultSampler(),VK_NULL_HANDLE,VK_IMAGE_LAYOUT_UNDEFINED};
+            pushing_.push_back(uint64_t(descriptor.image.sampler));
+            break;
         }
         case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE: {
             const auto& view=stage.resources[binding.binding-textureBinding];
             // Textures are single-sample; a multisampled declaration reads as unbound.
             const bool usable=view && !binding.multisampled;
-            images[i].imageView=usable?view->view():VK_NULL_HANDLE;images[i].imageLayout=VK_IMAGE_LAYOUT_GENERAL;
-            write.pImageInfo=&images[i];break;
+            descriptor.image={VK_NULL_HANDLE,usable?view->view():VK_NULL_HANDLE,VK_IMAGE_LAYOUT_GENERAL};
+            pushing_.push_back(uint64_t(descriptor.image.imageView));
+            break;
         }
-        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:write.pTexelBufferView=&nullTexel;break;
+        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:descriptor.buffer={};break;
         default:throw Error("Native Vulkan descriptor type is unsupported");
         }
         ++i;
@@ -722,18 +765,20 @@ void D3D11Context::pushDescriptors(VkPipelineLayout layout) {
     }
     if(!i) return;
     // Skip a push identical to the one the command buffer already holds.
-    pushing_.clear();
-    for(size_t w=0;w<i;++w) {
-        const auto& write=writes[w];
-        pushing_.push_back(uint64_t(write.dstBinding)<<32|write.descriptorType);
-        if(write.pBufferInfo) {
-            pushing_.push_back(uint64_t(write.pBufferInfo->buffer));pushing_.push_back(write.pBufferInfo->offset);pushing_.push_back(write.pBufferInfo->range);
-        } else if(write.pImageInfo) {
-            pushing_.push_back(uint64_t(write.pImageInfo->sampler));pushing_.push_back(uint64_t(write.pImageInfo->imageView));
+    if(layout==pushedLayout_ && pushing_==pushed_) {++stats.pushSkips;return;}
+    emit(std::span<const Descriptor>(descriptors,i),[layout,count=uint32_t(i)](VkCommandBuffer command,const Descriptor* descriptors) {
+        const VkBufferView nullTexel=VK_NULL_HANDLE;
+        VkWriteDescriptorSet writes[maxDescriptors];
+        for(uint32_t w=0;w<count;++w) {
+            const auto& descriptor=descriptors[w];const VkDescriptorType type=descriptor.type;
+            writes[w]={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,nullptr,VK_NULL_HANDLE,descriptor.binding,0,1,type,
+                type==VK_DESCRIPTOR_TYPE_SAMPLER || type==VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE?&descriptor.image:nullptr,
+                type==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER?&descriptor.buffer:nullptr,
+                type==VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER?&nullTexel:nullptr};
         }
-    }
-    if(layout==pushedLayout_ && pushing_==pushed_) return;
-    vkCmdPushDescriptorSetKHR(commands(),VK_PIPELINE_BIND_POINT_GRAPHICS,layout,0,uint32_t(i),writes.data());
+        vkCmdPushDescriptorSetKHR(command,VK_PIPELINE_BIND_POINT_GRAPHICS,layout,0,count,writes);
+    });
+    ++stats.pushes;
     pushedLayout_=layout;std::swap(pushed_,pushing_);
 }
 // Opt-in (SIMPSONS_VULKAN_TRACE=1) per-draw state log for fixture diagnosis.
@@ -777,7 +822,7 @@ bool D3D11Context::prepareDraw(bool indexed,INT vertexBase,UINT instanceBase) {
         bool same=(state_->depthStencil?state_->depthStencil->view():VK_NULL_HANDLE)==renderingDepth_;
         for(uint32_t i=0;i<renderingColors_.size() && same;++i)
             same=(state_->renderTargets[i]?state_->renderTargets[i]->view():VK_NULL_HANDLE)==renderingColors_[i];
-        if(!same) endRendering();
+        if(!same) {endRendering();++stats.attachmentBreaks;}
     }
     if(!rendering_) {beginRendering();dirty_|=DirtyScissor;}
     const auto& raster=state_->rasterizer?state_->rasterizer->desc():defaultRaster;
@@ -790,10 +835,12 @@ bool D3D11Context::prepareDraw(bool indexed,INT vertexBase,UINT instanceBase) {
     key.sampleMask=state_->sampleMask;key.topologyClass=topology;
     key.wireframe=raster.FillMode==D3D11_FILL_WIREFRAME;key.depthClip=raster.DepthClipEnable?1:0;
     key.colors=colorFormats_;key.depth=depthFormat_;
-    const VkCommandBuffer command=commands();
     if(!pipeline_ || !(key==key_)) {
         const auto entry=device_->pipelines().get(key,*state_);
-        if(entry.pipeline!=pipeline_) vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,entry.pipeline);
+        if(entry.pipeline!=pipeline_) {
+            emit([pipeline=entry.pipeline](VkCommandBuffer command){vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline);});
+            ++stats.pipelineBinds;
+        }
         if(entry.layout!=layout_) dirty_|=DirtyVertexDescriptors|DirtyPixelDescriptors;
         if(key.vertex!=key_.vertex) dirty_|=DirtyVertexDescriptors;
         if(key.pixel!=key_.pixel) dirty_|=DirtyPixelDescriptors;
@@ -805,14 +852,14 @@ bool D3D11Context::prepareDraw(bool indexed,INT vertexBase,UINT instanceBase) {
     const bool strip=state_->topology==D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP || state_->topology==D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP;
     // D3D10+ always treats the all-ones index as a strip cut; lists never cut.
     const bool restart=indexed && strip;
-    if(changed(emitted_.restart,uint32_t(restart))) vkCmdSetPrimitiveRestartEnable(command,restart);
+    if(changed(emitted_.restart,uint32_t(restart))) emit([restart](VkCommandBuffer command){vkCmdSetPrimitiveRestartEnable(command,restart);});
     bindVertexBuffers(vertexBase,instanceBase);
     if(indexed) {
         const auto range=state_->indexBuffer->range();
         const VkIndexType type=state_->indexFormat==DXGI_FORMAT_R32_UINT?VK_INDEX_TYPE_UINT32:VK_INDEX_TYPE_UINT16;
         const VkDeviceSize offset=range.offset+state_->indexOffset;
         if(range.buffer!=boundIndexBuffer_ || offset!=boundIndexOffset_ || type!=boundIndexType_ || (dirty_&DirtyIndexBuffer)) {
-            vkCmdBindIndexBuffer(command,range.buffer,offset,type);
+            emit([buffer=range.buffer,offset,type](VkCommandBuffer command){vkCmdBindIndexBuffer(command,buffer,offset,type);});
             boundIndexBuffer_=range.buffer;boundIndexOffset_=offset;boundIndexType_=type;
         }
         dirty_&=~DirtyIndexBuffer;
@@ -821,6 +868,7 @@ bool D3D11Context::prepareDraw(bool indexed,INT vertexBase,UINT instanceBase) {
     // descriptors are pushed for every draw, which is cheap with push sets.
     pushDescriptors(layout_);
     dirty_&=~(DirtyVertexDescriptors|DirtyPixelDescriptors);
+    ++stats.draws;
     return true;
 }
 
@@ -828,22 +876,22 @@ bool D3D11Context::prepareDraw(bool indexed,INT vertexBase,UINT instanceBase) {
 void D3D11Context::Draw(UINT count,UINT start) {
     if(deferred_) {record([count,start](D3D11Context& c){c.Draw(count,start);});return;}
     if(!count || !prepareDraw(false,INT(start),0)) return;
-    vkCmdDraw(commands(),count,1,0,0);
+    emit([count](VkCommandBuffer command){vkCmdDraw(command,count,1,0,0);});
 }
 void D3D11Context::DrawIndexed(UINT count,UINT start,INT base) {
     if(deferred_) {record([count,start,base](D3D11Context& c){c.DrawIndexed(count,start,base);});return;}
     if(!count || !prepareDraw(true,base,0)) return;
-    vkCmdDrawIndexed(commands(),count,1,start,drawVertexOffset_,0);
+    emit([count,start,base=drawVertexOffset_](VkCommandBuffer command){vkCmdDrawIndexed(command,count,1,start,base,0);});
 }
 void D3D11Context::DrawInstanced(UINT count,UINT instances,UINT start,UINT firstInstance) {
     if(deferred_) {record([=](D3D11Context& c){c.DrawInstanced(count,instances,start,firstInstance);});return;}
     if(!count || !instances || !prepareDraw(false,INT(start),firstInstance)) return;
-    vkCmdDraw(commands(),count,instances,0,0);
+    emit([count,instances](VkCommandBuffer command){vkCmdDraw(command,count,instances,0,0);});
 }
 void D3D11Context::DrawIndexedInstanced(UINT count,UINT instances,UINT start,INT base,UINT firstInstance) {
     if(deferred_) {record([=](D3D11Context& c){c.DrawIndexedInstanced(count,instances,start,base,firstInstance);});return;}
     if(!count || !instances || !prepareDraw(true,base,firstInstance)) return;
-    vkCmdDrawIndexed(commands(),count,instances,start,drawVertexOffset_,0);
+    emit([count,instances,start,base=drawVertexOffset_](VkCommandBuffer command){vkCmdDrawIndexed(command,count,instances,start,base,0);});
 }
 void D3D11Context::DrawAuto() {requireNull(this,"DrawAuto");}
 void D3D11Context::DrawIndexedInstancedIndirect(ID3D11Buffer*,UINT) {requireNull(this,"indirect draws");}
@@ -856,11 +904,12 @@ void D3D11Context::clearAttachment(VkImageView view,VkExtent2D extent,VkFormat f
     const VkClearValue& value,VkImageAspectFlags clearAspects) {
     requireUnpredicated("clears");
     endRendering();barrier();
+    (void)format;
+    emit([view,extent,aspects,value,clearAspects](VkCommandBuffer command) {
     VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO},depth{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO},
         stencil{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     VkRenderingInfo info{VK_STRUCTURE_TYPE_RENDERING_INFO};
     info.renderArea={{0,0},extent};info.layerCount=1;
-    (void)format;
     if(aspects&VK_IMAGE_ASPECT_COLOR_BIT) {
         color.imageView=view;color.imageLayout=VK_IMAGE_LAYOUT_GENERAL;color.loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR;
         color.storeOp=VK_ATTACHMENT_STORE_OP_STORE;color.clearValue=value;
@@ -876,9 +925,9 @@ void D3D11Context::clearAttachment(VkImageView view,VkExtent2D extent,VkFormat f
         stencil.loadOp=(clearAspects&VK_IMAGE_ASPECT_STENCIL_BIT)?VK_ATTACHMENT_LOAD_OP_CLEAR:VK_ATTACHMENT_LOAD_OP_LOAD;
         info.pStencilAttachment=&stencil;
     }
-    const VkCommandBuffer command=commands();
     vkCmdBeginRendering(command,&info);vkCmdEndRendering(command);
-    barrierPending_=true;
+    });
+    barrierPending_=true;++stats.clears;
 }
 void D3D11Context::ClearRenderTargetView(ID3D11RenderTargetView* target,const FLOAT color[4]) {
     if(deferred_) {
@@ -955,7 +1004,6 @@ void D3D11Context::copyTexture(D3D11Texture2D& destination,UINT destinationSub,U
         extent.width=std::min(extent.width,destinationWidth-x);extent.height=std::min(extent.height,destinationHeight-y);
     }
     endRendering();barrier();
-    const VkCommandBuffer command=commands();
     const VkImageAspectFlags aspects=sf.aspects;
     const uint64_t serial=device_->vulkan().recordingSerial();
     if(!destination.isStaging() && !source.isStaging()) {
@@ -963,7 +1011,8 @@ void D3D11Context::copyTexture(D3D11Texture2D& destination,UINT destinationSub,U
         region.srcSubresource={aspects,from.mip,from.layer,1};region.srcOffset=sourceOffset;
         region.dstSubresource={destination.format().aspects,to.mip,to.layer,1};region.dstOffset={int32_t(x),int32_t(y),0};
         region.extent=extent;
-        vkCmdCopyImage(command,source.image(),VK_IMAGE_LAYOUT_GENERAL,destination.image(),VK_IMAGE_LAYOUT_GENERAL,1,&region);
+        emit([from=source.image(),to=destination.image(),region](VkCommandBuffer command){
+            vkCmdCopyImage(command,from,VK_IMAGE_LAYOUT_GENERAL,to,VK_IMAGE_LAYOUT_GENERAL,1,&region);});
     } else if(destination.isStaging() && !source.isStaging()) {
         const auto& layout=destination.layout(destinationSub);
         const bool combined=sf.depth() && sf.stencil();
@@ -978,7 +1027,8 @@ void D3D11Context::copyTexture(D3D11Texture2D& destination,UINT destinationSub,U
             regions[count++]={layout.offset+VkDeviceSize(by)*layout.rowPitch+VkDeviceSize(bx)*sf.blockBytes,rowTexels,0,
                 {aspects,from.mip,from.layer,1},sourceOffset,extent};
         }
-        vkCmdCopyImageToBuffer(command,source.image(),VK_IMAGE_LAYOUT_GENERAL,destination.staging().buffer,count,regions.data());
+        emit([from=source.image(),to=destination.staging().buffer,count,regions](VkCommandBuffer command){
+            vkCmdCopyImageToBuffer(command,from,VK_IMAGE_LAYOUT_GENERAL,to,count,regions.data());});
         destination.gpuWrite=serial;
     } else if(!destination.isStaging() && source.isStaging()) {
         const auto& layout=source.layout(sourceSub);
@@ -993,10 +1043,11 @@ void D3D11Context::copyTexture(D3D11Texture2D& destination,UINT destinationSub,U
             regions[count++]={layout.offset+VkDeviceSize(by)*layout.rowPitch+VkDeviceSize(bx)*sf.blockBytes,rowTexels,0,
                 {destination.format().aspects,to.mip,to.layer,1},{int32_t(x),int32_t(y),0},extent};
         }
-        vkCmdCopyBufferToImage(command,source.staging().buffer,destination.image(),VK_IMAGE_LAYOUT_GENERAL,count,regions.data());
+        emit([from=source.staging().buffer,to=destination.image(),count,regions](VkCommandBuffer command){
+            vkCmdCopyBufferToImage(command,from,to,VK_IMAGE_LAYOUT_GENERAL,count,regions.data());});
         source.gpuRead=serial;
     } else throw Error("Native Vulkan staging-to-staging texture copies are unsupported");
-    barrierPending_=true;
+    barrierPending_=true;++stats.transfers;
 }
 void D3D11Context::copyBuffer(D3D11Buffer& destination,UINT offset,D3D11Buffer& source,UINT sourceOffset,UINT size) {
     if(!size) return;
@@ -1018,10 +1069,10 @@ void D3D11Context::copyBuffer(D3D11Buffer& destination,UINT offset,D3D11Buffer& 
     endRendering();barrier();
     const auto to=destination.range(),from=source.range();
     const VkBufferCopy region{from.offset+sourceOffset,to.offset+offset,size};
-    vkCmdCopyBuffer(commands(),from.buffer,to.buffer,1,&region);
+    emit([from=from.buffer,to=to.buffer,region](VkCommandBuffer command){vkCmdCopyBuffer(command,from,to,1,&region);});
     if(destination.storage()==D3D11Buffer::Storage::Staging) destination.gpuWrite=vulkan.recordingSerial();
     if(source.storage()==D3D11Buffer::Storage::Staging) source.gpuRead=vulkan.recordingSerial();
-    barrierPending_=true;
+    barrierPending_=true;++stats.transfers;
 }
 void D3D11Context::CopyResource(ID3D11Resource* destination,ID3D11Resource* source) {
     if(deferred_) {
@@ -1089,8 +1140,8 @@ void D3D11Context::updateBuffer(D3D11Buffer& buffer,UINT offset,UINT size,const 
     std::memcpy(staging.data,data,size);
     endRendering();barrier();
     const VkBufferCopy region{staging.offset,offset,size};
-    vkCmdCopyBuffer(commands(),staging.buffer,buffer.range().buffer,1,&region);
-    barrierPending_=true;
+    emit([from=staging.buffer,to=buffer.range().buffer,region](VkCommandBuffer command){vkCmdCopyBuffer(command,from,to,1,&region);});
+    barrierPending_=true;++stats.transfers;
 }
 void D3D11Context::updateTexture(D3D11Texture2D& texture,UINT subresource,const D3D11_BOX* box,const void* data,UINT rowPitch) {
     if(texture.isStaging()) throw Error("Native Vulkan UpdateSubresource cannot target staging textures");
@@ -1113,8 +1164,8 @@ void D3D11Context::updateTexture(D3D11Texture2D& texture,UINT subresource,const 
         std::memcpy(staging.data+size_t(row)*rowBytes,static_cast<const uint8_t*>(data)+size_t(row)*rowPitch,rowBytes);
     endRendering();barrier();
     const VkBufferImageCopy region{staging.offset,0,0,{format.aspects,sub.mip,sub.layer,1},offset,extent};
-    vkCmdCopyBufferToImage(commands(),staging.buffer,texture.image(),VK_IMAGE_LAYOUT_GENERAL,1,&region);
-    barrierPending_=true;
+    emit([from=staging.buffer,to=texture.image(),region](VkCommandBuffer command){vkCmdCopyBufferToImage(command,from,to,VK_IMAGE_LAYOUT_GENERAL,1,&region);});
+    barrierPending_=true;++stats.transfers;
 }
 void D3D11Context::UpdateSubresource(ID3D11Resource* destination,UINT subresource,const D3D11_BOX* box,const void* data,UINT rowPitch,UINT depthPitch) {
     if(!destination || !data) return;
@@ -1259,7 +1310,8 @@ void D3D11Context::Unmap(ID3D11Resource* resource,UINT subresource) {
 void D3D11Context::writeTimestamp(D3D11Query& query) {
     query.releaseSlots();
     query.slot=device_->acquireQuerySlot(QueryPool::Timestamp);
-    vkCmdWriteTimestamp2(commands(),VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,device_->queryPool(QueryPool::Timestamp),query.slot);
+    emit([pool=device_->queryPool(QueryPool::Timestamp),slot=query.slot](VkCommandBuffer command){
+        vkCmdWriteTimestamp2(command,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,pool,slot);});
 }
 // Occlusion/statistics queries begin and end outside dynamic rendering, so
 // they stay valid across the render scopes and copies in between.
@@ -1268,11 +1320,11 @@ void D3D11Context::beginSegment(D3D11Query& query) {
     const uint32_t slot=device_->acquireQuerySlot(query.pool());
     query.segments.push_back(slot);
     const VkQueryControlFlags flags=query.pool()==QueryPool::Occlusion && device_->vulkan().capabilities().preciseOcclusion?VK_QUERY_CONTROL_PRECISE_BIT:0;
-    vkCmdBeginQuery(commands(),device_->queryPool(query.pool()),slot,flags);
+    emit([pool=device_->queryPool(query.pool()),slot,flags](VkCommandBuffer command){vkCmdBeginQuery(command,pool,slot,flags);});
 }
 void D3D11Context::endSegment(D3D11Query& query) {
     endRendering();
-    vkCmdEndQuery(commands(),device_->queryPool(query.pool()),query.segments.back());
+    emit([pool=device_->queryPool(query.pool()),slot=query.segments.back()](VkCommandBuffer command){vkCmdEndQuery(command,pool,slot);});
 }
 void D3D11Context::Begin(ID3D11Asynchronous* async) {
     if(deferred_) {record([object=ComPtr<ID3D11Asynchronous>(async)](D3D11Context& c){c.Begin(object.Get());});return;}
@@ -1365,6 +1417,7 @@ void D3D11Context::ExecuteCommandList(ID3D11CommandList* list,BOOL restore) {
     }
     auto* commands=unwrap<D3D11CommandList>(list);
     if(!commands) return;
+    ++stats.lists;stats.listCommands+=commands->commands().size();
     // Command lists start from default state and never inherit the caller's.
     std::unique_ptr<ContextState> saved;
     if(restore) {saved=std::move(state_);state_=spareState_?std::move(spareState_):std::make_unique<ContextState>();}
@@ -1374,6 +1427,16 @@ void D3D11Context::ExecuteCommandList(ID3D11CommandList* list,BOOL restore) {
     state_->clear();
     if(saved) {spareState_=std::move(state_);state_=std::move(saved);}
     markAllDirty();
+}
+void D3D11Context::frameStats() {
+    static const bool enabled=[]{const char* v=std::getenv("SIMPSONS_VULKAN_STATS");return v && *v=='1';}();
+    if(!enabled || ++stats.frames<600) return;
+    const double n=double(stats.frames);
+    std::fprintf(stderr,"[NATIVE VULKAN STATS] per frame: draws=%.1f scopes=%.1f attachment_breaks=%.1f clears=%.1f transfers=%.1f "
+        "barriers=%.1f pipeline_binds=%.1f pushes=%.1f push_skips=%.1f vertex_binds=%.1f submits=%.2f lists=%.1f list_commands=%.1f\n",
+        stats.draws/n,stats.scopes/n,stats.attachmentBreaks/n,stats.clears/n,stats.transfers/n,stats.barriers/n,stats.pipelineBinds/n,
+        stats.pushes/n,stats.pushSkips/n,stats.vertexBinds/n,stats.submits/n,stats.lists/n,stats.listCommands/n);
+    stats={};
 }
 HRESULT D3D11Context::FinishCommandList(BOOL restore,ID3D11CommandList** list) {
     if(!deferred_) return DXGI_ERROR_INVALID_CALL;
