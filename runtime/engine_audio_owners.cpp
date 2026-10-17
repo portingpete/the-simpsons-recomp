@@ -2,6 +2,7 @@
 #include "engine_audio.h"
 #include "engine_audio_reader.h"
 #include "engine_audio_output.h"
+#include "audio_source_allocations.h"
 #include "engine_cpu_calls.h"
 #include "heap_page_index.h"
 #include "filesystem.h"
@@ -184,6 +185,9 @@ struct EngineAudioOwners::State {
     std::unordered_map<PPCContext*,Destruction> destructions;
     // Reader claims are keyed by B; resident requests have a distinct namespace.
     std::unordered_map<uint64_t,std::shared_ptr<Source>> sources;
+    // Generations of the bank/AMX allocations that `sources` decode from. Every
+    // publication and retirement of `sources` goes through it.
+    AudioSourceAllocations sourceAllocations;
     std::unordered_map<PPCContext*,std::shared_ptr<Source>> producers;
     struct SourceFree {
         uint32_t sp,returnPC,account;
@@ -920,17 +924,17 @@ void EngineAudioOwners::observeHeap(uint32_t pc,PPCContext& ctx,uint8_t* base) {
                 call.allocate,call.release,call.caller,allocationGeneration});
             s.heapIndex.add(address,call.bytes);
         }
-        it->second.pop_back();if(it->second.empty()) s.heapCalls.erase(it);return;
+        // Each thread's call stack stays allocated between calls (no map node or vector
+        // churn per allocation); an empty stack means no observed call is open.
+        it->second.pop_back();return;
     }
     if(pc==0x8268DF90) {
         const auto it=s.heap.find(ctx.r4.u32);if(it==s.heap.end()) return;
         auto& allocation=it->second;
         require(!allocation.closing && ctx.r3.u32==allocation.manager && allocation.release==pc &&
                 PPC_LOAD_U32(ctx.r3.u32)==0x820B60B8,"Original allocation free kind/lifetime changed");
-        for(const auto& [key,source]:s.sources)
-            require((!source->bank || source->bank->generation!=allocation.generation) &&
-                    (!source->amx || source->amx->generation!=allocation.generation),
-                    "Original audio allocation free preceded resident source retirement");
+        require(!s.sourceAllocations.decodesFrom(allocation.generation),
+                "Original audio allocation free preceded resident source retirement");
         s.heapFrees[&ctx].push_back({ctx.r1.u32,allocation.address,ctx.r3.u32,allocation.generation});
         std::unique_lock heapLock(s.heapMutex);
         allocation.closing=true;return;
@@ -962,7 +966,7 @@ void EngineAudioOwners::observeHeap(uint32_t pc,PPCContext& ctx,uint8_t* base) {
         std::unique_lock heapLock(s.heapMutex);
         s.heapIndex.remove(allocation->first,allocation->second.extent);s.heap.erase(allocation);
     }
-    it->second.pop_back();if(it->second.empty()) s.heapFrees.erase(it);
+    it->second.pop_back();
 }
 uint64_t EngineAudioOwners::allocationGeneration(uint32_t address,uint32_t bytes) const {
     auto& s=*state;std::lock_guard lock(s.mutex);
@@ -1292,7 +1296,7 @@ void EngineAudioOwners::State::beginResident(PPCContext& ctx,uint8_t* base,Recor
     Audio::XmaSource::Segment segment;segment.sequence=source->sequence;segment.slot=j;
     segment.declaredFrames=source->samples;segment.continuity=Audio::XmaSource::Continuity::FreshContext;
     segment.layers=std::move(parsed.layers);segment.layers[0].skipFrames=384;
-    sources.emplace(source->key,source);
+    sourceAllocations.publish(sources,source->key,source);
     bool freshReused=false;
     try {
         producers.emplace(&ctx,source);n.queue[slot]=source;
@@ -1428,7 +1432,7 @@ void EngineAudioOwners::producerBegin(PPCContext& ctx,uint8_t* base) {
     for(auto& layer:segment.layers) layer.skipFrames=fresh?384:0;
     // Reserve host publication before codec mutation. After mutation an error
     // is terminal: the original claimed B and charged P must not be retried.
-    s.sources.emplace(b,source);
+    s.sourceAllocations.publish(s.sources,b,source);
     try {
         s.producers.emplace(&ctx,source);n.queue[slot]=source;
         const auto accepted=n.source->prepare(segment);
@@ -1802,7 +1806,7 @@ void EngineAudioOwners::sourceFreeEnd(uint32_t pc,PPCContext& ctx,uint8_t* base)
         const auto receipt=p->decoder->query(p->receipt);
         require(receipt.status==Audio::XmaSource::SourceStatus::Delivered || receipt.status==Audio::XmaSource::SourceStatus::Cancelled ||
                 receipt.status==Audio::XmaSource::SourceStatus::Failed,"Resident EXm0 retired an undelivered live receipt");
-        p->decoder->retire(p->receipt);s.sources.erase(p->key);s.frees.erase(it);
+        p->decoder->retire(p->receipt);s.sourceAllocations.retire(s.sources,p->key);s.frees.erase(it);
         if(receipt.status!=Audio::XmaSource::SourceStatus::Delivered || sampleSuccessLog(s.deliveredRetirementLogs))
             std::fprintf(stderr,"[NATIVE AUDIO RESIDENT RETIRED] R=%08X original=%08X status=%u; no reader callback or charge\n",
                 p->request,pc,unsigned(receipt.status));
@@ -1822,7 +1826,7 @@ void EngineAudioOwners::sourceFreeEnd(uint32_t pc,PPCContext& ctx,uint8_t* base)
     const auto receipt=p->decoder->query(p->receipt);
     require(receipt.status==Audio::XmaSource::SourceStatus::Delivered || receipt.status==Audio::XmaSource::SourceStatus::Cancelled ||
             receipt.status==Audio::XmaSource::SourceStatus::Failed,"EXm0 reader freed an undelivered live receipt");
-    p->decoder->retire(p->receipt);s.sources.erase(p->key);s.frees.erase(it);
+    p->decoder->retire(p->receipt);s.sourceAllocations.retire(s.sources,p->key);s.frees.erase(it);
 }
 size_t EngineAudioOwners::count() const {
     auto& s=*state;std::lock_guard lock(s.mutex);size_t count=0;for(const auto& [v,r]:s.records) count+=bool(r.native);return count;
