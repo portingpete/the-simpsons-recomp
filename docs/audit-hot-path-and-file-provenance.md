@@ -27,10 +27,15 @@ thousands of allocations. The cost was invisible to fixtures with a handful of t
 ## Allocation containment index (`runtime/heap_page_index.h`)
 
 4 KiB pages each list the allocations overlapping them (allocations of 16 MiB or
-more sit in a short side list). Maintained at the heap's only two mutation sites;
+more sit in a short side list). The pages sit in a two-level table (1,024 pages per
+chunk, no hashing) and keep their lists when they empty: a level-section swap frees and
+reallocates tens of thousands of blocks in one frame, and re-registering those pages
+allocates nothing (see `docs/frame-pacing.md`, "Other stalls found on the way").
+Maintained at the heap's only two mutation sites;
 `allocationSpan` keeps its rule (smallest containing extent) and its closing check.
 `OriginalHeapPageIndex` compares the index with a brute-force scan on page
 boundaries, the top of the address space, nested and large allocations, removals,
+page lists emptied and refilled across chunk boundaries,
 randomized overlapping layouts (equal-extent ties compared by extent, since a scan's
 pick among them was only iteration order), and 300,000 allocations: 400,000 lookups
 in 0.035 s. **Live: `spr_hub` 51.76 s with all 20 actions delivered, matching the

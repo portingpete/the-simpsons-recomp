@@ -194,8 +194,23 @@ void D3D11Texture2D::createImage() {
     if(desc_.MiscFlags&D3D11_RESOURCE_MISC_TEXTURECUBE) info.flags|=VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
     if(format_.typeless && !format_.depth() && !format_.stencil()) info.flags|=VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
     VmaAllocationCreateInfo allocation{};allocation.usage=VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-    if(info.usage&(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))
+    if(info.usage&(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
+        // Large targets keep dedicated memory. Small ones share pooled blocks:
+        // the corona query pass creates one every frame, and its dedicated
+        // vkAllocateMemory/vkFreeMemory pair cost about 3% of the game thread.
+        VkDeviceSize bytes=0;
+        for(uint32_t mip=0;mip<desc_.MipLevels;++mip)
+            bytes+=VkDeviceSize((mipWidth(mip)+format_.blockWidth-1)/format_.blockWidth)*
+                ((mipHeight(mip)+format_.blockHeight-1)/format_.blockHeight)*format_.blockBytes;
+        if(bytes*desc_.ArraySize<=(1u<<20)) {
+            allocation.pool=vulkan.smallImagePool(info);
+            // VMA refuses a pool for an image whose driver requires dedicated
+            // memory; such an image keeps its dedicated allocation.
+            if(vmaCreateImage(vulkan.allocator(),&info,&allocation,&image_,&allocation_,nullptr)==VK_SUCCESS) return;
+            image_=VK_NULL_HANDLE;allocation_=VK_NULL_HANDLE;allocation.pool=VK_NULL_HANDLE;
+        }
         allocation.flags|=VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+    }
     check(vmaCreateImage(vulkan.allocator(),&info,&allocation,&image_,&allocation_,nullptr),"texture creation");
 }
 void D3D11Texture2D::upload(const D3D11_SUBRESOURCE_DATA* initial) {

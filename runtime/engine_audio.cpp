@@ -8,8 +8,17 @@ Simpsons::Runtime& audioRuntime(uint8_t* base) {
 }
 std::shared_ptr<Simpsons::EngineAudioOwners> owners(uint8_t* base,bool create=false) {
     auto& rt=audioRuntime(base);std::lock_guard lock(rt.audioMutex);
-    if(create && !rt.engineAudio) rt.engineAudio=std::make_shared<Simpsons::EngineAudioOwners>(rt);
+    if(create && !rt.engineAudio) {
+        rt.engineAudio=std::make_shared<Simpsons::EngineAudioOwners>(rt);
+        rt.engineAudioView.store(rt.engineAudio.get(),std::memory_order_release);
+    }
     return rt.engineAudio;
+}
+// The allocation hooks run for every allocation and free of the observed original
+// allocator. Once the owner exists they use its published pointer (see Runtime::engineAudioView).
+Simpsons::EngineAudioOwners& heapOwners(uint8_t* base) {
+    if(auto* value=audioRuntime(base).engineAudioView.load(std::memory_order_acquire)) return *value;
+    return *owners(base,true);
 }
 auto requiredOwners(uint8_t* base) {
     auto value=owners(base);if(!value) throw Simpsons::Failure("Native EXm0 callback has no factory ownership");return value;
@@ -45,7 +54,7 @@ void SimpsonsNativeAudioSourceCancelBegin(PPCContext& ctx,uint8_t* base) {if(aut
 void SimpsonsNativeAudioSourceCancelEnd(PPCContext& ctx,uint8_t* base) {if(auto value=owners(base)) value->sourceFreeEnd(0x82342D60,ctx,base);}
 void SimpsonsNativeAudioResidentFreeEnd(PPCContext& ctx,uint8_t* base) {if(auto value=owners(base)) value->sourceFreeEnd(0x82341884,ctx,base);}
 void SimpsonsNativeAudioResidentCancelEnd(PPCContext& ctx,uint8_t* base) {if(auto value=owners(base)) value->sourceFreeEnd(0x82342D64,ctx,base);}
-#define AUDIO_HEAP(pc) void SimpsonsAudioHeap##pc(PPCContext& ctx,uint8_t* base) {owners(base,true)->observeHeap(0x##pc,ctx,base);}
+#define AUDIO_HEAP(pc) void SimpsonsAudioHeap##pc(PPCContext& ctx,uint8_t* base) {heapOwners(base).observeHeap(0x##pc,ctx,base);}
 AUDIO_HEAP(8268DDA0)
 AUDIO_HEAP(8268DED0)
 AUDIO_HEAP(8268DEF0)

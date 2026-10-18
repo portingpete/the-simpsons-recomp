@@ -54,6 +54,7 @@ Key mappings:
 | D3D11 | Vulkan |
 | --- | --- |
 | Draw-time state | One pipeline per shader pair, layout, blend, topology class and attachment formats (textures are single-sample), keyed by shader code and layout elements rather than object identity; everything else is dynamic state, re-emitted only when it changes |
+| Command recording | The game thread tracks D3D11 state and resolves every Vulkan call's arguments; a recording thread issues the `vkCmd*` calls into the batch's command buffer, and each submission waits for it |
 | Shader resources | One push-descriptor set per draw; vertex bindings at their register numbers, pixel bindings offset by 256 (b# → #, s# → 16+#, t# → 32+#) |
 | `DYNAMIC` and constant buffers | Host-visible slots renamed on `WRITE_DISCARD` or whole updates; earlier draws keep their storage |
 | Resource state | Every image stays in `GENERAL`; one full memory barrier separates rendering, copy and present phases |
@@ -82,6 +83,40 @@ when the device closes. A cache
 from another GPU, driver or cache UUID is ignored. `SIMPSONS_VULKAN_PIPELINE_CACHE=0`
 disables it; another value names the file. Character detail draws its smoothed
 meshes as R32 triangle lists, which the index-buffer path already supports.
+
+### Recording thread
+
+The D3D11 context emulation (state tracking, hazard rules, `Get*` round trips,
+pipeline lookup, descriptor and dynamic-state deduplication) runs on the game
+thread, but it no longer calls the driver. Each Vulkan command is recorded with
+its arguments already resolved (handles, offsets, copied descriptor data), and
+a recording thread (`CommandRecorder`, `renderer/vulkan/vulkan_device.h`) issues
+the `vkCmd*` calls into the batch's command buffer in order. `Flush`, `Present`
+and every other submission wait for it before ending the command buffer, so
+submission order, serials and resource retirement are unchanged; objects are
+destroyed only after the GPU finishes their batch, which the recording thread
+has always completed by then. The device also drains the thread before it
+checks for a lost device and before teardown, so a lost device's failed final
+submission never leaves calls running into a destroyed command pool, and the
+D3D11 device submits its pending batch before it destroys the pipelines,
+default sampler and query pools that batch uses. NVIDIA's
+D3D11 driver does the equivalent on its own thread. Calls travel through a single-producer stream of 1 MiB chunks; the
+thread spins briefly between bursts and otherwise sleeps in `WaitOnAddress`.
+`SIMPSONS_VULKAN_RECORD_THREAD=0` issues every call immediately on the game
+thread instead (same output; for A/B runs and debugging).
+
+Other game-thread savings:
+
+- Render and depth targets of up to 1 MiB are placed in pooled 16 MiB blocks
+  instead of dedicated allocations. The corona query pass creates a 64 x 8
+  target every frame, and its `vkAllocateMemory`/`vkFreeMemory` pair cost
+  about 3% of the game thread's busy time. A target whose driver requires
+  dedicated memory (VMA refuses a pool for it) keeps a dedicated allocation.
+- Command lists start and end with a cleared context state. A clear now resets
+  only the binding slots written since the previous clear instead of all ~1100
+  references (twice per list, about 70 lists per frame).
+- Descriptor pushes build their write structures only when the set differs from
+  the one already pushed, and no longer zero-fill 64-entry arrays per draw.
 
 ## Shaders
 
@@ -141,6 +176,8 @@ something different:
 | `SIMPSONS_VULKAN_DEVICE=<text>` | Uses the first suitable adapter whose name contains the text |
 | `SIMPSONS_VULKAN_TRACE=1` | Logs each draw's state and constant-buffer contents (fixture diagnosis; very slow) |
 | `SIMPSONS_VULKAN_PIPELINE_LOG=1` | Logs each created pipeline: running count, creation time, whether the driver cache supplied it (pipeline creation feedback), and its shaders |
+| `SIMPSONS_VULKAN_RECORD_THREAD=0` | Issues Vulkan commands on the game thread instead of the recording thread |
+| `SIMPSONS_VULKAN_STATS=1` | Every 600 frames, logs per-frame averages of draws, rendering scopes (and how many began because the attachments changed), clears, copies and updates, barriers, pipeline binds, descriptor pushes (and skipped duplicates), vertex-buffer binds, submissions and replayed command lists |
 
 Pipeline creation is reported to the stall profiler.
 
@@ -160,6 +197,17 @@ On 2026-10-14 all 567 tests passed with each renderer (RTX 5080, driver
 617.14). Probes that create their own devices create one of the selected API;
 D3D11 debug-layer probes and the geometry-shader stream-output observer in
 `NativeRigidMesh` run on D3D11 only.
+
+`VulkanDeviceConformance` also records a 20,000-draw batch (recorded calls cross
+the recording thread's chunks and must keep their order and constants) and
+checks that `ClearState` and `ExecuteCommandList` clear bindings in the highest
+slots, and tears down a healthy device and a device marked lost, each with
+20,000 recorded but unsubmitted draws; it passes with and without the recording
+thread. On 2026-10-17 the 92
+renderer test cases that link only the graphics library (64 executables; most
+of the remaining suite needs fixtures removed in the 2026-10-16 cleanup) passed
+on Vulkan with the recording thread, on Vulkan without it and on D3D11, apart
+from the eight `OriginalITXD*` cases, whose fixtures are among the removed ones.
 
 ## Measurements
 
@@ -181,13 +229,9 @@ Presented frames captured at the same moments were 99.6% bit-identical to
 D3D11; the remaining pixels were Homer's idle animation and the animated burp
 meter, which differ by the same amount between two D3D11 frames.
 
-The game is CPU-bound here. Vulkan's lower average comes from recording Vulkan
+The game is CPU-bound here. Vulkan's lower average came from recording Vulkan
 commands on the game thread, where NVIDIA's D3D11 driver moves that work to its
-own thread. Moving command recording to a worker thread is the next step for
-Vulkan throughput.
-The Im2D path's packed-target copies (a renderer design shared by both APIs)
-end and restart Vulkan rendering scopes and are the largest remaining
-driver cost.
+own thread; the recording thread (see Recording thread) now does the same.
 
 Display statistics could not be observed from the background benchmark window
 with either renderer (DWM reports none for a covered window), so the
@@ -200,6 +244,86 @@ a timing request while 32 are outstanding (the driver would otherwise reject
 the present), and a queue that stays full because frames never reach the
 display is reset by recreating the swap chain, after 2 s and then at doubling
 intervals up to 64 s.
+
+### Game-thread cost, 2026-10-17
+
+The player's settings: 3440 x 1440, SMAA, VSync, 120 FPS cap, Vulkan, on the
+first-mission wander route (RTX 5080, driver 617.14). A stack profile of the
+game thread (`SIMPSONS_STACK_SAMPLE`, pacing waits excluded) put 32% of its busy
+time inside the Vulkan backend. Most of it was driver time inside `vkCmd*`
+calls: beginning rendering scopes and the barrier before each (3.7%), image
+copies (2%), pipeline binds (1.3%), descriptor pushes and dynamic state. The
+rest was `vkAllocateMemory`/`vkFreeMemory` for the corona query's per-frame
+target (3.3%), queue submission (1.8%), descriptor-push bookkeeping (1.1%) and
+command-list state clears (1%).
+
+`SIMPSONS_VULKAN_STATS=1` on the same route, averaged over 600-frame windows:
+590 draws, 325 rendering scopes, 450 full barriers, 120 copies or updates, 300
+pipeline binds and 67 replayed command lists (3,400 recorded commands) per
+frame; the heaviest windows reach 1,500 draws and 1,100 scopes. Most scope
+changes come from the immediate-draw path's per-triangle snapshot (the original
+triangle is drawn into a packed copy of the target, then the blending draw into
+the target samples that copy) and from the Im2D path's packed-target copies.
+Both are renderer designs shared with D3D11, and each step reads what the
+previous one wrote, so the backend cannot merge those scopes; the recording
+thread takes their driver cost off the game thread instead.
+
+Stationary start view, uncapped with VSync off (same resolution and SMAA), so
+the game thread never waits for pacing; builds interleaved, window 20-60 s,
+peak system load below 22%:
+
+| Build | Runs | Average FPS | Frame time p50 | Game-thread CPU per frame |
+| --- | --- | --- | --- | --- |
+| Before (d99e832) | 3 | 114.7 | 8.72 ms | 8.13 ms |
+| Target pool, bounded clears, cheaper pushes | 2 | 123.3 | 8.10 ms | 7.75 ms |
+| Plus the recording thread | 2 | 132.7 | 7.54 ms | 7.09 ms |
+
+A later interleaved set on a busier desktop (before: 105.6 FPS, 8.62 ms)
+showed the same step (recording thread: 122.5 FPS, 7.60 ms). In that build each
+recorded call was published with a fenced store, which stalled on the cache
+line the spinning recording thread reads (1.6% of the game thread); a plain
+release store brought it to 0.1%, with the drain and shutdown waking the thread
+unconditionally.
+
+Wander route with the player's settings, 165 s, window from 20 s, interleaved,
+every run on the direct-flip path (release to flip 7.3 ms):
+
+| Batch | Renderer and build | Average FPS | Frames shown for one refresh | Frames taking three refreshes |
+| --- | --- | --- | --- | --- |
+| 1 | Vulkan before | 86.2, 84.1 | 62.2%, 57.1% | 151, 128 |
+| 1 | Vulkan with the recording thread (fenced publish) | 91.6, 89.7 | 70.1%, 65.9% | 183, 222 |
+| 1 | D3D11 | 96.6, 95.1 | 75.8%, 74.1% | 3, 2 |
+| 2 | Vulkan before | 76.5\*, 82.7\* | 43.0%\*, 58.4%\* | 170, 222 |
+| 2 | Vulkan final | 96.1\*, 92.9 | 74.6%\*, 70.8% | 104, 94 |
+| 2 | D3D11 | 87.3, 91.6 | 70.7%, 69.4% | 45, 1 |
+
+\* 4-6 s of outside load above 80% system CPU during the run. Single runs of
+this route vary by several points with the desktop, so compare within a batch.
+
+Presented frames of the start view captured at the same moments with and
+without these changes were 99.6% bit-identical (Homer's idle animation, the
+same difference as between two runs of one build), and all 32
+recording-payload readbacks were identical.
+
+Remaining gap. Every Vulkan run above has 94-222 frames that take three
+refreshes, before and after these changes, against 1-45 on D3D11 (1-3 without
+outside load), although the game thread's work now stays below 13 ms (p99).
+The snapshot bursts end every scope change with a full `ALL_COMMANDS` memory
+barrier; the GPU-side cost of those barriers is a likely cause, not measured
+here. Narrower barriers (attachment output to fragment-shader read) or
+reading the destination through `VK_KHR_dynamic_rendering_local_read` are the
+next levers, followed by moving queue submission (0.8% of the game thread) to
+the recording thread.
+
+Secondary command buffers for deferred command lists were assessed and not
+built. Replayed lists are 3.6% of the game thread including their draws;
+the renderer rewrites their constant buffers before every execution into
+renamed storage, so descriptors recorded at `FinishCommandList` would be stale;
+and a secondary command buffer runs inside one rendering scope with fixed
+attachment formats, which lists that switch targets cannot use. The recording
+thread already takes replayed lists' driver work off the game thread; what
+remains is the D3D11 state emulation, which secondary command buffers would not
+remove.
 
 ## Live check
 
