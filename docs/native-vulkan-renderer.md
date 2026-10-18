@@ -97,7 +97,9 @@ submission order, serials and resource retirement are unchanged; objects are
 destroyed only after the GPU finishes their batch, which the recording thread
 has always completed by then. The device also drains the thread before it
 checks for a lost device and before teardown, so a lost device's failed final
-submission never leaves calls running into a destroyed command pool. NVIDIA's
+submission never leaves calls running into a destroyed command pool, and the
+D3D11 device submits its pending batch before it destroys the pipelines,
+default sampler and query pools that batch uses. NVIDIA's
 D3D11 driver does the equivalent on its own thread. Calls travel through a single-producer stream of 1 MiB chunks; the
 thread spins briefly between bursts and otherwise sleeps in `WaitOnAddress`.
 `SIMPSONS_VULKAN_RECORD_THREAD=0` issues every call immediately on the game
@@ -199,8 +201,9 @@ D3D11 debug-layer probes and the geometry-shader stream-output observer in
 `VulkanDeviceConformance` also records a 20,000-draw batch (recorded calls cross
 the recording thread's chunks and must keep their order and constants) and
 checks that `ClearState` and `ExecuteCommandList` clear bindings in the highest
-slots, and tears down a device marked lost with 20,000 recorded but unsubmitted
-draws; it passes with and without the recording thread. On 2026-10-17 the 92
+slots, and tears down a healthy device and a device marked lost, each with
+20,000 recorded but unsubmitted draws; it passes with and without the recording
+thread. On 2026-10-17 the 92
 renderer test cases that link only the graphics library (64 executables; most
 of the remaining suite needs fixtures removed in the 2026-10-16 cleanup) passed
 on Vulkan with the recording thread, on Vulkan without it and on D3D11, apart

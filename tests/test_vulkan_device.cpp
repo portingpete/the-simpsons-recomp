@@ -3,7 +3,7 @@
 // color output, indexed strips with strip cuts, negative base vertices,
 // dynamic-buffer renaming, deferred command lists, texture sampling, state
 // clears, long batches recorded on the command-recording thread, and teardown
-// of a lost device with recorded calls that were never submitted.
+// of a healthy and a lost device with recorded calls that were never submitted.
 // Pixels are read back and compared exactly; no window is created.
 #include "renderer/vulkan/vulkan_device_factory.h"
 #include "renderer/vulkan/d3d11_vulkan.h"
@@ -419,6 +419,20 @@ void stateClear(Fixture& f) {
     for(bool b:bound()) need(b,"ExecuteCommandList(TRUE) lost a highest-slot binding");
     f.context->ClearState();
 }
+// A healthy device released with draws recorded and an occlusion query still
+// open: the last release flushes the draws and begins the query's next segment
+// in a new batch, which must be submitted before the query pools are destroyed
+// (SIMPSONS_VULKAN_VALIDATION=1 reports any use of a destroyed object).
+void pendingTeardown() {
+    Fixture f;
+    f.bindCommon(f.context.Get(),true);
+    f.context->IASetInputLayout(nullptr);f.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    f.context->VSSetShader(f.fullscreen.Get(),nullptr,0);f.context->PSSetShader(f.sampleShader.Get(),nullptr,0);
+    D3D11_QUERY_DESC qd{D3D11_QUERY_OCCLUSION,0};ComPtr<ID3D11Query> query;hr(f.device->CreateQuery(&qd,&query),"occlusion query");
+    f.context->Begin(query.Get());
+    for(UINT i=0;i<20000;++i) f.context->Draw(3,0);
+    // The fixture's references are the last ones: the device is destroyed here.
+}
 // A lost device whose last batch was recorded but never submitted: the
 // destructor's submission fails, and the recording thread must still be
 // drained before the command pool and device are destroyed.
@@ -457,6 +471,7 @@ int main() {
         hazards(fixture);
         longBatch(fixture);
         stateClear(fixture);
+        pendingTeardown();
         lostDeviceTeardown();
         std::printf("PASS Vulkan device conformance: %zu checks\n",checks);
         return 0;

@@ -51,6 +51,14 @@ D3D11Device::D3D11Device() {
     }
 }
 D3D11Device::~D3D11Device() {
+    // destroy() flushed at the last public release, but a query still open then
+    // began its next segment in a new batch. Submit that (ending the segment)
+    // while the query pools, pipelines and default sampler it may use still
+    // exist; the submission also drains the recording thread. A lost device
+    // fails it after the drain, and its unsubmitted batch is only destroyed.
+    if(immediate_ && vulkan_.recording()) {
+        try {immediate_->prepareSubmit();vulkan_.submit();} catch(...) {}
+    }
     vkDeviceWaitIdle(vulkan_.device());
     dxgi_.reset();
     pipelines_.reset();
